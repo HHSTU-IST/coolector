@@ -159,6 +159,7 @@ interface RoomSnapshot {
   hasReceiver: boolean
   queuedEvents: number
   uploadCount: number
+  uploads: RelayUploadSummary[]
   stats: {
     receiverConnections: number
     uploads: number

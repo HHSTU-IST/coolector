@@ -126,6 +126,14 @@ const isRelayUploading = ref(false)
 const relayUploadMessage = ref('')
 const relayUploadError = ref(false)
 
+interface RelayUploadResponse {
+  upload?: {
+    downloadUrl?: string
+  }
+  eventId?: string
+  error?: string
+}
+
 const collectionItem = computed(() => {
   if (!fileStore.selectedFile) return null
   return collectionStore.checkFileStatus(fileStore.selectedFile.name)
@@ -205,12 +213,14 @@ const uploadSelectedFileToRelay = async () => {
       body: requestBody
     })
 
-    const payload = await response.json().catch(() => null)
+    const payload = await response.json().catch(() => null) as RelayUploadResponse | null
     if (!response.ok) {
       throw new Error(payload?.error ?? 'HTTP 上传失败')
     }
 
-    relayUploadMessage.value = `已发送到房间 ${targetRoomId}`
+    relayUploadMessage.value = payload?.upload?.downloadUrl
+      ? `已发送到房间 ${targetRoomId}，服务端下载地址：${payload.upload.downloadUrl}`
+      : `已发送到房间 ${targetRoomId}`
   } catch (error) {
     relayUploadError.value = true
     relayUploadMessage.value = error instanceof Error ? error.message : 'HTTP 上传失败'

@@ -55,6 +55,23 @@ pnpm run dev
 
 应用将在 <http://localhost:5174> 启动
 
+### 快速启动前端和 Relay
+
+```bash
+pnpm start
+```
+
+默认同时启动：
+
+- 前端应用：<http://localhost:5174>
+- Relay Server：<http://localhost:8787>
+
+可通过环境变量自定义端口：
+
+```bash
+APP_PORT=3000 RELAY_PORT=9000 pnpm start
+```
+
 ### 构建项目
 
 ```bash
@@ -121,6 +138,19 @@ src/
 - [x] Receiver 长连接
 - [x] HTTP 上传
 - [x] Relay 内存转发
+- [x] 服务端保存并下载客户端上传文件
+
+Relay 收到客户端上传后会把文件保存到 `server/uploads/<roomId>/`，并返回可下载地址：
+
+```text
+GET /api/rooms/:roomId/uploads/:uploadId?download=1
+```
+
+也可以通过房间状态查看上传文件和下载链接：
+
+```bash
+curl http://localhost:8787/api/rooms/demo-room
+```
 
 ## 使用说明
 

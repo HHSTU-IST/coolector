@@ -1,11 +1,15 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { basename, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const HOST = process.env.HOST ?? '0.0.0.0'
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES ?? 10 * 1024 * 1024)
 const MAX_QUEUE_EVENTS = Number(process.env.MAX_QUEUE_EVENTS ?? 200)
 const ROOM_TTL_MS = Number(process.env.ROOM_TTL_MS ?? 6 * 60 * 60 * 1000)
+const UPLOAD_DIR = process.env.UPLOAD_DIR ?? fileURLToPath(new URL('./uploads', import.meta.url))
 
 const rooms = new Map()
 
@@ -80,6 +84,7 @@ function roomSnapshot(room, req) {
 }
 
 function uploadSummary(upload, req) {
+  const detailsUrl = `${baseUrl(req)}/api/rooms/${upload.roomId}/uploads/${upload.id}`
   const summary = {
     id: upload.id,
     name: upload.name,
@@ -91,7 +96,11 @@ function uploadSummary(upload, req) {
     previewText: upload.previewText ?? null,
     contentText: upload.text ?? null,
     contentBase64: upload.contentBase64,
-    downloadUrl: `${baseUrl(req)}/api/rooms/${upload.roomId}/uploads/${upload.id}`
+    detailsUrl,
+    downloadUrl: `${detailsUrl}?download=1`,
+    serverStored: Boolean(upload.storagePath),
+    storageFileName: upload.storageFileName ?? null,
+    storageRelativePath: upload.storagePath ? relative(UPLOAD_DIR, upload.storagePath) : null
   }
 
   return summary
@@ -177,6 +186,28 @@ function dispatchEvent(room, eventName, data) {
 function isTextMimeType(mimeType, fileName) {
   if (mimeType.startsWith('text/')) return true
   return /\.(txt|md|json|xml|csv|log|conf|ini|yaml|yml|env|toml|sql|js|ts|tsx|jsx|css|scss|html|htm)$/i.test(fileName)
+}
+
+function sanitizeStorageFileName(fileName) {
+  const safeBaseName = basename(String(fileName))
+    .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, '_')
+    .replace(/^\.+$/, 'file')
+    .trim()
+
+  return (safeBaseName || 'file').slice(0, 180)
+}
+
+async function persistUpload(upload) {
+  const storageFileName = `${upload.id}-${sanitizeStorageFileName(upload.name)}`
+  const roomUploadDir = join(UPLOAD_DIR, upload.roomId)
+  const storagePath = join(roomUploadDir, storageFileName)
+  const buffer = Buffer.from(upload.contentBase64, 'base64')
+
+  await mkdir(roomUploadDir, { recursive: true })
+  await writeFile(storagePath, buffer)
+
+  upload.storagePath = storagePath
+  upload.storageFileName = storageFileName
 }
 
 function parseUploadMetadata(req, bodyBuffer, headers, query) {
@@ -313,6 +344,8 @@ async function handleUpload(req, res, room, query) {
     previewText: metadata.text ? metadata.text.slice(0, 4096) : null
   }
 
+  await persistUpload(upload)
+
   room.uploads.set(upload.id, upload)
   room.stats.uploads += 1
   room.updatedAt = upload.uploadedAt
@@ -339,7 +372,9 @@ async function handleDownload(req, res, room, uploadId, query) {
 
   const download = query.get('download')
   if (download === '1') {
-    const buffer = Buffer.from(upload.contentBase64, 'base64')
+    const buffer = upload.storagePath
+      ? await readFile(upload.storagePath)
+      : Buffer.from(upload.contentBase64, 'base64')
     res.writeHead(200, {
       'Content-Type': upload.mimeType,
       'Content-Disposition': `attachment; filename="${upload.name.replaceAll('"', '\\"')}"`,
@@ -405,6 +440,7 @@ function handleRoomDelete(req, res, roomId) {
 
   closeReceiver(room)
   rooms.delete(room.id)
+  void rm(join(UPLOAD_DIR, room.id), { recursive: true, force: true })
   return writeJson(res, 200, {
     deleted: true,
     roomId: room.id
@@ -445,10 +481,12 @@ const server = createServer(async (req, res) => {
           roomState: 'GET /api/rooms/:roomId',
           receiverStream: 'GET /api/rooms/:roomId/events',
           upload: 'POST /api/rooms/:roomId/uploads',
+          uploadDetails: 'GET /api/rooms/:roomId/uploads/:uploadId',
           download: 'GET /api/rooms/:roomId/uploads/:uploadId?download=1',
           deleteRoom: 'DELETE /api/rooms/:roomId',
           healthz: 'GET /healthz'
-        }
+        },
+        uploadDir: UPLOAD_DIR
       })
       return
     }
@@ -480,10 +518,14 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    const room = getRoom(roomId)
+    let room = getRoom(roomId)
     if (!room && req.method !== 'POST') {
       writeJson(res, 404, { error: 'Room not found' })
       return
+    }
+
+    if (!room && req.method === 'POST' && subresource === 'uploads') {
+      room = createRoom(roomId).room
     }
 
     if (req.method === 'GET' && !subresource) {
