@@ -7,6 +7,7 @@ export interface FileInfo {
     content: string
     contentBase64?: string
     hasTextContent: boolean
+    filenameValidation: FileNameValidation
     size: number
     type: string
     lastModified: Date
@@ -17,9 +18,17 @@ export interface FileInfo {
     receivedAt?: Date
 }
 
+export interface FileNameValidation {
+    isValid: boolean
+    pattern: string
+    message: string
+}
+
 export const useFileStore = defineStore('file', () => {
     const files = ref<FileInfo[]>([])
     const selectedFile = ref<FileInfo | null>(null)
+    const filenamePattern = ref('^.+\\.(md|ipynb|docx)$')
+    const filenamePatternError = ref('')
     const textFileExtensions = new Set([
         'csv',
         'css',
@@ -46,6 +55,50 @@ export const useFileStore = defineStore('file', () => {
 
     const createFileId = () => {
         return globalThis.crypto?.randomUUID?.() ?? `file-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    }
+
+    const validateFileName = (fileName: string): FileNameValidation => {
+        const pattern = filenamePattern.value.trim()
+
+        if (!pattern) {
+            return {
+                isValid: true,
+                pattern,
+                message: '未设置文件名范式'
+            }
+        }
+
+        try {
+            const regex = new RegExp(pattern)
+            const isValid = regex.test(fileName)
+            filenamePatternError.value = ''
+
+            return {
+                isValid,
+                pattern,
+                message: isValid ? '文件名符合要求' : `文件名不符合范式 /${pattern}/`
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '正则表达式无效'
+            filenamePatternError.value = `文件名范式无效: ${message}`
+
+            return {
+                isValid: false,
+                pattern,
+                message: filenamePatternError.value
+            }
+        }
+    }
+
+    const revalidateFiles = () => {
+        files.value.forEach((file) => {
+            file.filenameValidation = validateFileName(file.name)
+        })
+    }
+
+    const setFilenamePattern = (pattern: string) => {
+        filenamePattern.value = pattern
+        revalidateFiles()
     }
 
     const getFileExtension = (fileName: string) => {
@@ -81,6 +134,7 @@ export const useFileStore = defineStore('file', () => {
                 content,
                 contentBase64: arrayBufferToBase64(buffer),
                 hasTextContent,
+                filenameValidation: validateFileName(file.name),
                 size: file.size,
                 type: file.type || 'application/octet-stream',
                 lastModified: new Date(file.lastModified),
@@ -112,6 +166,7 @@ export const useFileStore = defineStore('file', () => {
             existing.content = file.content
             existing.contentBase64 = file.contentBase64
             existing.hasTextContent = file.hasTextContent ?? true
+            existing.filenameValidation = validateFileName(file.name)
             existing.size = file.size
             existing.type = file.type
             existing.lastModified = normalizedLastModified
@@ -129,6 +184,7 @@ export const useFileStore = defineStore('file', () => {
             content: file.content,
             contentBase64: file.contentBase64,
             hasTextContent: file.hasTextContent ?? true,
+            filenameValidation: validateFileName(file.name),
             size: file.size,
             type: file.type,
             lastModified: normalizedLastModified,
@@ -163,8 +219,12 @@ export const useFileStore = defineStore('file', () => {
     return {
         files,
         selectedFile,
+        filenamePattern,
+        filenamePatternError,
         addFile,
         upsertRelayFile,
+        setFilenamePattern,
+        validateFileName,
         removeFile,
         selectFile,
         clearFiles

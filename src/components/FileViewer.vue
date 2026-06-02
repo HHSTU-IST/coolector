@@ -10,6 +10,12 @@
               类型: {{ fileStore.selectedFile.type || '文本文件' }} •
               修改时间: {{ formatDate(fileStore.selectedFile.lastModified) }}
             </p>
+            <p
+              class="mt-2 text-sm"
+              :class="fileStore.selectedFile.filenameValidation.isValid ? 'text-green-600' : 'text-red-600'"
+            >
+              {{ fileStore.selectedFile.filenameValidation.message }}
+            </p>
           </div>
           <button
             @click="fileStore.selectedFile = null"

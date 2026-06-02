@@ -326,7 +326,9 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
       downloadUrl: upload.downloadUrl
     })
 
-    const collectionItem = collectionStore.checkFileStatus(file.name)
+    const collectionItem = file.filenameValidation.isValid
+      ? collectionStore.checkFileStatus(file.name)
+      : null
     if (collectionItem && collectionItem.status !== 'collected') {
       collectionStore.updateItemStatus(collectionItem.id, 'collected')
     }
@@ -353,7 +355,9 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
       downloadUrl: upload.downloadUrl
     })
 
-    const collectionItem = collectionStore.checkFileStatus(file.name)
+    const collectionItem = file.filenameValidation.isValid
+      ? collectionStore.checkFileStatus(file.name)
+      : null
     if (collectionItem && collectionItem.status !== 'collected') {
       collectionStore.updateItemStatus(collectionItem.id, 'collected')
     }
