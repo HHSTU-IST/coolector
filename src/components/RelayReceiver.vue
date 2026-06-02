@@ -1,5 +1,5 @@
 <template>
-  <div class="w-full max-w-4xl mx-auto p-6">
+  <div class="w-full">
     <div class="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
       <div class="p-6 border-b border-gray-200">
         <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">

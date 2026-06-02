@@ -1,5 +1,5 @@
 <template>
-  <div v-if="collectionStore.collectionList.length > 0" class="w-full max-w-4xl mx-auto p-6">
+  <div v-if="collectionStore.collectionList.length > 0" class="w-full">
     <div class="bg-white rounded-lg shadow-sm border border-gray-200">
       <div class="p-6 border-b border-gray-200">
         <div class="flex items-center justify-between">

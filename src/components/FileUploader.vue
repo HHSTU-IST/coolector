@@ -1,5 +1,5 @@
 <template>
-  <div class="w-full max-w-2xl mx-auto p-6">
+  <div class="w-full">
     <div class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-gray-400 transition-colors">
       <div
         class="cursor-pointer"
