@@ -77,6 +77,9 @@
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-gray-900 truncate">{{ file.name }}</p>
               <p class="text-xs text-gray-500">{{ formatFileSize(file.size) }} • {{ file.type || '文本文件' }}</p>
+              <p class="mt-1 text-xs text-gray-500">
+                {{ formatExtractedInfo(file) }}
+              </p>
               <p
                 class="mt-1 text-xs"
                 :class="file.filenameValidation.isValid ? 'text-green-600' : 'text-red-600'"
@@ -146,6 +149,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useFileStore } from '../stores/file'
+import type { FileInfo } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 
 const fileStore = useFileStore()
@@ -160,6 +164,14 @@ const formatFileSize = (bytes: number): string => {
   const sizes = ['Bytes', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+const formatExtractedInfo = (file: FileInfo) => {
+  const studentId = file.metadata.studentId ? `学号: ${file.metadata.studentId}` : '学号: 未识别'
+  const studentName = file.metadata.studentName ? `姓名: ${file.metadata.studentName}` : '姓名: 未识别'
+  const extension = file.metadata.extension ? `扩展名: .${file.metadata.extension}` : '扩展名: 无'
+
+  return `${studentId} • ${studentName} • ${extension}`
 }
 
 const markCollectionItemCollected = (fileName: string) => {

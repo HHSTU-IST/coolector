@@ -51,6 +51,17 @@
           </div>
         </div>
 
+        <div class="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div
+            v-for="item in metadataItems"
+            :key="item.label"
+            class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+          >
+            <p class="text-xs text-gray-500">{{ item.label }}</p>
+            <p class="mt-1 truncate text-sm font-medium text-gray-900">{{ item.value }}</p>
+          </div>
+        </div>
+
         <div class="bg-gray-50 rounded-lg p-4 max-h-96 overflow-auto">
           <pre
             class="text-sm whitespace-pre-wrap"
@@ -118,6 +129,24 @@ const relayUploadError = ref(false)
 const collectionItem = computed(() => {
   if (!fileStore.selectedFile) return null
   return collectionStore.checkFileStatus(fileStore.selectedFile.name)
+})
+
+const metadataItems = computed(() => {
+  if (!fileStore.selectedFile) return []
+
+  const { metadata } = fileStore.selectedFile
+
+  return [
+    { label: '文件大小', value: formatFileSize(metadata.size) },
+    { label: '文件类型', value: metadata.mimeType },
+    { label: '扩展名', value: metadata.extension ? `.${metadata.extension}` : '无' },
+    { label: '应用记录时间', value: formatDate(metadata.createdAt) },
+    { label: '修改时间', value: formatDate(metadata.lastModified) },
+    { label: '内容类型', value: metadata.isTextContent ? '文本，可预览' : '二进制，仅保留内容' },
+    { label: '学号', value: metadata.studentId ?? '未识别' },
+    { label: '姓名', value: metadata.studentName ?? '未识别' },
+    { label: '文件来源', value: fileStore.selectedFile.source === 'relay' ? 'Relay 接收' : '本地上传' }
+  ]
 })
 
 const formatFileSize = (bytes: number): string => {

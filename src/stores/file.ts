@@ -8,6 +8,7 @@ export interface FileInfo {
     contentBase64?: string
     hasTextContent: boolean
     filenameValidation: FileNameValidation
+    metadata: FileMetadata
     size: number
     type: string
     lastModified: Date
@@ -22,6 +23,18 @@ export interface FileNameValidation {
     isValid: boolean
     pattern: string
     message: string
+}
+
+export interface FileMetadata {
+    baseName: string
+    extension: string
+    size: number
+    mimeType: string
+    createdAt: Date
+    lastModified: Date
+    isTextContent: boolean
+    studentId: string | null
+    studentName: string | null
 }
 
 export const useFileStore = defineStore('file', () => {
@@ -106,8 +119,75 @@ export const useFileStore = defineStore('file', () => {
         return lastDotIndex === -1 ? '' : fileName.slice(lastDotIndex + 1).toLowerCase()
     }
 
+    const getFileBaseName = (fileName: string) => {
+        const lastDotIndex = fileName.lastIndexOf('.')
+        return lastDotIndex === -1 ? fileName : fileName.slice(0, lastDotIndex)
+    }
+
+    const cleanStudentName = (value: string | undefined) => {
+        if (!value) return null
+
+        const cleaned = value
+            .replace(/[_-]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+
+        return cleaned || null
+    }
+
+    const extractStudentInfo = (fileName: string) => {
+        const baseName = getFileBaseName(fileName)
+        const normalized = baseName.replace(/[()[\]{}【】（）]/g, ' ')
+
+        const idFirstMatch = normalized.match(/(?<studentId>\d{6,12})[\s_-]+(?<studentName>[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z\s_-]{1,40})/)
+        if (idFirstMatch?.groups) {
+            return {
+                studentId: idFirstMatch.groups.studentId,
+                studentName: cleanStudentName(idFirstMatch.groups.studentName)
+            }
+        }
+
+        const nameFirstMatch = normalized.match(/(?<studentName>[\u4e00-\u9fa5]{2,6}|[A-Za-z][A-Za-z\s_-]{1,40})[\s_-]+(?<studentId>\d{6,12})/)
+        if (nameFirstMatch?.groups) {
+            return {
+                studentId: nameFirstMatch.groups.studentId,
+                studentName: cleanStudentName(nameFirstMatch.groups.studentName)
+            }
+        }
+
+        const studentIdMatch = normalized.match(/\d{6,12}/)
+
+        return {
+            studentId: studentIdMatch?.[0] ?? null,
+            studentName: null
+        }
+    }
+
     const isTextFile = (file: File) => {
         return file.type.startsWith('text/') || textFileExtensions.has(getFileExtension(file.name))
+    }
+
+    const extractFileMetadata = (file: {
+        name: string
+        size: number
+        type: string
+        lastModified: Date
+        hasTextContent: boolean
+        createdAt?: Date
+    }): FileMetadata => {
+        const studentInfo = extractStudentInfo(file.name)
+
+        return {
+            baseName: getFileBaseName(file.name),
+            extension: getFileExtension(file.name),
+            size: file.size,
+            mimeType: file.type || 'application/octet-stream',
+            createdAt: file.createdAt ?? new Date(),
+            lastModified: file.lastModified,
+            isTextContent: file.hasTextContent,
+            studentId: studentInfo.studentId,
+            studentName: studentInfo.studentName
+        }
     }
 
     const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
@@ -135,6 +215,13 @@ export const useFileStore = defineStore('file', () => {
                 contentBase64: arrayBufferToBase64(buffer),
                 hasTextContent,
                 filenameValidation: validateFileName(file.name),
+                metadata: extractFileMetadata({
+                    name: file.name,
+                    size: file.size,
+                    type: file.type || 'application/octet-stream',
+                    lastModified: new Date(file.lastModified),
+                    hasTextContent
+                }),
                 size: file.size,
                 type: file.type || 'application/octet-stream',
                 lastModified: new Date(file.lastModified),
@@ -160,13 +247,23 @@ export const useFileStore = defineStore('file', () => {
     }) => {
         const existing = files.value.find(item => item.relayUploadId === file.uploadId)
         const normalizedLastModified = file.lastModified instanceof Date ? file.lastModified : new Date(file.lastModified)
+        const receivedAt = new Date()
+        const hasTextContent = file.hasTextContent ?? true
 
         if (existing) {
             existing.name = file.name
             existing.content = file.content
             existing.contentBase64 = file.contentBase64
-            existing.hasTextContent = file.hasTextContent ?? true
+            existing.hasTextContent = hasTextContent
             existing.filenameValidation = validateFileName(file.name)
+            existing.metadata = extractFileMetadata({
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                lastModified: normalizedLastModified,
+                hasTextContent,
+                createdAt: existing.metadata.createdAt
+            })
             existing.size = file.size
             existing.type = file.type
             existing.lastModified = normalizedLastModified
@@ -174,7 +271,7 @@ export const useFileStore = defineStore('file', () => {
             existing.relayRoomId = file.roomId
             existing.relayUploadId = file.uploadId
             existing.downloadUrl = file.downloadUrl
-            existing.receivedAt = new Date()
+            existing.receivedAt = receivedAt
             return existing
         }
 
@@ -183,8 +280,16 @@ export const useFileStore = defineStore('file', () => {
             name: file.name,
             content: file.content,
             contentBase64: file.contentBase64,
-            hasTextContent: file.hasTextContent ?? true,
+            hasTextContent,
             filenameValidation: validateFileName(file.name),
+            metadata: extractFileMetadata({
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                lastModified: normalizedLastModified,
+                hasTextContent,
+                createdAt: receivedAt
+            }),
             size: file.size,
             type: file.type,
             lastModified: normalizedLastModified,
@@ -192,7 +297,7 @@ export const useFileStore = defineStore('file', () => {
             relayRoomId: file.roomId,
             relayUploadId: file.uploadId,
             downloadUrl: file.downloadUrl,
-            receivedAt: new Date()
+            receivedAt
         }
 
         files.value.unshift(fileInfo)
@@ -225,6 +330,7 @@ export const useFileStore = defineStore('file', () => {
         upsertRelayFile,
         setFilenamePattern,
         validateFileName,
+        extractFileMetadata,
         removeFile,
         selectFile,
         clearFiles
