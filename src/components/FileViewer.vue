@@ -1,10 +1,10 @@
 <template>
   <div v-if="fileStore.selectedFile" class="w-full">
     <div class="bg-white rounded-lg shadow-sm border border-gray-200">
-      <div class="p-6 border-b border-gray-200">
-        <div class="flex items-center justify-between">
-          <div>
-            <h2 class="text-xl font-semibold text-gray-900">{{ fileStore.selectedFile.name }}</h2>
+      <div class="border-b border-gray-200 p-4 sm:p-6">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <h2 class="break-words text-lg font-semibold text-gray-900 sm:text-xl">{{ fileStore.selectedFile.name }}</h2>
             <p class="text-sm text-gray-500 mt-1">
               大小: {{ formatFileSize(fileStore.selectedFile.size) }} •
               类型: {{ fileStore.selectedFile.type || '文本文件' }} •
@@ -19,7 +19,7 @@
           </div>
           <button
             @click="fileStore.selectedFile = null"
-            class="text-gray-400 hover:text-gray-600"
+            class="shrink-0 rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
           >
             <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -28,21 +28,21 @@
         </div>
       </div>
 
-      <div class="p-6">
+      <div class="p-4 sm:p-6">
         <div class="mb-4">
-          <div class="flex items-center justify-between mb-2">
+          <div class="mb-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h3 class="text-sm font-medium text-gray-900">文件内容</h3>
-            <div class="flex items-center space-x-2">
+            <div class="flex flex-wrap items-center gap-2">
               <button
                 @click="copyContent"
-                class="text-sm text-indigo-600 hover:text-indigo-900 font-medium"
+                class="rounded-md px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:text-indigo-900"
               >
                 复制内容
               </button>
               <button
                 v-if="collectionItem"
                 @click="markAsCollected"
-                class="text-sm text-green-600 hover:text-green-900 font-medium"
+                class="rounded-md px-2 py-1 text-sm font-medium text-green-600 hover:bg-green-50 hover:text-green-900"
                 :disabled="collectionItem.status === 'collected'"
               >
                 {{ collectionItem.status === 'collected' ? '已收集' : '标记为已收集' }}
@@ -58,13 +58,13 @@
             class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
           >
             <p class="text-xs text-gray-500">{{ item.label }}</p>
-            <p class="mt-1 truncate text-sm font-medium text-gray-900">{{ item.value }}</p>
+            <p class="mt-1 break-words text-sm font-medium text-gray-900">{{ item.value }}</p>
           </div>
         </div>
 
-        <div class="bg-gray-50 rounded-lg p-4 max-h-96 overflow-auto">
+        <div class="max-h-80 overflow-auto rounded-lg bg-gray-50 p-3 sm:max-h-96 sm:p-4">
           <pre
-            class="text-sm whitespace-pre-wrap"
+            class="whitespace-pre-wrap break-words text-sm"
             :class="fileStore.selectedFile.hasTextContent ? 'text-gray-800 font-mono' : 'text-gray-600'"
           >{{ fileStore.selectedFile.content }}</pre>
         </div>
@@ -95,7 +95,7 @@
             <button
               @click="uploadSelectedFileToRelay"
               :disabled="isRelayUploading"
-              class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+              class="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto"
             >
               {{ isRelayUploading ? '上传中' : 'HTTP 上传到 Relay' }}
             </button>

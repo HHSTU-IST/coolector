@@ -1,7 +1,7 @@
 <template>
   <div class="w-full">
     <div class="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-      <div class="p-6 border-b border-gray-200">
+      <div class="border-b border-gray-200 p-4 sm:p-6">
         <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
             <p class="text-xs font-semibold uppercase tracking-[0.24em] text-indigo-500">Receiver Long Connection</p>
@@ -23,7 +23,7 @@
         </div>
       </div>
 
-      <div class="p-6 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+      <div class="grid gap-5 p-4 sm:p-6 lg:grid-cols-[1.2fr_0.8fr] lg:gap-6">
         <form class="space-y-4" @submit.prevent="connect">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-2">Relay 地址</label>
@@ -45,7 +45,7 @@
             >
           </div>
 
-          <div class="flex flex-wrap gap-3">
+          <div class="grid gap-3 sm:flex sm:flex-wrap">
             <button
               type="submit"
               :disabled="connectionState === 'connecting'"

@@ -1,6 +1,6 @@
 <template>
   <div class="w-full">
-    <div class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-gray-400 transition-colors">
+    <div class="rounded-lg border-2 border-dashed border-gray-300 p-5 text-center transition-colors hover:border-gray-400 sm:p-8">
       <div
         class="cursor-pointer"
         @click="triggerFileInput"
@@ -32,7 +32,7 @@
     </div>
 
     <!-- 文件名校验 -->
-    <div class="mt-6 rounded-lg border border-gray-200 bg-white p-4 text-left">
+    <div class="mt-5 rounded-lg border border-gray-200 bg-white p-4 text-left sm:mt-6">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h3 class="text-sm font-semibold text-gray-900">文件名校验</h3>
@@ -66,9 +66,9 @@
         <div
           v-for="(file, index) in fileStore.files"
           :key="index"
-          class="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+          class="flex flex-col gap-3 rounded-lg bg-gray-50 p-3 transition-colors hover:bg-gray-100 sm:flex-row sm:items-center sm:justify-between"
         >
-          <div class="flex items-center space-x-3">
+          <div class="flex min-w-0 items-start space-x-3 sm:items-center">
             <div class="flex-shrink-0">
               <svg class="h-8 w-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -88,7 +88,7 @@
               </p>
             </div>
           </div>
-          <div class="flex items-center space-x-2">
+          <div class="flex flex-wrap items-center gap-2 sm:justify-end">
             <span
               class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
               :class="file.filenameValidation.isValid ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'"
@@ -97,13 +97,13 @@
             </span>
             <button
               @click="fileStore.selectFile(file)"
-              class="text-indigo-600 hover:text-indigo-900 text-sm font-medium"
+              class="rounded-md px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:text-indigo-900"
             >
               查看
             </button>
             <button
               @click="fileStore.removeFile(index)"
-              class="text-red-600 hover:text-red-900 text-sm font-medium"
+              class="rounded-md px-2 py-1 text-sm font-medium text-red-600 hover:bg-red-50 hover:text-red-900"
             >
               删除
             </button>
@@ -115,7 +115,7 @@
     <!-- 收集名单上传 -->
     <div class="mt-8">
       <h3 class="text-lg font-medium text-gray-900 mb-4">收集名单</h3>
-      <div class="border-2 border-dashed border-blue-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors">
+      <div class="rounded-lg border-2 border-dashed border-blue-300 p-5 text-center transition-colors hover:border-blue-400 sm:p-6">
         <div
           class="cursor-pointer"
           @click="triggerCollectionInput"

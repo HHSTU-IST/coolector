@@ -1,10 +1,10 @@
 <template>
   <div v-if="collectionStore.collectionList.length > 0" class="w-full">
     <div class="bg-white rounded-lg shadow-sm border border-gray-200">
-      <div class="p-6 border-b border-gray-200">
-        <div class="flex items-center justify-between">
+      <div class="border-b border-gray-200 p-4 sm:p-6">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 class="text-xl font-semibold text-gray-900">收集状态</h2>
-          <div class="flex items-center space-x-4">
+          <div class="flex flex-wrap items-center gap-3">
             <span class="text-sm text-gray-500">
               进度: {{ progress.percentage }}%
             </span>
@@ -19,7 +19,7 @@
 
         <!-- 进度条 -->
         <div class="mt-4">
-          <div class="flex justify-between text-sm text-gray-600 mb-2">
+          <div class="mb-2 grid grid-cols-2 gap-2 text-sm text-gray-600 sm:flex sm:justify-between">
             <span>总文件: {{ progress.total }}</span>
             <span>已收集: {{ progress.collected }}</span>
             <span>待收集: {{ progress.pending }}</span>
@@ -35,14 +35,14 @@
       </div>
 
       <!-- 文件列表 -->
-      <div class="p-6">
+      <div class="p-4 sm:p-6">
         <div class="space-y-3">
           <div
             v-for="item in collectionStore.collectionList"
             :key="item.id"
-            class="flex items-center justify-between p-4 border border-gray-200 rounded-lg hover:bg-gray-50"
+            class="flex flex-col gap-3 rounded-lg border border-gray-200 p-4 hover:bg-gray-50 sm:flex-row sm:items-center sm:justify-between"
           >
-            <div class="flex items-center space-x-3">
+            <div class="flex min-w-0 items-start space-x-3 sm:items-center">
               <div class="flex-shrink-0">
                 <div
                   class="w-3 h-3 rounded-full"
@@ -58,7 +58,7 @@
                 <p class="text-xs text-gray-500">{{ item.description }}</p>
               </div>
             </div>
-            <div class="flex items-center space-x-2">
+            <div class="flex flex-wrap items-center gap-2 sm:justify-end">
               <span
                 class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
                 :class="{
