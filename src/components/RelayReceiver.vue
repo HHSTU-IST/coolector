@@ -316,6 +316,8 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
     const file = fileStore.upsertRelayFile({
       name: upload.name,
       content,
+      contentBase64: upload.contentBase64,
+      hasTextContent: upload.contentText !== null || Boolean(upload.previewText),
       size: upload.size,
       type: upload.mimeType,
       lastModified: upload.lastModified,
@@ -341,6 +343,8 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
     const file = fileStore.upsertRelayFile({
       name: upload.name,
       content: fallbackContent,
+      contentBase64: upload.contentBase64,
+      hasTextContent: Boolean(fallbackContent),
       size: upload.size,
       type: upload.mimeType,
       lastModified: upload.lastModified,

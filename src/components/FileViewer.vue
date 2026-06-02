@@ -46,7 +46,10 @@
         </div>
 
         <div class="bg-gray-50 rounded-lg p-4 max-h-96 overflow-auto">
-          <pre class="text-sm text-gray-800 whitespace-pre-wrap font-mono">{{ fileStore.selectedFile.content }}</pre>
+          <pre
+            class="text-sm whitespace-pre-wrap"
+            :class="fileStore.selectedFile.hasTextContent ? 'text-gray-800 font-mono' : 'text-gray-600'"
+          >{{ fileStore.selectedFile.content }}</pre>
         </div>
 
         <div class="mt-6 border-t border-gray-200 pt-6">
@@ -147,15 +150,24 @@ const uploadSelectedFileToRelay = async () => {
     relayUploadMessage.value = '正在通过 HTTP 上传到 Relay...'
 
     const selectedFile = fileStore.selectedFile
+    const requestBody = selectedFile.hasTextContent
+      ? selectedFile.content
+      : JSON.stringify({
+        name: selectedFile.name,
+        mimeType: selectedFile.type || 'application/octet-stream',
+        lastModified: selectedFile.lastModified.toISOString(),
+        contentBase64: selectedFile.contentBase64
+      })
+
     const response = await fetch(`${baseUrl}/api/rooms/${encodeURIComponent(targetRoomId)}/uploads`, {
       method: 'POST',
       headers: {
-        'Content-Type': selectedFile.type || 'text/plain',
+        'Content-Type': selectedFile.hasTextContent ? selectedFile.type || 'text/plain' : 'application/json',
         'X-Relay-Filename': selectedFile.name,
-        'X-Relay-Mime-Type': selectedFile.type || 'text/plain',
+        'X-Relay-Mime-Type': selectedFile.type || 'application/octet-stream',
         'X-Relay-Last-Modified': selectedFile.lastModified.toISOString()
       },
-      body: selectedFile.content
+      body: requestBody
     })
 
     const payload = await response.json().catch(() => null)

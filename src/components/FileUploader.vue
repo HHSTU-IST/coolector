@@ -25,8 +25,8 @@
           type="file"
           multiple
           class="hidden"
+          @click.stop
           @change="handleFileSelect"
-          accept="text/*,.txt,.md,.json,.xml,.csv,.log,.conf,.config,.ini,.yaml,.yml"
         >
       </div>
     </div>
@@ -75,6 +75,7 @@
       <div class="border-2 border-dashed border-blue-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors">
         <div
           class="cursor-pointer"
+          @click="triggerCollectionInput"
           @drop.prevent="handleCollectionDrop"
           @dragover.prevent="handleDragOver"
           @dragleave.prevent="handleDragLeave"
@@ -92,6 +93,7 @@
             ref="collectionInput"
             type="file"
             class="hidden"
+            @click.stop
             @change="handleCollectionSelect"
             accept=".txt,.csv,.list"
           >
@@ -109,6 +111,7 @@ import { useCollectionStore } from '../stores/collection'
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
 const fileInput = ref<HTMLInputElement>()
+const collectionInput = ref<HTMLInputElement>()
 
 const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return '0 Bytes'
@@ -118,13 +121,31 @@ const formatFileSize = (bytes: number): string => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-const handleFileSelect = (event: Event) => {
+const markCollectionItemCollected = (fileName: string) => {
+  const item = collectionStore.checkFileStatus(fileName)
+  if (item && item.status !== 'collected') {
+    collectionStore.updateItemStatus(item.id, 'collected')
+  }
+}
+
+const uploadFiles = async (files: FileList | File[]) => {
+  for (const file of Array.from(files)) {
+    try {
+      const fileInfo = await fileStore.addFile(file)
+      markCollectionItemCollected(fileInfo.name)
+    } catch (error) {
+      console.error('文件上传失败:', error)
+      alert(`文件上传失败: ${file.name}`)
+    }
+  }
+}
+
+const handleFileSelect = async (event: Event) => {
   const target = event.target as HTMLInputElement
   const files = target.files
   if (files) {
-    Array.from(files).forEach(file => {
-      fileStore.addFile(file)
-    })
+    await uploadFiles(files)
+    target.value = ''
   }
 }
 
@@ -134,27 +155,37 @@ const handleCollectionSelect = async (event: Event) => {
   if (file) {
     try {
       await collectionStore.loadCollectionList(file)
+      fileStore.files.forEach(fileInfo => {
+        markCollectionItemCollected(fileInfo.name)
+      })
       console.log('收集名单加载成功')
     } catch (error) {
       console.error('收集名单加载失败:', error)
       alert('收集名单加载失败，请检查文件格式')
     }
+    target.value = ''
   }
 }
 
-const handleDrop = (event: DragEvent) => {
+const handleDrop = async (event: DragEvent) => {
   const files = event.dataTransfer?.files
   if (files) {
-    Array.from(files).forEach(file => {
-      fileStore.addFile(file)
-    })
+    await uploadFiles(files)
   }
 }
 
-const handleCollectionDrop = (event: DragEvent) => {
+const handleCollectionDrop = async (event: DragEvent) => {
   const files = event.dataTransfer?.files
   if (files && files.length > 0) {
-    collectionStore.loadCollectionList(files[0])
+    try {
+      await collectionStore.loadCollectionList(files[0])
+      fileStore.files.forEach(fileInfo => {
+        markCollectionItemCollected(fileInfo.name)
+      })
+    } catch (error) {
+      console.error('收集名单加载失败:', error)
+      alert('收集名单加载失败，请检查文件格式')
+    }
   }
 }
 
@@ -168,6 +199,10 @@ const handleDragLeave = (event: DragEvent) => {
 
 const triggerFileInput = () => {
   fileInput.value?.click()
+}
+
+const triggerCollectionInput = () => {
+  collectionInput.value?.click()
 }
 
 

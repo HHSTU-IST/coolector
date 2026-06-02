@@ -5,28 +5,32 @@
 ![pinia](https://img.shields.io/badge/pinia-3.0+-ff6b6b.svg)
 ![vite](https://img.shields.io/badge/vite-8.0+-yellow.svg)
 ![tailwind](https://img.shields.io/badge/tailwind-4.0+-38bdf8.svg)
-![code size](https://img.shields.io/github/languages/code-size/HHSTU-IST/coolector.svg)
-![repo size](https://img.shields.io/github/repo-size/HHSTU-IST/coolector.svg)
 
-Coolector 是一个现代化的文件收集器，基于 Vue3 + TypeScript + Vite 构建。
+Coolector 是一个现代化的文件收集器。
 
 ## 主要功能
 
-- ✅ 支持任意格式的文本文件上传
-- ✅ 拖拽上传和点击上传
-- ✅ 读取收集名单并检查提交状态
-- ✅ 自动化文件信息读取
-- ✅ 实时收集进度跟踪
-- ✅ 文件内容预览和复制
-- ✅ 响应式设计，支持移动端
+- [x] 文件上传
+  - [x] 支持 .md, .ipynb, .docx
+  - [x] 支持批量上传
+- [x] 拖拽上传和点击上传
+- [ ] 文件名校验
+  - [ ] 自定义文件名范式
+  - [ ] 校验文件名是否符合要求
+- [ ] 自动化文件信息读取
+  - [ ] 文件大小、类型、创建时间
+  - [ ] 从文件名中提取学号、姓名等信息
+- [x] 读取收集名单并检查提交状态
+- [ ] 文件内容预览和复制
+- [ ] 响应式设计，支持网页端和移动端
 
 ## 技术栈
 
 - **前端框架**: Vue.js 3.5 (Composition API)
-- **编程语言**: TypeScript 5.7
-- **状态管理**: Pinia 3.0
-- **构建工具**: Vite 8.0
-- **样式框架**: Tailwind CSS 4.0
+- **编程语言**: TypeScript 5.7+
+- **状态管理**: Pinia 3.0+
+- **构建工具**: Vite 8.0+
+- **样式框架**: Tailwind CSS 4.0+
 - **UI 组件**: 自定义组件 + Tailwind 工具类
 
 ## 开发指南
