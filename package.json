@@ -17,7 +17,6 @@
     "relay": "node server/relay-server.js"
   },
   "dependencies": {
-    "@pinia/nuxt": "^0.11.3",
     "@tailwindcss/forms": "^0.5.11",
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/typography": "^0.5.20",

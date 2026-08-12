@@ -192,7 +192,6 @@ const statusMessage = ref('尚未建立连接')
 const roomState = ref<RoomSnapshot | null>(null)
 const recentEvents = ref<LogEntry[]>([])
 const eventSource = ref<EventSource | null>(null)
-const streamUrl = ref('')
 const stateUrl = ref('')
 
 const statusLabel = computed(() => {
@@ -388,7 +387,6 @@ const connect = async () => {
     }
 
     const room = await ensureRoom(baseUrl, targetRoomId)
-    streamUrl.value = room.streamUrl
     stateUrl.value = room.stateUrl
     roomId.value = room.roomId
 
