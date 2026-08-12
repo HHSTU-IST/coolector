@@ -8,11 +8,11 @@ const count = ref(0)
 </script>
 
 <template>
-  <section id="center">
-    <div class="hero">
-      <img :src="heroImg" class="base" width="170" height="179" alt="" />
-      <img :src="vueLogo" class="framework" alt="Vue logo" />
-      <img :src="viteLogo" class="vite" alt="Vite logo" />
+  <section id="center" class="space-y-4">
+    <div class="flex items-center gap-3">
+      <img :src="heroImg" class="h-8 w-8 rounded-md object-cover" alt="" />
+      <img :src="vueLogo" class="h-5 w-5" alt="Vue logo" />
+      <img :src="viteLogo" class="h-5 w-5" alt="Vite logo" />
     </div>
     <div>
       <h1>Get started</h1>
@@ -23,7 +23,7 @@ const count = ref(0)
 
   <div class="ticks"></div>
 
-  <section id="next-steps">
+  <section id="next-steps" class="grid gap-4 sm:grid-cols-2">
     <div id="docs">
       <svg class="icon" role="presentation" aria-hidden="true">
         <use href="/icons.svg#documentation-icon"></use>
@@ -33,13 +33,13 @@ const count = ref(0)
       <ul>
         <li>
           <a href="https://vite.dev/" target="_blank">
-            <img class="logo" :src="viteLogo" alt="" />
+            <img class="logo h-4 w-4" :src="viteLogo" alt="" />
             Explore Vite
           </a>
         </li>
         <li>
           <a href="https://vuejs.org/" target="_blank">
-            <img class="button-icon" :src="vueLogo" alt="" />
+            <img class="button-icon h-4 w-4" :src="vueLogo" alt="" />
             Learn more
           </a>
         </li>

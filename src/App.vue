@@ -6,18 +6,25 @@ import RelayReceiver from './components/RelayReceiver.vue'
 </script>
 
 <template>
-  <div id="app" class="min-h-screen bg-gray-50">
-    <header class="sticky top-0 z-20 bg-white/95 shadow-sm border-b border-gray-200 backdrop-blur">
+  <div id="app" class="min-h-screen bg-slate-50 text-slate-900">
+    <header class="sticky top-0 z-20 border-b border-slate-200/80 bg-white/90 backdrop-blur">
       <div class="mx-auto max-w-7xl px-3 sm:px-6 lg:px-8">
         <div class="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between sm:h-16 sm:py-0">
-          <div class="flex flex-wrap items-center">
-            <h1 class="text-xl font-bold text-gray-900 sm:text-2xl">Coolector</h1>
-            <span class="ml-2 text-sm text-gray-500">文件收集器</span>
+          <div class="flex items-center gap-3">
+            <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-slate-900 text-white">
+              <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <use href="/icons.svg#documentation-icon"></use>
+              </svg>
+            </span>
+            <div class="leading-tight">
+              <h1 class="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">Coolector</h1>
+              <p class="text-sm text-slate-500">文件收集器</p>
+            </div>
           </div>
-          <nav class="grid grid-cols-3 gap-2 text-center text-sm font-medium text-gray-600 sm:flex sm:flex-wrap sm:items-center">
-            <a href="#upload" class="rounded-md bg-gray-50 px-3 py-2 hover:bg-gray-100 hover:text-gray-900 sm:bg-transparent">上传</a>
-            <a href="#status" class="rounded-md bg-gray-50 px-3 py-2 hover:bg-gray-100 hover:text-gray-900 sm:bg-transparent">状态</a>
-            <a href="#preview" class="rounded-md bg-gray-50 px-3 py-2 hover:bg-gray-100 hover:text-gray-900 sm:bg-transparent">预览</a>
+          <nav class="grid grid-cols-3 gap-2 text-center text-sm font-medium text-slate-600 sm:flex sm:flex-wrap sm:items-center">
+            <a href="#upload" class="rounded-md border border-slate-200 bg-white px-3 py-2 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900">上传</a>
+            <a href="#status" class="rounded-md border border-slate-200 bg-white px-3 py-2 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900">状态</a>
+            <a href="#preview" class="rounded-md border border-slate-200 bg-white px-3 py-2 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900">预览</a>
           </nav>
         </div>
       </div>
@@ -25,15 +32,24 @@ import RelayReceiver from './components/RelayReceiver.vue'
 
     <main class="py-5 sm:py-8 lg:py-10">
       <div class="mx-auto max-w-7xl px-3 sm:px-6 lg:px-8">
-        <section class="mb-5 rounded-2xl bg-white px-4 py-6 text-left shadow-sm ring-1 ring-gray-200 sm:mb-8 sm:rounded-3xl sm:px-8 sm:py-8 lg:px-10">
-          <p class="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-600 sm:text-sm sm:tracking-[0.24em]">Web File Collection</p>
-          <h2 class="mt-3 text-2xl font-bold text-gray-900 sm:text-4xl">欢迎使用 Coolector</h2>
-          <p class="mt-4 max-w-3xl text-base text-gray-600 sm:text-lg">
-            一个智能的文件收集器，支持任意格式的文本文件，自动化读取文件信息并检查提交状态
-          </p>
+        <section class="mb-5 border-b border-slate-200 pb-5 sm:mb-8 sm:pb-6">
+          <div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div class="max-w-3xl">
+              <p class="text-xs font-semibold uppercase tracking-[0.22em] text-indigo-600 sm:text-sm">Web File Collection</p>
+              <h2 class="mt-2 text-2xl font-semibold tracking-tight text-slate-900 sm:text-4xl">欢迎使用 Coolector</h2>
+              <p class="mt-3 text-sm leading-6 text-slate-600 sm:text-base">
+                一个轻量文件收集工作台，支持上传、校验、收集名单和 Relay 长连接。
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-2 text-xs font-medium text-slate-600">
+              <span class="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5">上传</span>
+              <span class="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5">校验</span>
+              <span class="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5">Relay</span>
+            </div>
+          </div>
         </section>
 
-        <div class="grid items-start gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <div class="grid items-start gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
           <section id="upload" class="space-y-5">
             <RelayReceiver />
             <FileUploader />
@@ -49,9 +65,9 @@ import RelayReceiver from './components/RelayReceiver.vue'
       </div>
     </main>
 
-    <footer class="bg-white border-t border-gray-200 mt-16">
+    <footer class="mt-16 border-t border-slate-200 bg-white">
       <div class="mx-auto max-w-7xl px-3 py-6 sm:px-6 sm:py-8 lg:px-8">
-        <div class="text-center text-gray-500 text-sm">
+        <div class="text-center text-sm text-slate-500">
           <p>&copy; 2024 Coolector. 基于 Vue.js 3.5 + TypeScript 5.7 + Vite 构建</p>
         </div>
       </div>
