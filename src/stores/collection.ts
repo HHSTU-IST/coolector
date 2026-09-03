@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { extractStudentId, normalizeComparableName } from '../utils/filename'
 
 export interface CollectionItem {
     id: string
@@ -9,6 +10,9 @@ export interface CollectionItem {
     status: 'pending' | 'collected' | 'error'
     submittedAt?: Date
 }
+
+/** 允许走子串包含匹配的最短长度，避免单字或 2–3 字的名单条目误匹配 */
+const FUZZY_MIN_LENGTH = 4
 
 export const useCollectionStore = defineStore('collection', () => {
     const collectionList = ref<CollectionItem[]>([])
@@ -45,11 +49,42 @@ export const useCollectionStore = defineStore('collection', () => {
         }
     }
 
+    /**
+     * 按精确度为文件找到对应的收集项。
+     *
+     * 旧的双向 `includes` 会让名单里的一行「张」匹配到所有含「张」的文件名，
+     * 因此改为分级匹配：完全相等 > 学号相等 > 子串包含（且要求被包含一方足够长）。
+     */
     const checkFileStatus = (fileName: string): CollectionItem | null => {
-        return collectionList.value.find(item =>
-            fileName.includes(item.filePattern) ||
-            item.filePattern.includes(fileName)
-        ) || null
+        const targetName = normalizeComparableName(fileName)
+        if (!targetName) return null
+
+        const targetStudentId = extractStudentId(fileName)
+        let fuzzyMatch: CollectionItem | null = null
+
+        for (const item of collectionList.value) {
+            const candidateName = normalizeComparableName(item.filePattern)
+            if (!candidateName) continue
+
+            if (candidateName === targetName) {
+                return item
+            }
+
+            const candidateStudentId = extractStudentId(item.filePattern)
+            if (targetStudentId && candidateStudentId === targetStudentId) {
+                return item
+            }
+
+            const [shorter, longer] = candidateName.length <= targetName.length
+                ? [candidateName, targetName]
+                : [targetName, candidateName]
+
+            if (shorter.length >= FUZZY_MIN_LENGTH && longer.includes(shorter)) {
+                fuzzyMatch ??= item
+            }
+        }
+
+        return fuzzyMatch
     }
 
     const clearCollection = () => {

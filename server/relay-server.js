@@ -11,7 +11,50 @@ const MAX_QUEUE_EVENTS = Number(process.env.MAX_QUEUE_EVENTS ?? 200)
 const ROOM_TTL_MS = Number(process.env.ROOM_TTL_MS ?? 6 * 60 * 60 * 1000)
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? fileURLToPath(new URL('./uploads', import.meta.url))
 
+// 设为非空后，所有 /api 请求必须携带 `Authorization: Bearer <token>`。默认关闭以保持本地开箱可用。
+const RELAY_TOKEN = process.env.RELAY_TOKEN ?? ''
+// 逗号分隔的白名单；`*` 表示任意来源。部署到公网时务必收窄。
+const ALLOWED_ORIGINS = (process.env.RELAY_ALLOWED_ORIGINS ?? '*')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean)
+// UPLOAD_DIR 的磁盘配额，超出后拒绝新上传，避免磁盘被无限写满。
+const MAX_TOTAL_UPLOAD_BYTES = Number(process.env.MAX_TOTAL_UPLOAD_BYTES ?? 1024 * 1024 * 1024)
+
 const rooms = new Map()
+
+/** 已落盘的字节总数，用于配额判断；进程重启后重新累计。 */
+let totalStoredBytes = 0
+
+/** 按当前来源计算 CORS 响应头；来源不在白名单时返回空对象，浏览器会自行拦截。 */
+function corsHeaders(req) {
+  const allowAll = ALLOWED_ORIGINS.includes('*')
+  const origin = req.headers.origin
+
+  if (!allowAll && !(origin && ALLOWED_ORIGINS.includes(origin))) {
+    return {}
+  }
+
+  const headers = {
+    'Access-Control-Allow-Origin': allowAll ? '*' : origin,
+    'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview'
+  }
+
+  if (!allowAll) {
+    headers.Vary = 'Origin'
+  }
+
+  return headers
+}
+
+/** 未配置 RELAY_TOKEN 时放行所有请求 */
+function isAuthorized(req) {
+  if (!RELAY_TOKEN) return true
+
+  const header = String(req.headers.authorization ?? '')
+  return header === `Bearer ${RELAY_TOKEN}` || header === RELAY_TOKEN
+}
 
 function nowIso() {
   return new Date().toISOString()
@@ -67,9 +110,10 @@ function getRoom(roomId) {
 }
 
 function roomSnapshot(room, req) {
+  // 房间状态只暴露元信息与下载链接，正文走 details 端点按需拉取
   const uploads = Array.from(room.uploads.values())
     .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime())
-    .map((upload) => uploadSummary(upload, req))
+    .map((upload) => uploadSummary(upload, req, { includeContent: false }))
 
   return {
     roomId: room.id,
@@ -83,7 +127,12 @@ function roomSnapshot(room, req) {
   }
 }
 
-function uploadSummary(upload, req) {
+/**
+ * 生成上传文件的对外摘要。
+ * SSE 广播应传 `includeContent: false`，只推元信息；客户端需要正文时
+ * 再走 `GET /api/rooms/:roomId/uploads/:uploadId` 按需拉取，避免带宽放大。
+ */
+function uploadSummary(upload, req, { includeContent = true } = {}) {
   const detailsUrl = `${baseUrl(req)}/api/rooms/${upload.roomId}/uploads/${upload.id}`
   const summary = {
     id: upload.id,
@@ -94,8 +143,9 @@ function uploadSummary(upload, req) {
     lastModified: upload.lastModified,
     hasTextPreview: Boolean(upload.previewText),
     previewText: upload.previewText ?? null,
-    contentText: upload.text ?? null,
-    contentBase64: upload.contentBase64,
+    contentIncluded: includeContent,
+    contentText: includeContent ? upload.text ?? null : null,
+    contentBase64: includeContent ? upload.contentBase64 : null,
     detailsUrl,
     downloadUrl: `${detailsUrl}?download=1`,
     serverStored: Boolean(upload.storagePath),
@@ -112,25 +162,12 @@ function trimQueue(room) {
   }
 }
 
-function writeJson(res, statusCode, payload) {
+function writeJson(res, statusCode, payload, headers = {}) {
   const body = JSON.stringify(payload, null, 2)
   res.writeHead(statusCode, {
+    ...headers,
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview'
-  })
-  res.end(body)
-}
-
-function writeText(res, statusCode, body, contentType = 'text/plain; charset=utf-8') {
-  res.writeHead(statusCode, {
-    'Content-Type': contentType,
-    'Content-Length': Buffer.byteLength(body),
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview'
+    'Content-Length': Buffer.byteLength(body)
   })
   res.end(body)
 }
@@ -285,15 +322,13 @@ function readBody(req) {
   })
 }
 
-function sendSseHeaders(res) {
+function sendSseHeaders(res, headers = {}) {
   res.writeHead(200, {
+    ...headers,
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview'
+    'X-Accel-Buffering': 'no'
   })
   res.flushHeaders?.()
 }
@@ -325,12 +360,19 @@ async function handleCreateRoom(req, res) {
     streamUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/events`,
     uploadUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/uploads`,
     stateUrl: `${baseUrl(req)}/api/rooms/${room.room.id}`
-  })
+  }, corsHeaders(req))
 }
 
 async function handleUpload(req, res, room, query) {
+  const headers = corsHeaders(req)
   const body = await readBody(req)
   const metadata = parseUploadMetadata(req, body, req.headers, query)
+  const size = Buffer.from(metadata.contentBase64, 'base64').length
+
+  if (totalStoredBytes + size > MAX_TOTAL_UPLOAD_BYTES) {
+    throw new Error(`Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
+  }
+
   const upload = {
     id: randomUUID(),
     roomId: room.id,
@@ -338,36 +380,39 @@ async function handleUpload(req, res, room, query) {
     mimeType: metadata.mimeType,
     lastModified: metadata.lastModified,
     uploadedAt: nowIso(),
-    size: Buffer.from(metadata.contentBase64, 'base64').length,
+    size,
     contentBase64: metadata.contentBase64,
     text: metadata.text,
     previewText: metadata.text ? metadata.text.slice(0, 4096) : null
   }
 
   await persistUpload(upload)
+  totalStoredBytes += size
 
   room.uploads.set(upload.id, upload)
   room.stats.uploads += 1
   room.updatedAt = upload.uploadedAt
   room.lastActivity = Date.now()
 
+  // 响应里带上完整正文，广播事件里只带元信息
   const uploadPayload = uploadSummary(upload, req)
   const event = dispatchEvent(room, 'upload.created', {
     roomId: room.id,
-    upload: uploadPayload,
+    upload: uploadSummary(upload, req, { includeContent: false }),
     downloadUrl: `${baseUrl(req)}/api/rooms/${room.id}/uploads/${upload.id}`
   })
 
   return writeJson(res, 201, {
     upload: uploadPayload,
     eventId: event.id
-  })
+  }, headers)
 }
 
 async function handleDownload(req, res, room, uploadId, query) {
+  const headers = corsHeaders(req)
   const upload = room.uploads.get(uploadId)
   if (!upload) {
-    return writeJson(res, 404, { error: 'Upload not found' })
+    return writeJson(res, 404, { error: 'Upload not found' }, headers)
   }
 
   const download = query.get('download')
@@ -376,12 +421,10 @@ async function handleDownload(req, res, room, uploadId, query) {
       ? await readFile(upload.storagePath)
       : Buffer.from(upload.contentBase64, 'base64')
     res.writeHead(200, {
+      ...headers,
       'Content-Type': upload.mimeType,
       'Content-Disposition': `attachment; filename="${upload.name.replaceAll('"', '\\"')}"`,
-      'Content-Length': buffer.length,
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview'
+      'Content-Length': buffer.length
     })
     res.end(buffer)
     return
@@ -391,12 +434,12 @@ async function handleDownload(req, res, room, uploadId, query) {
     upload: uploadSummary(upload, req),
     text: upload.previewText,
     contentBase64: upload.contentBase64
-  })
+  }, headers)
 }
 
 function handleEvents(req, res, room) {
   closeReceiver(room)
-  sendSseHeaders(res)
+  sendSseHeaders(res, corsHeaders(req))
 
   const heartbeat = setInterval(() => {
     if (!res.writableEnded) {
@@ -432,27 +475,44 @@ function handleEvents(req, res, room) {
   })
 }
 
+/** 删除房间并回收其占用的磁盘配额 */
+function destroyRoom(room) {
+  closeReceiver(room)
+  rooms.delete(room.id)
+
+  for (const upload of room.uploads.values()) {
+    totalStoredBytes -= upload.size
+  }
+  room.uploads.clear()
+
+  void rm(join(UPLOAD_DIR, room.id), { recursive: true, force: true })
+}
+
 function handleRoomDelete(req, res, roomId) {
   const room = getRoom(roomId)
   if (!room) {
-    return writeJson(res, 404, { error: 'Room not found' })
+    return writeJson(res, 404, { error: 'Room not found' }, corsHeaders(req))
   }
 
-  closeReceiver(room)
-  rooms.delete(room.id)
-  void rm(join(UPLOAD_DIR, room.id), { recursive: true, force: true })
+  destroyRoom(room)
   return writeJson(res, 200, {
     deleted: true,
     roomId: room.id
-  })
+  }, corsHeaders(req))
 }
 
 function cleanupRooms() {
   const cutoff = Date.now() - ROOM_TTL_MS
+
   for (const room of rooms.values()) {
-    if (room.lastActivity < cutoff && !room.receiver && room.uploads.size === 0) {
-      rooms.delete(room.id)
+    // 房间过期后即使仍有上传也要回收，否则磁盘只增不减
+    if (room.lastActivity < cutoff && !room.receiver) {
+      destroyRoom(room)
     }
+  }
+
+  if (totalStoredBytes < 0) {
+    totalStoredBytes = 0
   }
 }
 
@@ -461,11 +521,11 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? `localhost:${PORT}`}`)
     const pathname = url.pathname.replace(/\/+$/, '') || '/'
 
+    const cors = corsHeaders(req)
+
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview',
+        ...cors,
         'Access-Control-Max-Age': '86400'
       })
       res.end()
@@ -486,8 +546,11 @@ const server = createServer(async (req, res) => {
           deleteRoom: 'DELETE /api/rooms/:roomId',
           healthz: 'GET /healthz'
         },
-        uploadDir: UPLOAD_DIR
-      })
+        uploadDir: UPLOAD_DIR,
+        authRequired: Boolean(RELAY_TOKEN),
+        storageUsedBytes: totalStoredBytes,
+        storageLimitBytes: MAX_TOTAL_UPLOAD_BYTES
+      }, cors)
       return
     }
 
@@ -496,7 +559,13 @@ const server = createServer(async (req, res) => {
         status: 'ok',
         rooms: rooms.size,
         uptimeSeconds: Math.floor(process.uptime())
-      })
+      }, cors)
+      return
+    }
+
+    // /api 下的业务接口统一走鉴权；未配置 RELAY_TOKEN 时默认放行
+    if (pathname.startsWith('/api/') && !isAuthorized(req)) {
+      writeJson(res, 401, { error: 'Unauthorized' }, cors)
       return
     }
 
@@ -507,20 +576,20 @@ const server = createServer(async (req, res) => {
 
     const roomMatch = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(events|uploads)(?:\/([^/]+))?)?$/)
     if (!roomMatch) {
-      writeJson(res, 404, { error: 'Not found' })
+      writeJson(res, 404, { error: 'Not found' }, cors)
       return
     }
 
     const [, roomIdRaw, subresource, subresourceId] = roomMatch
     const roomId = sanitizeRoomId(roomIdRaw)
     if (!roomId) {
-      writeJson(res, 400, { error: 'Invalid room id' })
+      writeJson(res, 400, { error: 'Invalid room id' }, cors)
       return
     }
 
     let room = getRoom(roomId)
     if (!room && req.method !== 'POST') {
-      writeJson(res, 404, { error: 'Room not found' })
+      writeJson(res, 404, { error: 'Room not found' }, cors)
       return
     }
 
@@ -529,7 +598,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && !subresource) {
-      writeJson(res, 200, roomSnapshot(room, req))
+      writeJson(res, 200, roomSnapshot(room, req), cors)
       return
     }
 
@@ -553,10 +622,10 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    writeJson(res, 405, { error: 'Method not allowed' })
+    writeJson(res, 405, { error: 'Method not allowed' }, cors)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected error'
-    writeJson(res, 400, { error: message })
+    writeJson(res, 400, { error: message }, corsHeaders(req))
   }
 })
 

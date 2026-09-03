@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { formatFileSize } from '../utils/format'
+import { extractStudentId, getFileBaseName, getFileExtension } from '../utils/filename'
 
 export interface FileInfo {
     id: string
@@ -36,6 +38,27 @@ export interface FileMetadata {
     studentId: string | null
     studentName: string | null
 }
+
+/** 文件名范式最大长度，防止超长正则拖慢校验 */
+const MAX_PATTERN_LENGTH = 200
+
+/** 单个文件体积上限（10 MB，与 Relay 默认 MAX_BODY_BYTES 对齐） */
+export const MAX_FILE_SIZE = 10 * 1024 * 1024
+
+/** 文件总数上限，控制整体内存占用 */
+export const MAX_FILES = 200
+
+/**
+ * 嵌套量词，典型如 (a+)+ / (a*)* / (a{2,})+。
+ * 这类模式在遇到不匹配输入时会指数级回溯。
+ */
+const UNSAFE_QUANTIFIER = /\((?:[^()\\]|\\.)*(?:[+*]|\{\d+,?\d*\})\)\s*(?:[+*]|\{\d+,?\d*\})/
+
+/**
+ * 带量词的重叠分支，典型如 (a|a)+ / (a|ab)+。
+ * 分支可匹配同一段输入时同样会指数级回溯。
+ */
+const UNSAFE_ALTERNATION = /\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/
 
 export const useFileStore = defineStore('file', () => {
     const files = ref<FileInfo[]>([])
@@ -81,6 +104,26 @@ export const useFileStore = defineStore('file', () => {
             }
         }
 
+        if (pattern.length > MAX_PATTERN_LENGTH) {
+            filenamePatternError.value = `文件名范式过长（上限 ${MAX_PATTERN_LENGTH} 个字符）`
+
+            return {
+                isValid: false,
+                pattern,
+                message: filenamePatternError.value
+            }
+        }
+
+        if (UNSAFE_QUANTIFIER.test(pattern) || UNSAFE_ALTERNATION.test(pattern)) {
+            filenamePatternError.value = '文件名范式存在灾难性回溯风险，请避免嵌套量词或重叠分支'
+
+            return {
+                isValid: false,
+                pattern,
+                message: filenamePatternError.value
+            }
+        }
+
         try {
             const regex = new RegExp(pattern)
             const isValid = regex.test(fileName)
@@ -114,16 +157,6 @@ export const useFileStore = defineStore('file', () => {
         revalidateFiles()
     }
 
-    const getFileExtension = (fileName: string) => {
-        const lastDotIndex = fileName.lastIndexOf('.')
-        return lastDotIndex === -1 ? '' : fileName.slice(lastDotIndex + 1).toLowerCase()
-    }
-
-    const getFileBaseName = (fileName: string) => {
-        const lastDotIndex = fileName.lastIndexOf('.')
-        return lastDotIndex === -1 ? fileName : fileName.slice(0, lastDotIndex)
-    }
-
     const cleanStudentName = (value: string | undefined) => {
         if (!value) return null
 
@@ -155,10 +188,8 @@ export const useFileStore = defineStore('file', () => {
             }
         }
 
-        const studentIdMatch = normalized.match(/\d{6,12}/)
-
         return {
-            studentId: studentIdMatch?.[0] ?? null,
+            studentId: extractStudentId(normalized),
             studentName: null
         }
     }
@@ -192,7 +223,8 @@ export const useFileStore = defineStore('file', () => {
 
     const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
         const bytes = new Uint8Array(buffer)
-        const chunkSize = 0x8000
+        // 8192 远低于各引擎的实参上限，同时避免一次性展开过多参数
+        const chunkSize = 0x2000
         let binary = ''
 
         for (let index = 0; index < bytes.length; index += chunkSize) {
@@ -203,6 +235,14 @@ export const useFileStore = defineStore('file', () => {
     }
 
     const addFile = (file: File) => {
+        if (file.size > MAX_FILE_SIZE) {
+            return Promise.reject(new Error(`文件超过 ${formatFileSize(MAX_FILE_SIZE)} 上限：${file.name}`))
+        }
+
+        if (files.value.length >= MAX_FILES) {
+            return Promise.reject(new Error(`文件数量已达上限（${MAX_FILES} 个）：${file.name}`))
+        }
+
         return file.arrayBuffer().then((buffer) => {
             const hasTextContent = isTextFile(file)
             const content = hasTextContent
@@ -304,15 +344,17 @@ export const useFileStore = defineStore('file', () => {
         return fileInfo
     }
 
-    const removeFile = (index: number) => {
-        const removed = files.value[index]
+    const removeFileById = (id: string) => {
+        const index = files.value.findIndex((item) => item.id === id)
+        if (index === -1) return
+
         files.value.splice(index, 1)
-        if (removed && selectedFile.value?.id === removed.id) {
+        if (selectedFile.value?.id === id) {
             selectedFile.value = null
         }
     }
 
-    const selectFile = (file: FileInfo) => {
+    const selectFile = (file: FileInfo | null) => {
         selectedFile.value = file
     }
 
@@ -331,7 +373,7 @@ export const useFileStore = defineStore('file', () => {
         setFilenamePattern,
         validateFileName,
         extractFileMetadata,
-        removeFile,
+        removeFileById,
         selectFile,
         clearFiles
     }
