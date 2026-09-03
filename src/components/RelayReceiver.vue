@@ -12,10 +12,8 @@
           </div>
 
           <div class="text-left md:text-right">
-            <span
-              class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium"
-              :class="statusBadgeClass"
-            >
+            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium"
+              :class="statusBadgeClass">
               {{ statusLabel }}
             </span>
             <p class="text-xs text-gray-500 mt-2">{{ statusMessage }}</p>
@@ -24,41 +22,28 @@
       </div>
 
       <div class="grid gap-5 p-4 sm:p-6 lg:grid-cols-[1.2fr_0.8fr] lg:gap-6">
-        <form class="space-y-4" @submit.prevent="connect">
+        <form class="space-y-4" @submit.prevent="() => connect()">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-2">Relay 地址</label>
-            <input
-              v-model="relayBaseUrl"
-              type="url"
+            <input v-model="relayBaseUrl" type="url"
               class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-              placeholder="http://127.0.0.1:8787"
-            >
+              placeholder="http://127.0.0.1:8787">
           </div>
 
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-2">房间 ID</label>
-            <input
-              v-model="roomId"
-              type="text"
+            <input v-model="roomId" type="text"
               class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-              placeholder="demo-room"
-            >
+              placeholder="demo-room">
           </div>
 
           <div class="grid gap-3 sm:flex sm:flex-wrap">
-            <button
-              type="submit"
-              :disabled="connectionState === 'connecting'"
-              class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
+            <button type="submit" :disabled="connectionState === 'connecting'"
+              class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
               {{ connectionState === 'connected' ? '重新连接' : '建立长连接' }}
             </button>
-            <button
-              type="button"
-              @click="disconnect"
-              :disabled="!eventSource"
-              class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-            >
+            <button type="button" @click="disconnect" :disabled="!eventSource"
+              class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60">
               断开连接
             </button>
           </div>
@@ -99,11 +84,8 @@
               <span class="text-xs text-gray-500">{{ recentEvents.length }} 条</span>
             </div>
             <div class="space-y-2 max-h-56 overflow-auto pr-1">
-              <div
-                v-for="event in recentEvents"
-                :key="event.id"
-                class="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-700"
-              >
+              <div v-for="event in recentEvents" :key="event.id"
+                class="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-700">
                 <p class="font-medium text-gray-900">{{ event.type }}</p>
                 <p class="mt-1 text-gray-500">{{ event.message }}</p>
               </div>
@@ -406,8 +388,14 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
   }
 }
 
-const connect = async () => {
-  disconnect()
+const connect = async (isReconnect = false) => {
+  // 首次连接重置计数器与手动断开标记；重连复用已有参数
+  if (!isReconnect) {
+    reconnectAttempts.value = 0
+    manualDisconnect = false
+  }
+  clearReconnectTimer()
+  closeEventSource()
 
   connectionState.value = 'connecting'
   statusMessage.value = '正在创建房间并建立长连接...'
@@ -430,6 +418,7 @@ const connect = async () => {
     eventSource.value = source
 
     source.addEventListener('open', () => {
+      reconnectAttempts.value = 0
       connectionState.value = 'connected'
       statusMessage.value = `已连接到 ${room.roomId}`
       pushEventLog('open', `已连接到 ${room.roomId}`)
@@ -447,14 +436,10 @@ const connect = async () => {
       void handleUploadCreated(event as MessageEvent<string>)
     })
 
+    // EventSource 进入 CLOSED 后不会自行重连，因此这里统一显式重连。
+    // scheduleReconnect 内置 manualDisconnect 守卫与最大重试次数，避免硬错误无限重试。
     source.onerror = () => {
-      if (source.readyState === EventSource.CLOSED) {
-        connectionState.value = 'error'
-        statusMessage.value = '长连接已关闭'
-        pushEventLog('error', '长连接已关闭')
-      } else {
-        reconnect()
-      }
+      scheduleReconnect()
     }
   } catch (error) {
     connectionState.value = 'error'
@@ -464,12 +449,16 @@ const connect = async () => {
 }
 
 const disconnect = () => {
+  manualDisconnect = true
+  clearReconnectTimer()
   closeEventSource()
   connectionState.value = 'idle'
   statusMessage.value = '连接已断开'
 }
 
 onBeforeUnmount(() => {
+  manualDisconnect = true
+  clearReconnectTimer()
   closeEventSource()
 })
 </script>
