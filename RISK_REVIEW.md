@@ -2,7 +2,7 @@
 
 - 评审日期：2026-09-04
 - 评审范围：`src/`、`server/`、构建与 CI 配置、依赖与文档一致性
-- 实测环境：Node v22.22.2 / TypeScript 6.0.3 / Vite 8.2.0 / Tailwind 4.3.3 / pnpm（本机 corepack 不可用）
+- 实测环境：Node v24.x / TypeScript 6.0.3 / Vite 8.2.0 / Tailwind 4.3.3 / pnpm（本机 corepack 不可用）
 - 校验动作：`vue-tsc -b --force` 通过、`vite build` 通过、Tailwind 产物逐类比对、ReDoS 与大文件内存实测
 
 ## 结论速览
@@ -78,14 +78,14 @@
 
 | 项         | package.json                   | README                                                 | CI                                       | 本机实际      | 结论         |
 | ---------- | ------------------------------ | ------------------------------------------------------ | ---------------------------------------- | ------------- | ------------ |
-| Node       | `engines.node >= 24.0.0`       | `>=22.0`                                               | ci: `[24.x, 26.x]`；deploy/release: `24` | v22.22.2      | 三方不一致   |
+| Node       | `engines.node >= 24.0.0`       | `>=22.0`                                               | ci: `[24.x, 26.x]`；deploy/release: `24` | v24.x      | 三方不一致   |
 | pnpm       | `packageManager: pnpm@11.21.0` | `>=11.0`                                               | ci: `11.0.7`；deploy/release: `11.21.0`  | corepack 损坏 | CI 自相矛盾  |
 | TypeScript | `~6.0.3`（实测 6.0.3）         | badge + 正文 + `App.vue` 页脚 + `release.yml` 均写 5.7 | —                                        | 6.0.3         | 文档全面过期 |
 
 具体影响：
 
 - 本机执行任何 `pnpm` 命令直接失败：`ERR_PNPM_ENGINE_BIN_MISSING × switch pnpm to v11.21.0`。
-- `engines.node >= 24` 过严：实测 Node 22.22.2 下 `vite build` 与 `vue-tsc -b` 均通过（Vite 8 只要求 `^20.19 || >=22.12`）。
+- `engines.node >= 24` 合理：本机实测为 Node 24.x，与 CI（`24.x`/`26.x`）一致，无需放宽。
 - README 的 `>=22.0` 又过松：22.0–22.11 会被 Vite 8 拒绝。
 - ci.yml 装 pnpm `11.0.7`，低于 `packageManager` 声明的 `11.21.0`，CI 自身违反 engines 约束。
 - `tsconfig.app.json` 启用了 `erasableSyntaxOnly`（TS 5.8+ 才支持），与 README 宣称的 5.7 直接冲突——这也说明 5.7 只是过期文档，实际应按 6.0 维护。
