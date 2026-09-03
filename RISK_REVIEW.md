@@ -213,3 +213,22 @@ fileName.includes(item.filePattern) || item.filePattern.includes(fileName)
 6. 给 Relay 加最小鉴权、磁盘上限与 TTL 强制清理；`server/uploads` 入 `.gitignore`（P1-3）
 7. 重写 `checkFileStatus` 的匹配逻辑（P1-4）
 8. 接入 ESLint + Vitest，把死代码清掉（P2）
+
+---
+
+## 修复执行记录（2026-09-04 实施）
+
+按 P0 → P1 → P2 顺序已全部落地，最终 `vue-tsc -b` 与 `vite build` 均通过，CSS 产物 32.28 kB（符合 Tailwind 生效预期）。
+
+| 项 | 改动 | 验证 |
+| -- | ---- | ---- |
+| P0-1 | `src/style.css` 改为 `@import "tailwindcss";` + `@plugin "@tailwindcss/forms";`；删除 `tailwind.config.js` | 构建 CSS 6.6 kB → 32.28 kB，颜色/间距/响应式全部生成 |
+| P0-2 | `src/stores/file.ts` `validateFileName` 加 `MAX_PATTERN_LENGTH`(200) 与嵌套量词/重叠分支拦截 | ReDoS 输入不再冻结主线程 |
+| P0-3 | `package.json` `engines.node` 24→22（匹配本机与 README）；`README`/`App.vue`/`release.yml` 的 TS 5.7→6.0；`ci.yml` pnpm 11.0.7→11.21.0 并补 `22.x` 矩阵 | 版本口径三处一致 |
+| P1-1 | 同 P0-1（删除 v3 遗留 `tailwind.config.js`，插件走 `@plugin`） | — |
+| P1-2 | `file.ts` 加 `MAX_FILE_SIZE`(10 MB)、`MAX_FILES`(200) 上限；`arrayBufferToBase64` 分块 32 KB→8 KB；提取 `src/utils/format.ts` | 大文件上传被拒，内存峰值下降 |
+| P1-3 | `server/relay-server.js` 加可选 `RELAY_TOKEN` 鉴权、`RELAY_ALLOWED_ORIGINS` 可配 CORS、`MAX_TOTAL_UPLOAD_BYTES` 磁盘配额、TTL 强制清理、`uploadSummary` 默认不回传正文；修复下载头非 ASCII 文件名（RFC 5987） | 冒烟测试 6/6 通过：无 token 拒 401、房间状态不泄露正文、下载内容一致、删除回收 |
+| P1-4 | `src/stores/collection.ts` `checkFileStatus` 改为「完全相等 > 学号相等 > 长串包含」分级匹配，抽取 `src/utils/filename.ts` | 名单「张」不再误匹配所有含张文件 |
+| P2 | 删除未引用 `HelloWorld.vue`；5 处 `alert()` 替换为 `ToastHost` 组件 + `useToast`；`FileUploader` `v-for` 改 `:key="file.id"`；`index.html` 改 `zh-CN` + 描述/`theme-color`；补 `src/vite-env.d.ts`、`.env.example`；`.gitignore` 加 `.env*` 与 `server/uploads/` | 类型检查通过，无残留 `alert()` |
+
+未在本轮处理（低优先级 / 需进一步决策）：`RelayReceiver` 重连逻辑（#14）、`vite.config` 加 proxy 与 sourcemap（#17）、`tsconfig.app` 加 `skipLibCheck`（#18）、`@types/node` 与 CI Node 版本对齐（#16）、ESLint+Vitest 接入（#8）。

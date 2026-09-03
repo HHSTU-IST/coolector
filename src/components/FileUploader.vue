@@ -64,8 +64,8 @@
       <h3 class="text-lg font-medium text-gray-900 mb-4">已上传的文件</h3>
       <div class="space-y-2">
         <div
-          v-for="(file, index) in fileStore.files"
-          :key="index"
+          v-for="file in fileStore.files"
+          :key="file.id"
           class="flex flex-col gap-3 rounded-lg bg-gray-50 p-3 transition-colors hover:bg-gray-100 sm:flex-row sm:items-center sm:justify-between"
         >
           <div class="flex min-w-0 items-start space-x-3 sm:items-center">
@@ -102,7 +102,7 @@
               查看
             </button>
             <button
-              @click="fileStore.removeFile(index)"
+              @click="fileStore.removeFileById(file.id)"
               class="rounded-md px-2 py-1 text-sm font-medium text-red-600 hover:bg-red-50 hover:text-red-900"
             >
               删除
@@ -151,6 +151,7 @@ import { ref } from 'vue'
 import { useFileStore } from '../stores/file'
 import type { FileInfo } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
+import { toast } from '../composables/useToast'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -191,7 +192,7 @@ const uploadFiles = async (files: FileList | File[]) => {
       markCollectionItemCollected(fileInfo.name)
     } catch (error) {
       console.error('文件上传失败:', error)
-      alert(`文件上传失败: ${file.name}`)
+      toast(`文件上传失败: ${file.name}`, 'error')
     }
   }
 }
@@ -221,7 +222,7 @@ const handleCollectionSelect = async (event: Event) => {
       console.log('收集名单加载成功')
     } catch (error) {
       console.error('收集名单加载失败:', error)
-      alert('收集名单加载失败，请检查文件格式')
+      toast('收集名单加载失败，请检查文件格式', 'error')
     }
     target.value = ''
   }
@@ -244,7 +245,7 @@ const handleCollectionDrop = async (event: DragEvent) => {
       })
     } catch (error) {
       console.error('收集名单加载失败:', error)
-      alert('收集名单加载失败，请检查文件格式')
+      toast('收集名单加载失败，请检查文件格式', 'error')
     }
   }
 }

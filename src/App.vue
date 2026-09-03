@@ -3,6 +3,7 @@ import FileUploader from './components/FileUploader.vue'
 import CollectionStatus from './components/CollectionStatus.vue'
 import FileViewer from './components/FileViewer.vue'
 import RelayReceiver from './components/RelayReceiver.vue'
+import ToastHost from './components/ToastHost.vue'
 </script>
 
 <template>
@@ -68,9 +69,11 @@ import RelayReceiver from './components/RelayReceiver.vue'
     <footer class="mt-16 border-t border-slate-200 bg-white">
       <div class="mx-auto max-w-7xl px-3 py-6 sm:px-6 sm:py-8 lg:px-8">
         <div class="text-center text-sm text-slate-500">
-          <p>&copy; 2024 Coolector. 基于 Vue.js 3.5 + TypeScript 5.7 + Vite 构建</p>
+          <p>&copy; 2024 Coolector. 基于 Vue.js 3.5 + TypeScript 6.0 + Vite 构建</p>
         </div>
       </div>
     </footer>
   </div>
+
+  <ToastHost />
 </template>

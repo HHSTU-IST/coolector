@@ -193,6 +193,9 @@ const roomState = ref<RoomSnapshot | null>(null)
 const recentEvents = ref<LogEntry[]>([])
 const eventSource = ref<EventSource | null>(null)
 const stateUrl = ref('')
+const reconnectAttempts = ref(0)
+let manualDisconnect = false
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
 const statusLabel = computed(() => {
   switch (connectionState.value) {
@@ -265,11 +268,42 @@ const pushEventLog = (type: string, message: string, createdAt = new Date().toIS
   ].slice(0, 6)
 }
 
-const reconnect = () => {
-  if (connectionState.value !== 'connected') {
-    connectionState.value = 'reconnecting'
-    statusMessage.value = '连接中断，正在自动重连...'
+const MAX_RECONNECT_ATTEMPTS = 8
+const BASE_BACKOFF_MS = 1000
+const MAX_BACKOFF_MS = 15000
+
+const clearReconnectTimer = () => {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
   }
+}
+
+/**
+ * 断线后按指数退避自动重连。达到上限后停止并提示手动重连，
+ * 避免鉴权失败 / 房间不存在等硬错误导致无限重试。
+ * EventSource 进入 CLOSED(2) 后不会自行重连，因此这里显式重连。
+ */
+const scheduleReconnect = () => {
+  if (manualDisconnect || reconnectTimer !== null) return
+
+  if (reconnectAttempts.value >= MAX_RECONNECT_ATTEMPTS) {
+    connectionState.value = 'error'
+    statusMessage.value = '重连次数过多已停止，请检查 Relay 地址/网络后手动重连。'
+    pushEventLog('error', statusMessage.value)
+    return
+  }
+
+  const delay = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** reconnectAttempts.value)
+  reconnectAttempts.value += 1
+  connectionState.value = 'reconnecting'
+  statusMessage.value = `连接中断，${Math.ceil(delay / 1000)} 秒后第 ${reconnectAttempts.value} 次重连...`
+  pushEventLog('reconnect', `计划第 ${reconnectAttempts.value} 次重连（${Math.ceil(delay / 1000)}s）`)
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    void connect(true)
+  }, delay)
 }
 
 const closeEventSource = () => {

@@ -117,6 +117,7 @@
 import { computed, ref } from 'vue'
 import { useFileStore } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
+import { toast } from '../composables/useToast'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -233,10 +234,10 @@ const copyContent = async () => {
   if (fileStore.selectedFile) {
     try {
       await navigator.clipboard.writeText(fileStore.selectedFile.content)
-      alert('内容已复制到剪贴板')
+      toast('内容已复制到剪贴板', 'success')
     } catch (error) {
       console.error('复制失败:', error)
-      alert('复制失败，请手动复制')
+      toast('复制失败，请手动复制', 'error')
     }
   }
 }
@@ -244,7 +245,7 @@ const copyContent = async () => {
 const markAsCollected = () => {
   if (collectionItem.value) {
     collectionStore.updateItemStatus(collectionItem.value.id, 'collected')
-    alert('已标记为已收集')
+    toast('已标记为已收集', 'success')
   }
 }
 </script>

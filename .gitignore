@@ -21,3 +21,11 @@ dist-ssr
 *.sw?
 
 .workbuddy
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Relay uploads (runtime, may contain submitted files)
+server/uploads/
