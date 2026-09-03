@@ -220,15 +220,38 @@ fileName.includes(item.filePattern) || item.filePattern.includes(fileName)
 
 按 P0 → P1 → P2 顺序已全部落地，最终 `vue-tsc -b` 与 `vite build` 均通过，CSS 产物 32.28 kB（符合 Tailwind 生效预期）。
 
-| 项 | 改动 | 验证 |
-| -- | ---- | ---- |
-| P0-1 | `src/style.css` 改为 `@import "tailwindcss";` + `@plugin "@tailwindcss/forms";`；删除 `tailwind.config.js` | 构建 CSS 6.6 kB → 32.28 kB，颜色/间距/响应式全部生成 |
-| P0-2 | `src/stores/file.ts` `validateFileName` 加 `MAX_PATTERN_LENGTH`(200) 与嵌套量词/重叠分支拦截 | ReDoS 输入不再冻结主线程 |
-| P0-3 | `package.json` `engines.node` 24→22（匹配本机与 README）；`README`/`App.vue`/`release.yml` 的 TS 5.7→6.0；`ci.yml` pnpm 11.0.7→11.21.0 并补 `22.x` 矩阵 | 版本口径三处一致 |
-| P1-1 | 同 P0-1（删除 v3 遗留 `tailwind.config.js`，插件走 `@plugin`） | — |
-| P1-2 | `file.ts` 加 `MAX_FILE_SIZE`(10 MB)、`MAX_FILES`(200) 上限；`arrayBufferToBase64` 分块 32 KB→8 KB；提取 `src/utils/format.ts` | 大文件上传被拒，内存峰值下降 |
-| P1-3 | `server/relay-server.js` 加可选 `RELAY_TOKEN` 鉴权、`RELAY_ALLOWED_ORIGINS` 可配 CORS、`MAX_TOTAL_UPLOAD_BYTES` 磁盘配额、TTL 强制清理、`uploadSummary` 默认不回传正文；修复下载头非 ASCII 文件名（RFC 5987） | 冒烟测试 6/6 通过：无 token 拒 401、房间状态不泄露正文、下载内容一致、删除回收 |
-| P1-4 | `src/stores/collection.ts` `checkFileStatus` 改为「完全相等 > 学号相等 > 长串包含」分级匹配，抽取 `src/utils/filename.ts` | 名单「张」不再误匹配所有含张文件 |
-| P2 | 删除未引用 `HelloWorld.vue`；5 处 `alert()` 替换为 `ToastHost` 组件 + `useToast`；`FileUploader` `v-for` 改 `:key="file.id"`；`index.html` 改 `zh-CN` + 描述/`theme-color`；补 `src/vite-env.d.ts`、`.env.example`；`.gitignore` 加 `.env*` 与 `server/uploads/` | 类型检查通过，无残留 `alert()` |
+| 项   | 改动                                                                                                                                                                                                                                                             | 验证                                                                           |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| P0-1 | `src/style.css` 改为 `@import "tailwindcss";` + `@plugin "@tailwindcss/forms";`；删除 `tailwind.config.js`                                                                                                                                                       | 构建 CSS 6.6 kB → 32.28 kB，颜色/间距/响应式全部生成                           |
+| P0-2 | `src/stores/file.ts` `validateFileName` 加 `MAX_PATTERN_LENGTH`(200) 与嵌套量词/重叠分支拦截                                                                                                                                                                     | ReDoS 输入不再冻结主线程                                                       |
+| P0-3 | `package.json` `engines.node` 24→22（匹配本机与 README）；`README`/`App.vue`/`release.yml` 的 TS 5.7→6.0；`ci.yml` pnpm 11.0.7→11.21.0 并补 `22.x` 矩阵                                                                                                          | 版本口径三处一致                                                               |
+| P1-1 | 同 P0-1（删除 v3 遗留 `tailwind.config.js`，插件走 `@plugin`）                                                                                                                                                                                                   | —                                                                              |
+| P1-2 | `file.ts` 加 `MAX_FILE_SIZE`(10 MB)、`MAX_FILES`(200) 上限；`arrayBufferToBase64` 分块 32 KB→8 KB；提取 `src/utils/format.ts`                                                                                                                                    | 大文件上传被拒，内存峰值下降                                                   |
+| P1-3 | `server/relay-server.js` 加可选 `RELAY_TOKEN` 鉴权、`RELAY_ALLOWED_ORIGINS` 可配 CORS、`MAX_TOTAL_UPLOAD_BYTES` 磁盘配额、TTL 强制清理、`uploadSummary` 默认不回传正文；修复下载头非 ASCII 文件名（RFC 5987）                                                    | 冒烟测试 6/6 通过：无 token 拒 401、房间状态不泄露正文、下载内容一致、删除回收 |
+| P1-4 | `src/stores/collection.ts` `checkFileStatus` 改为「完全相等 > 学号相等 > 长串包含」分级匹配，抽取 `src/utils/filename.ts`                                                                                                                                        | 名单「张」不再误匹配所有含张文件                                               |
+| P2   | 删除未引用 `HelloWorld.vue`；5 处 `alert()` 替换为 `ToastHost` 组件 + `useToast`；`FileUploader` `v-for` 改 `:key="file.id"`；`index.html` 改 `zh-CN` + 描述/`theme-color`；补 `src/vite-env.d.ts`、`.env.example`；`.gitignore` 加 `.env*` 与 `server/uploads/` | 类型检查通过，无残留 `alert()`                                                 |
 
-未在本轮处理（低优先级 / 需进一步决策）：`RelayReceiver` 重连逻辑（#14）、`vite.config` 加 proxy 与 sourcemap（#17）、`tsconfig.app` 加 `skipLibCheck`（#18）、`@types/node` 与 CI Node 版本对齐（#16）、ESLint+Vitest 接入（#8）。
+## 第二轮补充修复（2026-09-04 续）
+
+- **`RelayReceiver` 断线重连（#14）已落地**：`connect(isReconnect?)` 入参区分首次/重连；新增 `scheduleReconnect()` 指数退避（1s→15s，上限 8 次）+ `clearReconnectTimer()`；`onerror` 改调 `scheduleReconnect()`（原只改文案的 `reconnect()` 已删除）；`disconnect()`/`onBeforeUnmount` 置 `manualDisconnect` 守卫，避免手动断开后被自动重连。
+- **质量门禁（#8）已落地并改用 oxlint 替代 eslint**：安装 `oxlint@1.81.0`，卸载 `eslint` / `@eslint/js` / `typescript-eslint` / `eslint-plugin-vue`；新增 `.oxlintrc.json`（`env.browser` 提供浏览器全局、`plugins:["vue"]`、忽略 `dist/server/coverage/*.config.*/测试文件`）；`package.json` 脚本 `lint`/`lint:fix` 指向 oxlint；删除 `eslint.config.js`。Vitest 已接入（14 用例全过）。
+- **TS2345 修复**：`@submit.prevent="connect"` 会把表单 `SubmitEvent` 误当作 `isReconnect` 布尔参数（类型不兼容，且会让「建立连接」被误判为「重连」而不重置计数器），改为 `@submit.prevent="() => connect()"`。
+
+你最初列出的 4 个 TS 报错（TS6133×2、TS2554、TS2552）属于重连逻辑修复前的旧状态，当前磁盘文件已不存在；真正残留的是上述 TS2345，已修复。
+
+## 最终验证（全绿）
+
+| 检查                  | 结果                                                        |
+| --------------------- | ----------------------------------------------------------- |
+| `vue-tsc -b` 类型检查 | 0 错误                                                      |
+| `oxlint`              | 0 warnings / 0 errors（13 文件 / 88 规则 / 32 线程 / 34ms） |
+| `vite build`          | 35 模块，CSS 32.28 kB                                       |
+| `vitest run`          | 14/14 通过                                                  |
+
+## 第三轮收尾（2026-09-04 续）：低优先级项全部完成
+
+- **#17 `vite.config` 加 proxy 与 sourcemap**：新增 `server.proxy['/relay']` → `http://127.0.0.1:8787`（配 `VITE_RELAY_URL=/relay` 走同源免跨域）；`build.sourcemap: true`、`css.devSourcemap: true`。构建产物已生成 `map`（755.91 kB）。
+- **#18 `tsconfig.app` 加 `skipLibCheck: true`**：跳过第三方 `.d.ts` 检查，提速并规避库类型噪音。
+- **#16 `@types/node` 对齐 CI Node 22.x**：`26.1.2` → `22.20.1`，消除 `@types/node` 与 `engines.node>=22` / CI `22.x` 矩阵的口径矛盾。
+
+至此本仓库修复与质量门禁全部落地，无遗留待办项。

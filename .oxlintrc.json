@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": {
+    "browser": true,
+    "es2022": true
+  },
+  "plugins": [
+    "vue"
+  ],
+  "rules": {
+    "@typescript-eslint/no-explicit-any": "off",
+    "no-empty": "off",
+    "no-unused-vars": "warn",
+    "no-console": "off"
+  },
+  "ignorePatterns": [
+    "dist",
+    "node_modules",
+    "server",
+    "coverage",
+    "*.config.*",
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts"
+  ]
+}
