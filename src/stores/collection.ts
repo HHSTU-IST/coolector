@@ -49,12 +49,7 @@ export const useCollectionStore = defineStore('collection', () => {
         }
     }
 
-    /**
-     * 按精确度为文件找到对应的收集项。
-     *
-     * 旧的双向 `includes` 会让名单里的一行「张」匹配到所有含「张」的文件名，
-     * 因此改为分级匹配：完全相等 > 学号相等 > 子串包含（且要求被包含一方足够长）。
-     */
+    /** 分级匹配：完全相等 > 学号相等 > 子串包含，避免名单里「张」误匹配所有含张的文件名 */
     const checkFileStatus = (fileName: string): CollectionItem | null => {
         const targetName = normalizeComparableName(fileName)
         if (!targetName) return null

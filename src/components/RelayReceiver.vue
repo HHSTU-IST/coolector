@@ -163,6 +163,7 @@ interface LogEntry {
 }
 
 const DEFAULT_RELAY_URL = import.meta.env.VITE_RELAY_URL ?? 'http://127.0.0.1:8787'
+const RELAY_TOKEN = import.meta.env.VITE_RELAY_TOKEN ?? ''
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -211,11 +212,12 @@ const statusBadgeClass = computed(() => {
 const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/, '')
 
 const ensureRoom = async (baseUrl: string, targetRoomId: string) => {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (RELAY_TOKEN) headers['Authorization'] = `Bearer ${RELAY_TOKEN}`
+
   const response = await fetch(`${baseUrl}/api/rooms`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
+    headers,
     body: JSON.stringify({ roomId: targetRoomId })
   })
 
@@ -229,7 +231,10 @@ const ensureRoom = async (baseUrl: string, targetRoomId: string) => {
 const refreshRoomState = async () => {
   if (!stateUrl.value) return
 
-  const response = await fetch(stateUrl.value)
+  const headers: Record<string, string> = {}
+  if (RELAY_TOKEN) headers['Authorization'] = `Bearer ${RELAY_TOKEN}`
+
+  const response = await fetch(stateUrl.value, { headers })
   if (!response.ok) return
   roomState.value = await response.json() as RoomSnapshot
 }
@@ -261,11 +266,7 @@ const clearReconnectTimer = () => {
   }
 }
 
-/**
- * 断线后按指数退避自动重连。达到上限后停止并提示手动重连，
- * 避免鉴权失败 / 房间不存在等硬错误导致无限重试。
- * EventSource 进入 CLOSED(2) 后不会自行重连，因此这里显式重连。
- */
+/** 断线后指数退避重连，达上限即停，避免硬错误无限重试（EventSource CLOSED 不自动重连） */
 const scheduleReconnect = () => {
   if (manualDisconnect || reconnectTimer !== null) return
 
@@ -389,7 +390,7 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
 }
 
 const connect = async (isReconnect = false) => {
-  // 首次连接重置计数器与手动断开标记；重连复用已有参数
+  // 首次连接重置计数与手动断开标记；重连复用已有参数
   if (!isReconnect) {
     reconnectAttempts.value = 0
     manualDisconnect = false
@@ -414,7 +415,9 @@ const connect = async (isReconnect = false) => {
 
     await refreshRoomState()
 
-    const source = new EventSource(room.streamUrl)
+    // SSE 无法自定义请求头，token 通过查询参数携带（Relay 端 isAuthorized 已支持 ?token=）
+    const streamUrl = RELAY_TOKEN ? `${room.streamUrl}?token=${encodeURIComponent(RELAY_TOKEN)}` : room.streamUrl
+    const source = new EventSource(streamUrl)
     eventSource.value = source
 
     source.addEventListener('open', () => {
@@ -436,8 +439,7 @@ const connect = async (isReconnect = false) => {
       void handleUploadCreated(event as MessageEvent<string>)
     })
 
-    // EventSource 进入 CLOSED 后不会自行重连，因此这里统一显式重连。
-    // scheduleReconnect 内置 manualDisconnect 守卫与最大重试次数，避免硬错误无限重试。
+    // EventSource CLOSED 不自动重连，统一走 scheduleReconnect（内置手动断开守卫与重试上限）
     source.onerror = () => {
       scheduleReconnect()
     }

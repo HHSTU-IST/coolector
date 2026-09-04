@@ -48,12 +48,22 @@ function corsHeaders(req) {
   return headers
 }
 
-/** 未配置 RELAY_TOKEN 时放行所有请求 */
+/** 未配置 RELAY_TOKEN 时放行所有请求；配置后要求 Bearer 头或 ?token= 查询参数（SSE 用） */
 function isAuthorized(req) {
   if (!RELAY_TOKEN) return true
 
   const header = String(req.headers.authorization ?? '')
-  return header === `Bearer ${RELAY_TOKEN}` || header === RELAY_TOKEN
+  if (header === `Bearer ${RELAY_TOKEN}` || header === RELAY_TOKEN) return true
+
+  // EventSource 无法自定义请求头，SSE 连接改由查询参数携带 token
+  try {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    if (url.searchParams.get('token') === RELAY_TOKEN) return true
+  } catch {
+    // 忽略非法 URL
+  }
+
+  return false
 }
 
 function nowIso() {
@@ -127,11 +137,7 @@ function roomSnapshot(room, req) {
   }
 }
 
-/**
- * 生成上传文件的对外摘要。
- * SSE 广播应传 `includeContent: false`，只推元信息；客户端需要正文时
- * 再走 `GET /api/rooms/:roomId/uploads/:uploadId` 按需拉取，避免带宽放大。
- */
+/** 生成上传摘要；SSE 广播传 includeContent:false 只推元信息，正文按需走 details 端点 */
 function uploadSummary(upload, req, { includeContent = true } = {}) {
   const detailsUrl = `${baseUrl(req)}/api/rooms/${upload.roomId}/uploads/${upload.id}`
   const summary = {

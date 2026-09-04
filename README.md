@@ -29,7 +29,7 @@ Coolector 是一个现代化的文件收集器。
 
 - **前端框架**: Vue.js 3.5 (Composition API)
 - **编程语言**: TypeScript 6.0+
-- **状态管理**: Pinia 3.0+
+- **状态管理**: Pinia 4.0+
 - **构建工具**: Vite 8.0+
 - **样式框架**: Tailwind CSS 4.0+
 - **UI 组件**: 自定义组件 + Tailwind 工具类

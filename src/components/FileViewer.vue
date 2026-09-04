@@ -4,23 +4,20 @@
       <div class="border-b border-gray-200 p-4 sm:p-6">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
-            <h2 class="break-words text-lg font-semibold text-gray-900 sm:text-xl">{{ fileStore.selectedFile.name }}</h2>
+            <h2 class="break-words text-lg font-semibold text-gray-900 sm:text-xl">{{ fileStore.selectedFile.name }}
+            </h2>
             <p class="text-sm text-gray-500 mt-1">
               大小: {{ formatFileSize(fileStore.selectedFile.size) }} •
               类型: {{ fileStore.selectedFile.type || '文本文件' }} •
               修改时间: {{ formatDate(fileStore.selectedFile.lastModified) }}
             </p>
-            <p
-              class="mt-2 text-sm"
-              :class="fileStore.selectedFile.filenameValidation.isValid ? 'text-green-600' : 'text-red-600'"
-            >
+            <p class="mt-2 text-sm"
+              :class="fileStore.selectedFile.filenameValidation.isValid ? 'text-green-600' : 'text-red-600'">
               {{ fileStore.selectedFile.filenameValidation.message }}
             </p>
           </div>
-          <button
-            @click="fileStore.selectedFile = null"
-            class="shrink-0 rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-          >
+          <button @click="fileStore.selectedFile = null"
+            class="shrink-0 rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
             <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -33,18 +30,13 @@
           <div class="mb-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h3 class="text-sm font-medium text-gray-900">文件内容</h3>
             <div class="flex flex-wrap items-center gap-2">
-              <button
-                @click="copyContent"
-                class="rounded-md px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:text-indigo-900"
-              >
+              <button @click="copyContent"
+                class="rounded-md px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:text-indigo-900">
                 复制内容
               </button>
-              <button
-                v-if="collectionItem"
-                @click="markAsCollected"
+              <button v-if="collectionItem" @click="markAsCollected"
                 class="rounded-md px-2 py-1 text-sm font-medium text-green-600 hover:bg-green-50 hover:text-green-900"
-                :disabled="collectionItem.status === 'collected'"
-              >
+                :disabled="collectionItem.status === 'collected'">
                 {{ collectionItem.status === 'collected' ? '已收集' : '标记为已收集' }}
               </button>
             </div>
@@ -52,21 +44,16 @@
         </div>
 
         <div class="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <div
-            v-for="item in metadataItems"
-            :key="item.label"
-            class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
-          >
+          <div v-for="item in metadataItems" :key="item.label"
+            class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
             <p class="text-xs text-gray-500">{{ item.label }}</p>
             <p class="mt-1 break-words text-sm font-medium text-gray-900">{{ item.value }}</p>
           </div>
         </div>
 
         <div class="max-h-80 overflow-auto rounded-lg bg-gray-50 p-3 sm:max-h-96 sm:p-4">
-          <pre
-            class="whitespace-pre-wrap break-words text-sm"
-            :class="fileStore.selectedFile.hasTextContent ? 'text-gray-800 font-mono' : 'text-gray-600'"
-          >{{ fileStore.selectedFile.content }}</pre>
+          <pre class="whitespace-pre-wrap break-words text-sm"
+            :class="fileStore.selectedFile.hasTextContent ? 'text-gray-800 font-mono' : 'text-gray-600'">{{ fileStore.selectedFile.content }}</pre>
         </div>
 
         <div class="mt-6 border-t border-gray-200 pt-6">
@@ -74,29 +61,20 @@
             <div class="grid gap-3 sm:grid-cols-2 flex-1">
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">Relay 地址</label>
-                <input
-                  v-model="relayUploadBaseUrl"
-                  type="url"
+                <input v-model="relayUploadBaseUrl" type="url"
                   class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                  placeholder="http://127.0.0.1:8787"
-                >
+                  placeholder="http://127.0.0.1:8787">
               </div>
               <div>
                 <label class="block text-xs font-medium text-gray-500 mb-1">房间 ID</label>
-                <input
-                  v-model="relayUploadRoomId"
-                  type="text"
+                <input v-model="relayUploadRoomId" type="text"
                   class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                  placeholder="demo-room"
-                >
+                  placeholder="demo-room">
               </div>
             </div>
 
-            <button
-              @click="uploadSelectedFileToRelay"
-              :disabled="isRelayUploading"
-              class="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto"
-            >
+            <button @click="uploadSelectedFileToRelay" :disabled="isRelayUploading"
+              class="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto">
               {{ isRelayUploading ? '上传中' : 'HTTP 上传到 Relay' }}
             </button>
           </div>
@@ -104,7 +82,8 @@
           <p class="mt-3 text-sm text-gray-600">
             通过标准 HTTP `POST` 把当前文件发送到 Relay Server，接收端长连接会自动收到这次上传。
           </p>
-          <p v-if="relayUploadMessage" class="mt-2 text-sm" :class="relayUploadError ? 'text-red-600' : 'text-green-600'">
+          <p v-if="relayUploadMessage" class="mt-2 text-sm"
+            :class="relayUploadError ? 'text-red-600' : 'text-green-600'">
             {{ relayUploadMessage }}
           </p>
         </div>
@@ -122,6 +101,7 @@ import { toast } from '../composables/useToast'
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
 const relayUploadBaseUrl = ref(import.meta.env.VITE_RELAY_URL ?? 'http://127.0.0.1:8787')
+const relayUploadToken = import.meta.env.VITE_RELAY_TOKEN ?? ''
 const relayUploadRoomId = ref('demo-room')
 const isRelayUploading = ref(false)
 const relayUploadMessage = ref('')
@@ -203,14 +183,19 @@ const uploadSelectedFileToRelay = async () => {
         contentBase64: selectedFile.contentBase64
       })
 
+    const headers: Record<string, string> = {
+      'Content-Type': selectedFile.hasTextContent ? selectedFile.type || 'text/plain' : 'application/json',
+      'X-Relay-Filename': selectedFile.name,
+      'X-Relay-Mime-Type': selectedFile.type || 'application/octet-stream',
+      'X-Relay-Last-Modified': selectedFile.lastModified.toISOString()
+    }
+    if (relayUploadToken) {
+      headers['Authorization'] = `Bearer ${relayUploadToken}`
+    }
+
     const response = await fetch(`${baseUrl}/api/rooms/${encodeURIComponent(targetRoomId)}/uploads`, {
       method: 'POST',
-      headers: {
-        'Content-Type': selectedFile.hasTextContent ? selectedFile.type || 'text/plain' : 'application/json',
-        'X-Relay-Filename': selectedFile.name,
-        'X-Relay-Mime-Type': selectedFile.type || 'application/octet-stream',
-        'X-Relay-Last-Modified': selectedFile.lastModified.toISOString()
-      },
+      headers,
       body: requestBody
     })
 

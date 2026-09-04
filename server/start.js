@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 
 const config = {
   appHost: process.env.APP_HOST ?? '0.0.0.0',
@@ -53,7 +54,14 @@ console.log(`[start] Web app: http://localhost:${config.appPort}`)
 console.log(`[start] Relay:   http://localhost:${config.relayPort}`)
 
 startProcess('web app', 'pnpm', ['exec', 'vite', '--host', config.appHost, '--port', config.appPort])
-startProcess('relay server', 'node', ['server/relay-server.js'], {
+
+// 存在根 .env 时用 Node 原生 --env-file 注入 Relay（RELAY_* 由 Relay 读，VITE_* 由 Vite 自读）
+const relayArgs = ['server/relay-server.js']
+if (existsSync('.env')) {
+  relayArgs.unshift('--env-file=.env')
+}
+
+startProcess('relay server', 'node', relayArgs, {
   HOST: config.relayHost,
   PORT: config.relayPort
 })

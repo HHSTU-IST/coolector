@@ -39,6 +39,13 @@ jobs:
 
             - name: Build project
               run: pnpm build
+              env:
+                  # 前端连接 Relay 的绝对地址（Vite 构建期注入）。
+                  # 在仓库 Settings → Secrets and variables → Actions → Variables 里配置。
+                  VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}
+                  # Relay 鉴权令牌（Vite 构建期注入到产物；见 RECEIVER_SETUP.md 的安全说明）。
+                  # 在仓库 Settings → Secrets and variables → Actions → Secrets 里配置。
+                  VITE_RELAY_TOKEN: ${{ secrets.VITE_RELAY_TOKEN }}
 
             - name: Setup Pages
               uses: actions/configure-pages@v6

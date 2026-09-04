@@ -48,16 +48,10 @@ export const MAX_FILE_SIZE = 10 * 1024 * 1024
 /** 文件总数上限，控制整体内存占用 */
 export const MAX_FILES = 200
 
-/**
- * 嵌套量词，典型如 (a+)+ / (a*)* / (a{2,})+。
- * 这类模式在遇到不匹配输入时会指数级回溯。
- */
+/** 嵌套量词（如 (a+)+、(a*)*、(a{2,})+），不匹配输入时指数级回溯 */
 const UNSAFE_QUANTIFIER = /\((?:[^()\\]|\\.)*(?:[+*]|\{\d+,?\d*\})\)\s*(?:[+*]|\{\d+,?\d*\})/
 
-/**
- * 带量词的重叠分支，典型如 (a|a)+ / (a|ab)+。
- * 分支可匹配同一段输入时同样会指数级回溯。
- */
+/** 带量词的重叠分支（如 (a|a)+、(a|ab)+），同样指数级回溯 */
 const UNSAFE_ALTERNATION = /\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/
 
 export const useFileStore = defineStore('file', () => {
@@ -223,7 +217,7 @@ export const useFileStore = defineStore('file', () => {
 
     const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
         const bytes = new Uint8Array(buffer)
-        // 8192 远低于各引擎的实参上限，同时避免一次性展开过多参数
+        // 8KB 分块低于各引擎实参上限，避免一次性展开过多参数
         const chunkSize = 0x2000
         let binary = ''
 
