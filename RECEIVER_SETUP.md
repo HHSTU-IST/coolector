@@ -109,6 +109,7 @@ cloudflared tunnel --url http://localhost:5174
 | 发送方上传 401 Unauthorized | 前端 `VITE_RELAY_TOKEN` 与 Relay `RELAY_TOKEN` 不一致，或发送方前端未带该变量构建                             |
 | 发送方上传被 CORS 拦截      | `RELAY_ALLOWED_ORIGINS` 未包含发送方前端来源                                                                  |
 | 隧道 URL 每次都变           | quick tunnel 特性；需要固定域名请用 ngrok / cloudflared 命名隧道 / 自有域名                                   |
+| Web 隧道访问返回 403        | Vite 默认拦截非 localhost 的 Host 头；已在 `vite.config.ts` 设 `allowedHosts: ['.trycloudflare.com']`，换用其他隧道域名需同步加 |
 | SSE 收不到事件              | 穿透层缓冲了流；cloudflared 默认不缓冲，若套 Nginx 需 `proxy_buffering off`（见 `deploy/nginx.conf.example`） |
 
 ## 7. 更稳妥的替代：前端部署到 GitHub Pages（只穿透 Relay 一条隧道）

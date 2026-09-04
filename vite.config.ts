@@ -6,6 +6,8 @@ export default defineConfig({
     plugins: [vue()],
     base: './',
     server: {
+        // 放行 cloudflared quick tunnel 的 Host（否则隧道访问被 Vite 403 拦截）
+        allowedHosts: ['.trycloudflare.com'],
         proxy: {
             // dev 时把 /relay 转发到本机 Relay，配合 VITE_RELAY_URL=/relay 走同源；生产用绝对地址
             '/relay': {
