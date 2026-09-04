@@ -1,0 +1,10 @@
+# Coolector Relay Server 反向代理（Caddy 自动申请/续期 TLS）
+# 文档见仓库 RELAY_DEPLOY.md
+relay.example.com {
+	# 反向代理到容器内 Relay Server（与 docker-compose 端口一致）
+	reverse_proxy 127.0.0.1:8787
+
+	# SSE 长连接：关闭缓冲，Caddy 默认已支持，这里显式标注
+	# relay-server.js 已读取 x-forwarded-proto / host 生成正确的绝对 URL
+	header ?X-Accel-Buffering "no"
+}

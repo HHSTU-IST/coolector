@@ -1,6 +1,6 @@
 # Coolector
 
-![typescript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
+![typescript](https://img.shields.io/badge/typescript-6.0+-blue.svg)
 ![vue](https://img.shields.io/badge/vue-3.5+-brightgreen.svg)
 ![pinia](https://img.shields.io/badge/pinia-3.0+-ff6b6b.svg)
 ![vite](https://img.shields.io/badge/vite-8.0+-yellow.svg)
@@ -28,8 +28,8 @@ Coolector 是一个现代化的文件收集器。
 ## 技术栈
 
 - **前端框架**: Vue.js 3.5 (Composition API)
-- **编程语言**: TypeScript 5.7+
-- **状态管理**: Pinia 4.0+
+- **编程语言**: TypeScript 6.0+
+- **状态管理**: Pinia 3.0+
 - **构建工具**: Vite 8.0+
 - **样式框架**: Tailwind CSS 4.0+
 - **UI 组件**: 自定义组件 + Tailwind 工具类
@@ -38,7 +38,7 @@ Coolector 是一个现代化的文件收集器。
 
 ### 环境要求
 
-- Node.js >=22.0
+- Node.js >=24.0
 - pnpm >= 11.21.0
 
 ### 安装依赖
@@ -151,6 +151,10 @@ GET /api/rooms/:roomId/uploads/:uploadId?download=1
 ```bash
 curl http://localhost:8787/api/rooms/demo-room
 ```
+
+> **公网部署**：Relay Server 是有状态服务，CI 只部署静态前端，**需自行托管才能公网可达**。
+> 完整部署清单（Docker / 反向代理 / 环境变量 / 安全）见 [RELAY_DEPLOY.md](./RELAY_DEPLOY.md)。
+> 部署到公网时务必设置 `RELAY_TOKEN` 与 `RELAY_ALLOWED_ORIGINS`，并强制 HTTPS。
 
 ## 使用说明
 

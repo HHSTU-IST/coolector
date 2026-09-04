@@ -1,0 +1,26 @@
+# Coolector Relay Server —— 生产部署
+# 用法：
+#   cp .env.example .env   # 按需填写 RELAY_TOKEN / RELAY_ALLOWED_ORIGINS
+#   docker compose up -d --build
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: coolector-relay:latest
+    container_name: coolector-relay
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: 8787
+      HOST: 0.0.0.0
+      RELAY_TOKEN: ${RELAY_TOKEN:-}
+      RELAY_ALLOWED_ORIGINS: ${RELAY_ALLOWED_ORIGINS:-}
+      MAX_TOTAL_UPLOAD_BYTES: ${MAX_TOTAL_UPLOAD_BYTES:-1073741824}
+      ROOM_TTL_MS: ${ROOM_TTL_MS:-21600000}
+    volumes:
+      - relay-uploads:/data/uploads
+
+volumes:
+  relay-uploads:
