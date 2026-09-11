@@ -120,6 +120,13 @@ const collectionItem = computed(() => {
   return collectionStore.checkFileStatus(fileStore.selectedFile.name)
 })
 
+const describeContent = () => {
+  if (!fileStore.selectedFile) return ''
+  if (fileStore.selectedFile.metadata.isTextContent) return '文本，可预览'
+  if (fileStore.selectedFile.metadata.isExtractedText) return '文档，已提取正文'
+  return '二进制，仅保留内容'
+}
+
 const metadataItems = computed(() => {
   if (!fileStore.selectedFile) return []
 
@@ -131,7 +138,7 @@ const metadataItems = computed(() => {
     { label: '扩展名', value: metadata.extension ? `.${metadata.extension}` : '无' },
     { label: '应用记录时间', value: formatDate(metadata.createdAt) },
     { label: '修改时间', value: formatDate(metadata.lastModified) },
-    { label: '内容类型', value: metadata.isTextContent ? '文本，可预览' : '二进制，仅保留内容' },
+    { label: '内容类型', value: describeContent() },
     { label: '学号', value: metadata.studentId ?? '未识别' },
     { label: '姓名', value: metadata.studentName ?? '未识别' },
     { label: '文件来源', value: fileStore.selectedFile.source === 'relay' ? 'Relay 接收' : '本地上传' }
@@ -180,7 +187,9 @@ const uploadSelectedFileToRelay = async () => {
         name: selectedFile.name,
         mimeType: selectedFile.type || 'application/octet-stream',
         lastModified: selectedFile.lastModified.toISOString(),
-        contentBase64: selectedFile.contentBase64
+        contentBase64: selectedFile.contentBase64,
+        // 附上已提取的正文，接收端无需自行解压即可预览
+        ...(selectedFile.metadata.isExtractedText ? { text: selectedFile.content } : {})
       })
 
     const headers: Record<string, string> = {

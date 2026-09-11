@@ -54,7 +54,12 @@ function startTunnel(port, label) {
       if (done) return
       done = true
       clearTimeout(timeout)
-      err ? reject(err) : resolve(value)
+
+      if (err) {
+        reject(err)
+        return
+      }
+      resolve(value)
     }
     const timeout = setTimeout(() => finish(new Error(`${label} 隧道 ${port} 超时未返回 URL`)), 40000)
 
@@ -80,7 +85,7 @@ function shutdown() {
   shuttingDown = true
   log('正在关闭所有子进程…')
   for (const c of children) {
-    try { c.kill('SIGTERM') } catch {}
+    try { c.kill('SIGTERM') } catch { }
   }
   setTimeout(() => process.exit(0), 800)
 }

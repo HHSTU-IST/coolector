@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { formatFileSize } from '../utils/format'
 import { extractStudentId, getFileBaseName, getFileExtension } from '../utils/filename'
+import { extractDocxText } from '../utils/docx'
 
 export interface FileInfo {
     id: string
@@ -35,6 +36,7 @@ export interface FileMetadata {
     createdAt: Date
     lastModified: Date
     isTextContent: boolean
+    isExtractedText: boolean
     studentId: string | null
     studentName: string | null
 }
@@ -47,6 +49,9 @@ export const MAX_FILE_SIZE = 10 * 1024 * 1024
 
 /** 文件总数上限，控制整体内存占用 */
 export const MAX_FILES = 200
+
+/** 压缩容器类文档（docx 是 zip），需解压后才有可读正文，不能直接按纯文本解码 */
+export const DOCUMENT_TEXT_EXTENSIONS = new Set(['docx'])
 
 /** 嵌套量词（如 (a+)+、(a*)*、(a{2,})+），不匹配输入时指数级回溯 */
 const UNSAFE_QUANTIFIER = /\((?:[^()\\]|\\.)*(?:[+*]|\{\d+,?\d*\})\)\s*(?:[+*]|\{\d+,?\d*\})/
@@ -198,6 +203,7 @@ export const useFileStore = defineStore('file', () => {
         type: string
         lastModified: Date
         hasTextContent: boolean
+        isExtractedText?: boolean
         createdAt?: Date
     }): FileMetadata => {
         const studentInfo = extractStudentInfo(file.name)
@@ -210,6 +216,7 @@ export const useFileStore = defineStore('file', () => {
             createdAt: file.createdAt ?? new Date(),
             lastModified: file.lastModified,
             isTextContent: file.hasTextContent,
+            isExtractedText: file.isExtractedText ?? false,
             studentId: studentInfo.studentId,
             studentName: studentInfo.studentName
         }
@@ -228,6 +235,16 @@ export const useFileStore = defineStore('file', () => {
         return btoa(binary)
     }
 
+    /** 容器类文档（docx）需解压才有正文，其他二进制格式返回 null */
+    const extractContainerDocumentText = (fileName: string, buffer: ArrayBuffer) => {
+        if (!DOCUMENT_TEXT_EXTENSIONS.has(getFileExtension(fileName))) return Promise.resolve(null)
+        return extractDocxText(buffer)
+    }
+
+    const binaryPlaceholder = (fileName: string) => {
+        return `此文件为二进制格式（${fileName}），已上传但暂不支持内容预览。`
+    }
+
     const addFile = (file: File) => {
         if (file.size > MAX_FILE_SIZE) {
             return Promise.reject(new Error(`文件超过 ${formatFileSize(MAX_FILE_SIZE)} 上限：${file.name}`))
@@ -237,11 +254,15 @@ export const useFileStore = defineStore('file', () => {
             return Promise.reject(new Error(`文件数量已达上限（${MAX_FILES} 个）：${file.name}`))
         }
 
-        return file.arrayBuffer().then((buffer) => {
+        return file.arrayBuffer().then(async (buffer) => {
             const hasTextContent = isTextFile(file)
+            // 容器类文档先解压读正文；提取失败只影响预览，原始文件仍按 base64 完整上传
+            const extractedText = hasTextContent
+                ? null
+                : await extractContainerDocumentText(file.name, buffer)
             const content = hasTextContent
                 ? new TextDecoder('utf-8').decode(buffer)
-                : `此文件为二进制格式（${file.name}），已上传但暂不支持内容预览。`
+                : extractedText ?? binaryPlaceholder(file.name)
             const fileInfo: FileInfo = {
                 id: createFileId(),
                 name: file.name,
@@ -254,7 +275,8 @@ export const useFileStore = defineStore('file', () => {
                     size: file.size,
                     type: file.type || 'application/octet-stream',
                     lastModified: new Date(file.lastModified),
-                    hasTextContent
+                    hasTextContent,
+                    isExtractedText: extractedText !== null
                 }),
                 size: file.size,
                 type: file.type || 'application/octet-stream',

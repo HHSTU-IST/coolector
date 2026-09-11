@@ -1,15 +1,13 @@
 <template>
   <div class="w-full">
-    <div class="rounded-lg border-2 border-dashed border-gray-300 p-5 text-center transition-colors hover:border-gray-400 sm:p-8">
-      <div
-        class="cursor-pointer"
-        @click="triggerFileInput"
-        @drop.prevent="handleDrop"
-        @dragover.prevent
-        @dragleave.prevent
-      >
+    <div
+      class="rounded-lg border-2 border-dashed border-gray-300 p-5 text-center transition-colors hover:border-gray-400 sm:p-8">
+      <div class="cursor-pointer" @click="triggerFileInput" @drop.prevent="handleDrop" @dragover.prevent
+        @dragleave.prevent>
         <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
-          <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path
+            d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
         <p class="mt-2 text-sm text-gray-600">
           <span class="font-medium text-indigo-600 hover:text-indigo-500">
@@ -18,16 +16,9 @@
           或拖拽文件到此处
         </p>
         <p class="text-xs text-gray-500 mt-1">
-          支持任意格式的文本文件
+          支持文本文件与 .docx 文档
         </p>
-        <input
-          ref="fileInput"
-          type="file"
-          multiple
-          class="hidden"
-          @click.stop
-          @change="handleFileSelect"
-        >
+        <input ref="fileInput" type="file" multiple class="hidden" @click.stop @change="handleFileSelect">
       </div>
     </div>
 
@@ -44,17 +35,10 @@
           RegExp
         </span>
       </div>
-      <input
-        v-model="filenamePatternInput"
-        type="text"
+      <input v-model="filenamePatternInput" type="text"
         class="mt-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-        placeholder="^.+\\.(md|ipynb|docx)$"
-        @input="handleFilenamePatternChange"
-      >
-      <p
-        class="mt-2 text-xs"
-        :class="fileStore.filenamePatternError ? 'text-red-600' : 'text-gray-500'"
-      >
+        placeholder="^.+\\.(md|ipynb|docx)$" @input="handleFilenamePatternChange">
+      <p class="mt-2 text-xs" :class="fileStore.filenamePatternError ? 'text-red-600' : 'text-gray-500'">
         {{ fileStore.filenamePatternError || '示例：^\\d{8}-.+\\.(md|ipynb|docx)$ 可要求文件名以 8 位学号开头。' }}
       </p>
     </div>
@@ -63,15 +47,13 @@
     <div v-if="fileStore.files.length > 0" class="mt-6">
       <h3 class="text-lg font-medium text-gray-900 mb-4">已上传的文件</h3>
       <div class="space-y-2">
-        <div
-          v-for="file in fileStore.files"
-          :key="file.id"
-          class="flex flex-col gap-3 rounded-lg bg-gray-50 p-3 transition-colors hover:bg-gray-100 sm:flex-row sm:items-center sm:justify-between"
-        >
+        <div v-for="file in fileStore.files" :key="file.id"
+          class="flex flex-col gap-3 rounded-lg bg-gray-50 p-3 transition-colors hover:bg-gray-100 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex min-w-0 items-start space-x-3 sm:items-center">
             <div class="flex-shrink-0">
               <svg class="h-8 w-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
             </div>
             <div class="flex-1 min-w-0">
@@ -80,31 +62,22 @@
               <p class="mt-1 text-xs text-gray-500">
                 {{ formatExtractedInfo(file) }}
               </p>
-              <p
-                class="mt-1 text-xs"
-                :class="file.filenameValidation.isValid ? 'text-green-600' : 'text-red-600'"
-              >
+              <p class="mt-1 text-xs" :class="file.filenameValidation.isValid ? 'text-green-600' : 'text-red-600'">
                 {{ file.filenameValidation.message }}
               </p>
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-2 sm:justify-end">
-            <span
-              class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
-              :class="file.filenameValidation.isValid ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'"
-            >
+            <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
+              :class="file.filenameValidation.isValid ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'">
               {{ file.filenameValidation.isValid ? '校验通过' : '校验失败' }}
             </span>
-            <button
-              @click="fileStore.selectFile(file)"
-              class="rounded-md px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:text-indigo-900"
-            >
+            <button @click="fileStore.selectFile(file)"
+              class="rounded-md px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:text-indigo-900">
               查看
             </button>
-            <button
-              @click="fileStore.removeFileById(file.id)"
-              class="rounded-md px-2 py-1 text-sm font-medium text-red-600 hover:bg-red-50 hover:text-red-900"
-            >
+            <button @click="fileStore.removeFileById(file.id)"
+              class="rounded-md px-2 py-1 text-sm font-medium text-red-600 hover:bg-red-50 hover:text-red-900">
               删除
             </button>
           </div>
@@ -115,16 +88,13 @@
     <!-- 收集名单上传 -->
     <div class="mt-8">
       <h3 class="text-lg font-medium text-gray-900 mb-4">收集名单</h3>
-      <div class="rounded-lg border-2 border-dashed border-blue-300 p-5 text-center transition-colors hover:border-blue-400 sm:p-6">
-        <div
-          class="cursor-pointer"
-          @click="triggerCollectionInput"
-          @drop.prevent="handleCollectionDrop"
-          @dragover.prevent
-          @dragleave.prevent
-        >
+      <div
+        class="rounded-lg border-2 border-dashed border-blue-300 p-5 text-center transition-colors hover:border-blue-400 sm:p-6">
+        <div class="cursor-pointer" @click="triggerCollectionInput" @drop.prevent="handleCollectionDrop"
+          @dragover.prevent @dragleave.prevent>
           <svg class="mx-auto h-10 w-10 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
           <p class="mt-2 text-sm text-gray-600">
             <span class="font-medium text-blue-600 hover:text-blue-500">
@@ -132,14 +102,8 @@
             </span>
             (每行一个文件名)
           </p>
-          <input
-            ref="collectionInput"
-            type="file"
-            class="hidden"
-            @click.stop
-            @change="handleCollectionSelect"
-            accept=".txt,.csv,.list"
-          >
+          <input ref="collectionInput" type="file" class="hidden" @click.stop @change="handleCollectionSelect"
+            accept=".txt,.csv,.list">
         </div>
       </div>
     </div>
