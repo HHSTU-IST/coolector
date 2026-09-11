@@ -11,15 +11,30 @@
     "@typescript-eslint/no-explicit-any": "off",
     "no-empty": "off",
     "no-unused-vars": "warn",
-    "no-console": "off"
+    "no-console": "off",
+    "require-unicode-regexp": "warn",
+    "require-await": "warn",
+    "no-promise-executor-return": "warn"
   },
   "ignorePatterns": [
     "dist",
     "node_modules",
-    "server",
+    "server/uploads",
     "coverage",
     "*.config.*",
     "src/**/*.test.ts",
     "src/**/*.spec.ts"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "server/**/*.js",
+        "server/**/*.mjs"
+      ],
+      "env": {
+        "node": true,
+        "browser": false
+      }
+    }
   ]
 }

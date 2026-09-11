@@ -80,7 +80,7 @@ function baseUrl(req) {
 function sanitizeRoomId(roomId) {
   if (!roomId || typeof roomId !== 'string') return null
   const normalized = roomId.trim()
-  return /^[a-zA-Z0-9_-]{4,64}$/.test(normalized) ? normalized : null
+  return /^[a-zA-Z0-9_-]{4,64}$/u.test(normalized) ? normalized : null
 }
 
 function createRoom(roomId = randomUUID().slice(0, 8)) {
@@ -228,13 +228,37 @@ function dispatchEvent(room, eventName, data) {
 
 function isTextMimeType(mimeType, fileName) {
   if (mimeType.startsWith('text/')) return true
-  return /\.(txt|md|json|xml|csv|log|conf|ini|yaml|yml|env|toml|sql|js|ts|tsx|jsx|css|scss|html|htm)$/i.test(fileName)
+  return /\.(txt|md|json|xml|csv|log|conf|ini|yaml|yml|env|toml|sql|js|ts|tsx|jsx|css|scss|html|htm)$/iu.test(fileName)
+}
+
+/**
+ * Node 的 req.headers 按 latin1 解码，浏览器发来的 UTF-8 文件名会变成乱码。
+ * 以 latin1 还原原始字节再按 UTF-8 解码；纯 ASCII 值经此转换保持不变。
+ */
+function decodeHeaderValue(value) {
+  if (typeof value !== 'string') return value
+  return Buffer.from(value, 'latin1').toString('utf8')
+}
+
+/**
+ * HTTP 头值只能是 latin1，中文文件名需按 RFC 6266 用 filename* 携带 UTF-8 百分号编码，
+ * 并给一份 ASCII 回退的 filename 供旧客户端使用。
+ */
+function contentDisposition(fileName) {
+  const name = String(fileName)
+  const fallback = name
+    .replace(/[^\x20-\x7e]+/gu, '_')
+    .replaceAll('"', '')
+
+  return `attachment; filename="${fallback || 'file'}"; filename*=UTF-8''${encodeURIComponent(name)}`
 }
 
 function sanitizeStorageFileName(fileName) {
   const safeBaseName = basename(String(fileName))
-    .replace(/[\u0000-\u001f<>:"/\\|?*]+/g, '_')
-    .replace(/^\.+$/, 'file')
+    // 有意匹配控制字符：清洗它们以阻断路径穿越与非法文件名
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f<>:"/\\|?*]+/gu, '_')
+    .replace(/^\.+$/u, 'file')
     .trim()
 
   return (safeBaseName || 'file').slice(0, 180)
@@ -257,7 +281,7 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
   const contentType = String(req.headers['content-type'] ?? '')
   if (contentType.includes('application/json')) {
     const raw = bodyBuffer.length ? JSON.parse(bodyBuffer.toString('utf8')) : {}
-    const fileName = raw.name ?? raw.fileName ?? headers['x-relay-filename'] ?? query.get('name')
+    const fileName = raw.name ?? raw.fileName ?? decodeHeaderValue(headers['x-relay-filename']) ?? query.get('name')
     if (!fileName) {
       throw new Error('Missing file name')
     }
@@ -287,7 +311,7 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
     }
   }
 
-  const fileName = headers['x-relay-filename'] ?? query.get('name')
+  const fileName = decodeHeaderValue(headers['x-relay-filename']) ?? query.get('name')
   if (!fileName) {
     throw new Error('Missing file name')
   }
@@ -429,7 +453,7 @@ async function handleDownload(req, res, room, uploadId, query) {
     res.writeHead(200, {
       ...headers,
       'Content-Type': upload.mimeType,
-      'Content-Disposition': `attachment; filename="${upload.name.replaceAll('"', '\\"')}"`,
+      'Content-Disposition': contentDisposition(upload.name),
       'Content-Length': buffer.length
     })
     res.end(buffer)
@@ -525,7 +549,7 @@ function cleanupRooms() {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? `localhost:${PORT}`}`)
-    const pathname = url.pathname.replace(/\/+$/, '') || '/'
+    const pathname = url.pathname.replace(/\/+$/u, '') || '/'
 
     const cors = corsHeaders(req)
 
@@ -580,7 +604,7 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    const roomMatch = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(events|uploads)(?:\/([^/]+))?)?$/)
+    const roomMatch = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(events|uploads)(?:\/([^/]+))?)?$/u)
     if (!roomMatch) {
       writeJson(res, 404, { error: 'Not found' }, cors)
       return

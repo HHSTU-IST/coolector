@@ -209,7 +209,7 @@ const statusBadgeClass = computed(() => {
   }
 })
 
-const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/, '')
+const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/u, '')
 
 const ensureRoom = async (baseUrl: string, targetRoomId: string) => {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -324,7 +324,7 @@ const decodeRelayContent = (upload: RelayUploadSummary) => {
   return upload.previewText ?? ''
 }
 
-const handleUploadCreated = async (event: MessageEvent<string>) => {
+const handleUploadCreated = (event: MessageEvent<string>) => {
   const payload = parseEvent<UploadCreatedData>(event)
   const upload = payload.data.upload
 

@@ -12,7 +12,7 @@ export function getFileBaseName(fileName: string): string {
 
 /** 抽取 6–12 位连续数字作为学号，找不到返回 null */
 export function extractStudentId(text: string): string | null {
-    return text.match(/\d{6,12}/)?.[0] ?? null
+    return text.match(/\d{6,12}/u)?.[0] ?? null
 }
 
 /**
@@ -21,8 +21,8 @@ export function extractStudentId(text: string): string | null {
  */
 export function normalizeComparableName(fileName: string): string {
     return getFileBaseName(fileName)
-        .replace(/[()[\]{}【】（）]+/g, ' ')
-        .replace(/[_\-\s]+/g, ' ')
+        .replace(/[()[\]{}【】（）]+/gu, ' ')
+        .replace(/[_\-\s]+/gu, ' ')
         .trim()
         .toLowerCase()
 }

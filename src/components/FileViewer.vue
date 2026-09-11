@@ -157,7 +157,7 @@ const formatDate = (date: Date): string => {
   return date.toLocaleString('zh-CN')
 }
 
-const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/, '')
+const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/u, '')
 
 const uploadSelectedFileToRelay = async () => {
   if (!fileStore.selectedFile) {

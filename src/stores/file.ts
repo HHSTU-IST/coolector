@@ -54,10 +54,10 @@ export const MAX_FILES = 200
 export const DOCUMENT_TEXT_EXTENSIONS = new Set(['docx'])
 
 /** 嵌套量词（如 (a+)+、(a*)*、(a{2,})+），不匹配输入时指数级回溯 */
-const UNSAFE_QUANTIFIER = /\((?:[^()\\]|\\.)*(?:[+*]|\{\d+,?\d*\})\)\s*(?:[+*]|\{\d+,?\d*\})/
+const UNSAFE_QUANTIFIER = /\((?:[^()\\]|\\.)*(?:[+*]|\{\d+,?\d*\})\)\s*(?:[+*]|\{\d+,?\d*\})/u
 
 /** 带量词的重叠分支（如 (a|a)+、(a|ab)+），同样指数级回溯 */
-const UNSAFE_ALTERNATION = /\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/
+const UNSAFE_ALTERNATION = /\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/u
 
 export const useFileStore = defineStore('file', () => {
     const files = ref<FileInfo[]>([])
@@ -124,6 +124,8 @@ export const useFileStore = defineStore('file', () => {
         }
 
         try {
+            // 用户在 UI 自定义的范式，不强制加 u 标志，以免改变其输入正则的语义
+            // eslint-disable-next-line require-unicode-regexp
             const regex = new RegExp(pattern)
             const isValid = regex.test(fileName)
             filenamePatternError.value = ''
@@ -160,8 +162,8 @@ export const useFileStore = defineStore('file', () => {
         if (!value) return null
 
         const cleaned = value
-            .replace(/[_-]+/g, ' ')
-            .replace(/\s+/g, ' ')
+            .replace(/[_-]+/gu, ' ')
+            .replace(/\s+/gu, ' ')
             .trim()
 
         return cleaned || null
@@ -169,9 +171,9 @@ export const useFileStore = defineStore('file', () => {
 
     const extractStudentInfo = (fileName: string) => {
         const baseName = getFileBaseName(fileName)
-        const normalized = baseName.replace(/[()[\]{}【】（）]/g, ' ')
+        const normalized = baseName.replace(/[()[\]{}【】（）]/gu, ' ')
 
-        const idFirstMatch = normalized.match(/(?<studentId>\d{6,12})[\s_-]+(?<studentName>[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z\s_-]{1,40})/)
+        const idFirstMatch = normalized.match(/(?<studentId>\d{6,12})[\s_-]+(?<studentName>[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z\s_-]{1,40})/u)
         if (idFirstMatch?.groups) {
             return {
                 studentId: idFirstMatch.groups.studentId,
@@ -179,7 +181,7 @@ export const useFileStore = defineStore('file', () => {
             }
         }
 
-        const nameFirstMatch = normalized.match(/(?<studentName>[\u4e00-\u9fa5]{2,6}|[A-Za-z][A-Za-z\s_-]{1,40})[\s_-]+(?<studentId>\d{6,12})/)
+        const nameFirstMatch = normalized.match(/(?<studentName>[\u4e00-\u9fa5]{2,6}|[A-Za-z][A-Za-z\s_-]{1,40})[\s_-]+(?<studentId>\d{6,12})/u)
         if (nameFirstMatch?.groups) {
             return {
                 studentId: nameFirstMatch.groups.studentId,

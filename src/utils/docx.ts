@@ -91,13 +91,13 @@ async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
 
 function decodeXmlEntities(value: string): string {
   return value
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) => safeCodePoint(Number.parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec: string) => safeCodePoint(Number.parseInt(dec, 10)))
-    .replace(/&amp;/g, '&')
+    .replace(/&lt;/gu, '<')
+    .replace(/&gt;/gu, '>')
+    .replace(/&quot;/gu, '"')
+    .replace(/&apos;/gu, "'")
+    .replace(/&#x([0-9a-fA-F]+);/gu, (_, hex: string) => safeCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/gu, (_, dec: string) => safeCodePoint(Number.parseInt(dec, 10)))
+    .replace(/&amp;/gu, '&')
 }
 
 /** 过滤非法码点，避免 XML 数值实体构造出代理项错误 */
@@ -106,7 +106,7 @@ function safeCodePoint(code: number): string {
 }
 
 function collectParagraphText(paragraphXml: string): string {
-  const inlinePattern = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/>|<w:br\b[^>]*\/>/g
+  const inlinePattern = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/>|<w:br\b[^>]*\/>/gu
   let text = ''
 
   for (const match of paragraphXml.matchAll(inlinePattern)) {
@@ -126,7 +126,7 @@ function collectParagraphText(paragraphXml: string): string {
 
 export function extractTextFromDocumentXml(xml: string): string {
   const paragraphs: string[] = []
-  const paragraphPattern = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g
+  const paragraphPattern = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/gu
 
   for (const match of xml.matchAll(paragraphPattern)) {
     const paragraph = collectParagraphText(match[1])

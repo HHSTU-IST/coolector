@@ -21,16 +21,16 @@ function log(msg) {
 }
 
 function findTunnelUrl(chunk) {
-  const m = String(chunk).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/)
+  const m = String(chunk).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/u)
   return m ? m[0] : null
 }
 
 function updateEnvRelayUrl(url) {
   let text = readFileSync(ENV_PATH, 'utf8')
-  const lines = text.split(/\r?\n/)
+  const lines = text.split(/\r?\n/u)
   let found = false
   const out = lines.map((line) => {
-    if (/^VITE_RELAY_URL=/.test(line)) {
+    if (/^VITE_RELAY_URL=/u.test(line)) {
       found = true
       return `VITE_RELAY_URL=${url}`
     }
@@ -108,7 +108,9 @@ async function main() {
   children.push(pnpm)
 
   // 等 Vite dev server 就绪后再起 Web 隧道
-  await new Promise((r) => setTimeout(r, 3500))
+  await new Promise((resolve) => {
+    setTimeout(resolve, 3500)
+  })
 
   const { url: webUrl } = await startTunnel(APP_PORT, 'web')
 
