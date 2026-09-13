@@ -1,3 +1,7 @@
+# yaml-language-server: $schema=./.vscode/schemas/compose-spec.schema.json
+# ↑ 校验用仓库内的 compose 规范副本。编辑器默认去 GitHub raw 拉 compose-spec，
+#   网络/代理受限时会报 `Unable to load schema ... vscode/content failed` —— 指向本地即不再联网。
+#
 # Coolector Relay Server —— 生产部署
 # 用法：
 #   cp .env.example .env   # 必须填写 RELAY_TOKEN（fail-closed：未设置将拒绝启动）

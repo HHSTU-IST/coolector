@@ -12,7 +12,8 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:net'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { existsSync, readdirSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -436,7 +437,7 @@ describe('元数据上限与配额计量', () => {
     expect(Buffer.byteLength(raw, 'utf8')).toBeLessThan(64 * 1024)
   })
 
-  it('房间上传条数上限返回 507', async () => {
+  it('房间上传条数上限返回 429（而非误报"配额已满"）', async () => {
     const room = await createRoom(relay.baseUrl, 'metadata-room-3')
     const send = (index) => fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
       method: 'POST',
@@ -449,8 +450,25 @@ describe('元数据上限与配额计量', () => {
     expect((await send(3)).status).toBe(201)
 
     const overflow = await send(4)
-    expect(overflow.status).toBe(507)
+    expect(overflow.status).toBe(429)
     expect((await overflow.json()).error).toMatch(/upload count limit/iu)
+  })
+
+  it('并发上传不能击穿条数上限（与字节配额同型的竞态）', async () => {
+    const room = await createRoom(relay.baseUrl, 'metadata-room-count-race')
+    const payload = envelopeBody({ name: 'n.md', content: 'x' })
+
+    // MAX_ROOM_UPLOADS 在该实例里是 3，用远大于它的并发数打
+    const results = await Promise.all(Array.from({ length: 24 }, () => fetch(
+      `${relay.baseUrl}/api/rooms/${room.roomId}/uploads`,
+      { method: 'POST', headers: ENVELOPE_HEADERS, body: payload }
+    )))
+
+    const accepted = results.filter((response) => response.status === 201).length
+    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+
+    expect(accepted).toBeLessThanOrEqual(3)
+    expect(state.uploadCount).toBeLessThanOrEqual(3)
   })
 
   it('超长 mimeType 被中和为 octet-stream，且该文件仍可下载', async () => {
@@ -607,6 +625,199 @@ describe('房间生命周期', () => {
     controller.abort()
     await reader.cancel().catch(() => {})
   }, 20000)
+}, 60000)
+
+describe('启动回收的归属门控', () => {
+  let uploadDir
+
+  beforeAll(async () => {
+    uploadDir = await mkdtemp(join(tmpdir(), 'coolector-sentinel-'))
+    // 这些目录不属于本程序（没有归属标记），启动回收必须放过它们
+    await mkdir(join(uploadDir, 'notes.backup'), { recursive: true })
+    await writeFile(join(uploadDir, 'notes.backup', 'db-dump.sql'), 'precious data')
+    await mkdir(join(uploadDir, 'my notes'), { recursive: true })
+    await writeFile(join(uploadDir, 'my notes', 'a.txt'), 'x')
+    await writeFile(join(uploadDir, 'loose.txt'), 'x')
+  }, 30000)
+
+  afterAll(async () => {
+    await rm(uploadDir, { recursive: true, force: true })
+  })
+
+  it('无归属标记的目录与散落文件既不被删除，也不计入配额', async () => {
+    const relay = await startRelay({}, { uploadDir })
+
+    try {
+      // 关键回归：过去是无差别递归删除，这些文件会全部消失
+      expect(existsSync(join(uploadDir, 'notes.backup', 'db-dump.sql'))).toBe(true)
+      expect(existsSync(join(uploadDir, 'my notes', 'a.txt'))).toBe(true)
+      expect(existsSync(join(uploadDir, 'loose.txt'))).toBe(true)
+
+      const root = await (await fetch(`${relay.baseUrl}/`)).json()
+      expect(root.storageUsedBytes).toBe(0)
+    } finally {
+      await relay.stop()
+    }
+  }, 40000)
+}, 60000)
+
+describe('删除失败的错误隔离', () => {
+  it('DELETE 时目录删除失败仍返回 200，但如实标记 storageRemoved=false', async () => {
+    const relay = await startRelay({ RELAY_TEST_INJECT_RM_FAILURE: 'true' })
+
+    try {
+      const room = await createRoom(relay.baseUrl, 'rm-failure-delete-room')
+
+      await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: ENVELOPE_HEADERS,
+        body: envelopeBody({ name: 'x.md', content: 'x' })
+      })
+
+      const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, {
+        method: 'DELETE',
+        headers: authHeaders
+      })
+
+      // 房间在服务端已经不存在；磁盘删不掉是次生问题，不能让调用方以为删除失败而反复重试
+      expect(response.status).toBe(200)
+      const payload = await response.json()
+      expect(payload.deleted).toBe(true)
+      expect(payload.storageRemoved).toBe(false)
+
+      // 配额已回收，进程仍健康
+      expect((await fetch(`${relay.baseUrl}/healthz`)).status).toBe(200)
+    } finally {
+      await relay.stop()
+    }
+  }, 40000)
+
+  it('目录删除失败不会让 relay 进程退出（清理任务必须吞掉异常）', async () => {
+    const relay = await startRelay({
+      // 故障注入：让 destroyRoom 的 rm 必定失败
+      RELAY_TEST_INJECT_RM_FAILURE: 'true',
+      ROOM_MAX_LIFETIME_MS: '800',
+      ROOM_CLEANUP_INTERVAL_MS: '300'
+    })
+
+    try {
+      const room = await createRoom(relay.baseUrl, 'rm-failure-room')
+
+      await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: ENVELOPE_HEADERS,
+        body: envelopeBody({ name: 'x.md', content: 'x' })
+      })
+
+      // 等房间被绝对上限回收（此时 rm 会失败）
+      await new Promise((resolve) => {
+        setTimeout(resolve, 2000)
+      })
+
+      // 关键断言：进程仍然服务，没有被未处理拒绝带走
+      const health = await fetch(`${relay.baseUrl}/healthz`)
+      expect(health.status).toBe(200)
+
+      // 房间在服务端已经不存在
+      const state = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })
+      expect(state.status).toBe(404)
+    } finally {
+      await relay.stop()
+    }
+  }, 40000)
+}, 60000)
+
+describe('在途上传与房间删除的交界', () => {
+  let relay
+
+  beforeAll(async () => {
+    relay = await startRelay({ MAX_FILE_BYTES: String(8 * 1024 * 1024), MAX_REQUEST_TIMEOUT: undefined })
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  it('删除房间后不得留下无人认领的文件', async () => {
+    const room = await createRoom(relay.baseUrl, 'inflight-room-1')
+    const payload = envelopeBody({
+      name: 'big.bin',
+      mimeType: 'application/octet-stream',
+      content: Buffer.alloc(4 * 1024 * 1024, 0x48)
+    })
+
+    const uploadPromise = fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: payload
+    }).catch(() => null)
+
+    const deletePromise = fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, {
+      method: 'DELETE',
+      headers: authHeaders
+    }).catch(() => null)
+
+    await Promise.all([uploadPromise, deletePromise])
+
+    // 等落盘/清理收尾
+    await new Promise((resolve) => {
+      setTimeout(resolve, 400)
+    })
+
+    const roomGone = (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).status === 404
+    const roomDir = join(relay.uploadDir, room.roomId)
+    const hasPayloadFile = existsSync(roomDir)
+      && readdirSync(roomDir).some((name) => !name.startsWith('.'))
+
+    // 需要防住的状态：房间已不存在，磁盘上却留着没有归属的文件（静默丢件 + 占额）
+    expect(roomGone && hasPayloadFile).toBe(false)
+  }, 30000)
+}, 60000)
+
+describe('details 端点契约', () => {
+  let relay
+
+  beforeAll(async () => {
+    relay = await startRelay()
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  it('落盘后仍能从磁盘读回完整 base64（内存不再常驻副本）', async () => {
+    const room = await createRoom(relay.baseUrl, 'details-room-1')
+    const content = '正文内容-完整往返'
+
+    await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: 'details.md', content })
+    })
+
+    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+    const details = await (await fetch(state.uploads[0].detailsUrl, { headers: authHeaders })).json()
+
+    expect(Buffer.from(details.contentBase64, 'base64').toString('utf8')).toBe(content)
+    expect(Buffer.from(details.upload.contentBase64, 'base64').toString('utf8')).toBe(content)
+  })
+
+  it('房间目录写入归属标记（供启动回收判定）', async () => {
+    const room = await createRoom(relay.baseUrl, 'details-room-2')
+
+    await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: 'sentinel.md', content: 'x' })
+    })
+
+    const sentinelPath = join(relay.uploadDir, room.roomId, '.coolector-room')
+    expect(existsSync(sentinelPath)).toBe(true)
+
+    const sentinel = JSON.parse(await readFile(sentinelPath, 'utf8'))
+    expect(sentinel.generator).toBe('coolector-relay')
+    expect(sentinel.roomId).toBe(room.roomId)
+  })
 }, 60000)
 
 describe('启动时回收无主上传目录', () => {

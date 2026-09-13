@@ -75,9 +75,13 @@ export function limitUploadName(name, maxBytes) {
   const dotIndex = raw.lastIndexOf('.')
   const extension = dotIndex > 0 && dotIndex >= raw.length - 16 ? raw.slice(dotIndex) : ''
   const extensionBytes = Buffer.byteLength(extension, 'utf8')
-  const budget = Math.max(maxBytes - extensionBytes, 1)
-  const stem = truncateUtf8(extension ? raw.slice(0, dotIndex) : raw, budget).text
 
+  // 扩展名本身就放不下时整段丢弃，否则会为了"保留扩展名"而越过上限
+  if (extensionBytes <= 0 || extensionBytes > maxBytes) {
+    return { name: truncateUtf8(raw, maxBytes).text, truncated: true }
+  }
+
+  const stem = truncateUtf8(raw.slice(0, dotIndex), maxBytes - extensionBytes).text
   return { name: `${stem}${extension}`, truncated: true }
 }
 

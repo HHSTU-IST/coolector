@@ -85,6 +85,8 @@ const ROOM_CLEANUP_INTERVAL_MS = requirePositiveInt('ROOM_CLEANUP_INTERVAL_MS', 
 // 默认回收：房间只活在内存里，重启后这些文件已无法通过任何 HTTP 路径访问，
 // 却会被 initStoredBytes 永久计入全局配额，且没有回收路径。
 const KEEP_ORPHAN_UPLOADS = (process.env.RELAY_KEEP_ORPHAN_UPLOADS ?? 'false') === 'true'
+// 仅测试用的故障注入：让 destroyRoom 的目录删除必定失败，用于验证错误隔离护栏。默认关闭。
+const INJECT_RM_FAILURE = process.env.RELAY_TEST_INJECT_RM_FAILURE === 'true'
 // 仅在可信反向代理之后才信任 x-forwarded-* 头，避免直连时被伪造出错误跳转地址。
 const TRUST_PROXY = (process.env.RELAY_TRUST_PROXY ?? 'false') === 'true'
 // SSE 票据有效期（毫秒），短时效一次性，替代 URL 中的长期 token。
@@ -179,8 +181,12 @@ function createRoom(roomId = randomUUID()) {
     receiver: null,
     queue: [],
     uploads: new Map(),
-    /** 本房间已占用的字节数，用于单房间配额（避免单个房间吃光全局配额） */
+    /** 本房间已占用的字节数（正文 + 元数据 + 保留文本），用于单房间配额 */
     storedBytes: 0,
+    /** 已预占但尚未完成落盘的上传条数（见 reserveUploadSlot） */
+    pendingUploads: 0,
+    /** 是否已被销毁：用于让在途上传感知到「房间已没了」而不是静默写入 */
+    destroyed: false,
     stats: {
       receiverConnections: 0,
       uploads: 0,
@@ -196,6 +202,54 @@ function getRoom(roomId) {
   const id = sanitizeRoomId(roomId)
   if (!id) return null
   return rooms.get(id) ?? null
+}
+
+/**
+ * 原子预留存储配额 —— 本项目**唯一**允许增加 `room.storedBytes` / `totalStoredBytes` 的入口。
+ *
+ * 检查与扣减必须**同步**完成：一旦中间插入 `await`，并发请求会全部读到旧值而击穿配额
+ * （实测 32 并发可把 4MB 配额打到 8.39×）。返回值是回滚函数，落盘失败时必须调用。
+ */
+function reserveStorageQuota(room, quotaBytes) {
+  if (room.storedBytes + quotaBytes > MAX_ROOM_UPLOAD_BYTES) {
+    throw new HttpError(507, `Room storage quota exceeded (limit ${MAX_ROOM_UPLOAD_BYTES} bytes)`)
+  }
+  if (totalStoredBytes + quotaBytes > MAX_TOTAL_UPLOAD_BYTES) {
+    throw new HttpError(507, `Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
+  }
+
+  room.storedBytes += quotaBytes
+  totalStoredBytes += quotaBytes
+
+  return () => {
+    // 房间已被销毁时，它的占用已经在 destroyRoom 里整体回收过了 —— 这里再减就会把
+    // 其它房间的额度一起吃掉（全局计数被多减）。故以 destroyed 标记短路。
+    if (room.destroyed) return
+    room.storedBytes = Math.max(room.storedBytes - quotaBytes, 0)
+    totalStoredBytes = Math.max(totalStoredBytes - quotaBytes, 0)
+  }
+}
+
+/**
+ * 原子预留一个上传槽位。
+ *
+ * 与配额同理：必须把「正在落盘中」的请求也计入，否则并发下每个请求都只看到
+ * `uploads.size` 的旧值（实测限额 5、50 并发可全部通过）。成功落盘后调用返回的函数，
+ * 此时 `uploads.size` 已经加过，`pendingUploads` 减回，账目守恒。
+ */
+function reserveUploadSlot(room) {
+  if (room.uploads.size + room.pendingUploads >= MAX_ROOM_UPLOADS) {
+    throw new HttpError(429, `Room upload count limit reached (limit ${MAX_ROOM_UPLOADS})`)
+  }
+
+  room.pendingUploads += 1
+  let released = false
+
+  return () => {
+    if (released) return
+    released = true
+    room.pendingUploads = Math.max(room.pendingUploads - 1, 0)
+  }
 }
 
 function roomSnapshot(room, req) {
@@ -308,13 +362,41 @@ function dispatchEvent(room, eventName, data) {
   return event
 }
 
+/**
+ * 房间目录的归属标记文件名。
+ *
+ * 启动回收**只删**「内含该标记、且标记里的 roomId 与目录名一致」的目录。
+ * 没有这一层守卫的话，一个无差别的 `rm -rf` 在 `UPLOAD_DIR` 指向卷根时会删掉无关数据
+ * （实测把 `notes.backup/`、`my notes/` 一起删光）。
+ */
+const ROOM_SENTINEL_FILENAME = '.coolector-room'
+
+async function writeRoomSentinel(roomUploadDir, roomId) {
+  const payload = JSON.stringify({ generator: 'coolector-relay', version: 1, roomId })
+  await writeFile(join(roomUploadDir, ROOM_SENTINEL_FILENAME), payload, 'utf8')
+}
+
+/** 读取目录归属标记；缺失 / 损坏 / 非本程序所写一律返回 null（此时**绝不删除**） */
+async function readRoomSentinel(roomUploadDir) {
+  try {
+    const raw = await readFile(join(roomUploadDir, ROOM_SENTINEL_FILENAME), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed?.generator !== 'coolector-relay') return null
+    return typeof parsed.roomId === 'string' ? parsed.roomId : null
+  } catch {
+    return null
+  }
+}
+
 async function persistUpload(upload) {
-  const storageFileName = `${upload.id}-${sanitizeStorageFileName(upload.name)}`
   const roomUploadDir = join(UPLOAD_DIR, upload.roomId)
+  const storageFileName = `${upload.id}-${sanitizeStorageFileName(upload.name)}`
   const storagePath = join(roomUploadDir, storageFileName)
-  const buffer = Buffer.from(upload.contentBase64, 'base64')
+  const buffer = Buffer.from(upload.contentBase64 ?? '', 'base64')
 
   await mkdir(roomUploadDir, { recursive: true })
+  // 先写归属标记再写正文，保证目录一旦有内容就一定带标记
+  await writeRoomSentinel(roomUploadDir, upload.roomId)
   await writeFile(storagePath, buffer)
 
   upload.storagePath = storagePath
@@ -504,10 +586,6 @@ async function handleUpload(req, res, room, query) {
     throw new HttpError(413, `File exceeds size limit (${MAX_FILE_BYTES} bytes)`)
   }
 
-  if (room.uploads.size >= MAX_ROOM_UPLOADS) {
-    throw new HttpError(507, `Room upload count limit reached (${MAX_ROOM_UPLOADS})`)
-  }
-
   if (isUploadBytesExceeded(req, body.length)) {
     throw new HttpError(429, `Upload rate exceeded (limit ${MAX_UPLOAD_BYTES_PER_WINDOW} bytes per window)`)
   }
@@ -524,16 +602,17 @@ async function handleUpload(req, res, room, query) {
     + (textField ? Buffer.byteLength(textField.text, 'utf8') : 0)
   const quotaBytes = size + metadataBytes
 
-  // ⚠️ 配额判断与累加之间不能有 await：否则并发请求会全部读到旧值而击穿配额。
-  // 这里先**同步预占**，落盘失败再在 catch 里回滚。
-  if (room.storedBytes + quotaBytes > MAX_ROOM_UPLOAD_BYTES) {
-    throw new HttpError(507, `Room storage quota exceeded (limit ${MAX_ROOM_UPLOAD_BYTES} bytes)`)
+  // —— 两处原子预留，都必须在任何 await 之前同步完成 ——
+  // 条数与字节是两类独立资源，历史上各自被并发绕过过一次（字节 8.39×、条数 10×）。
+  const releaseSlot = reserveUploadSlot(room)
+  let releaseQuota
+
+  try {
+    releaseQuota = reserveStorageQuota(room, quotaBytes)
+  } catch (error) {
+    releaseSlot()
+    throw error
   }
-  if (totalStoredBytes + quotaBytes > MAX_TOTAL_UPLOAD_BYTES) {
-    throw new HttpError(507, `Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
-  }
-  room.storedBytes += quotaBytes
-  totalStoredBytes += quotaBytes
 
   const upload = {
     id: randomUUID(),
@@ -543,7 +622,7 @@ async function handleUpload(req, res, room, query) {
     lastModified: metadata.lastModified,
     uploadedAt: nowIso(),
     size,
-    /** 该条上传占用配额的字节数（正文 + 元数据），回收时按此值扣减 */
+    /** 该条上传占用配额的字节数（正文 + 元数据 + 保留文本），回收时按此值扣减 */
     quotaBytes,
     contentBase64: metadata.contentBase64,
     text: textField ? textField.text : null,
@@ -554,21 +633,45 @@ async function handleUpload(req, res, room, query) {
   try {
     await persistUpload(upload)
   } catch (error) {
-    // 落盘失败必须退回预占的配额，否则房间会被永久"占额"
-    room.storedBytes -= quotaBytes
-    totalStoredBytes -= quotaBytes
+    // 落盘失败必须退回预占的配额与槽位，否则房间会被永久"占额"
+    releaseQuota()
+    releaseSlot()
     throw error
   }
 
+  // 落盘期间房间可能已被销毁（绝对上限到期，或收到 DELETE）。
+  // 此时必须把刚写下的文件删掉并回滚配额，并明确告知调用方 —— 绝不能返回 201 让
+  // 发送方以为成功，而接收端永远收不到（静默丢件）。
+  if (room.destroyed || !rooms.has(room.id)) {
+    try {
+      await rm(upload.storagePath, { force: true })
+    } catch (error) {
+      auditLog('orphan_file_cleanup_failed', {
+        roomId: room.id,
+        message: error instanceof Error ? error.message : String(error)
+      })
+    }
+    releaseQuota()
+    releaseSlot()
+    throw new HttpError(410, 'Room was deleted while the upload was in flight')
+  }
+
+  // 落盘已成功，内存里不再保留 base64 副本（details 端点按需从磁盘读）。
+  // 一份 10MB 上传若常驻 base64，会让 RSS 多出 1.33× 文件体积。
+  upload.contentBase64 = null
+
   room.uploads.set(upload.id, upload)
+  releaseSlot()
   room.stats.uploads += 1
   room.updatedAt = upload.uploadedAt
   room.lastActivity = Date.now()
   // 只记录截断后的名字与长度，避免超长文件名把审计日志放大到 MB 级
   auditLog('upload_created', { roomId: room.id, name: upload.name.slice(0, 120), nameLength: upload.name.length, size })
 
-  // 响应里带上完整正文，广播事件里只带元信息
+  // 201 响应里带上完整正文（发送方原本就能拿到），广播事件里只带元信息
   const uploadPayload = uploadSummary(upload, req)
+  uploadPayload.contentBase64 = metadata.contentBase64
+
   const event = dispatchEvent(room, 'upload.created', {
     roomId: room.id,
     upload: uploadSummary(upload, req, { includeContent: false }),
@@ -592,7 +695,7 @@ async function handleDownload(req, res, room, uploadId, query) {
   if (download === '1') {
     const buffer = upload.storagePath
       ? await readFile(upload.storagePath)
-      : Buffer.from(upload.contentBase64, 'base64')
+      : Buffer.from(upload.contentBase64 ?? '', 'base64')
     res.writeHead(200, {
       ...headers,
       'Content-Type': upload.mimeType,
@@ -605,10 +708,19 @@ async function handleDownload(req, res, room, uploadId, query) {
     return
   }
 
+  // 落盘后内存里不保留 base64 副本（见 handleUpload），这里按需从磁盘读回。
+  // 契约不变：details 端点仍然返回 contentBase64。
+  const storedBase64 = upload.contentBase64 ?? (upload.storagePath
+    ? (await readFile(upload.storagePath)).toString('base64')
+    : null)
+
+  const summary = uploadSummary(upload, req)
+  summary.contentBase64 = storedBase64
+
   return writeJson(res, 200, {
-    upload: uploadSummary(upload, req),
+    upload: summary,
     text: upload.previewText,
-    contentBase64: upload.contentBase64
+    contentBase64: storedBase64
   }, headers)
 }
 
@@ -651,18 +763,41 @@ function handleEvents(req, res, room) {
   })
 }
 
-/** 删除房间并回收其占用的磁盘配额 */
+/**
+ * 删除房间并回收其占用的磁盘配额。
+ *
+ * **错误隔离**：`rm` 失败（文件被占用、权限不足等）绝不允许冒泡 —— 清理任务由定时器驱动，
+ * 未处理的拒绝会让整个 relay 进程退出（实测 exit=1，整站下线）。
+ * 删除失败时返回 false，由调用方记录并等待下次重试。
+ */
 async function destroyRoom(room) {
+  // 先置标记：在途上传据此判断「房间已经没了」，避免落盘后静默写入无人认领的文件
+  room.destroyed = true
   closeReceiver(room)
   rooms.delete(room.id)
 
-  // 以房间自身的累计值为准，避免逐个上传相减时漏掉任何一条
-  totalStoredBytes -= room.storedBytes ?? 0
+  totalStoredBytes = Math.max(totalStoredBytes - (room.storedBytes ?? 0), 0)
   room.storedBytes = 0
+  room.pendingUploads = 0
   room.uploads.clear()
 
-  // 等待删除完成：调用方（DELETE / 清理任务）需要磁盘与计数同步，否则刚删完又占 507
-  await rm(join(UPLOAD_DIR, room.id), { recursive: true, force: true })
+  const roomDir = join(UPLOAD_DIR, room.id)
+
+  try {
+    // 故障注入（仅测试用）：验证「删除失败不得冒泡成进程退出」这条护栏。
+    // 只影响可靠性、不涉及安全，默认关闭。
+    if (INJECT_RM_FAILURE) {
+      throw new Error('injected rm failure (RELAY_TEST_INJECT_RM_FAILURE)')
+    }
+
+    await rm(roomDir, { recursive: true, force: true })
+    return true
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    auditLog('room_delete_failed', { roomId: room.id, message })
+    console.error(`[relay] 房间目录删除失败，留待下次重试或人工清理：${roomDir} —— ${message}`)
+    return false
+  }
 }
 
 async function handleRoomDelete(req, res, roomId) {
@@ -671,11 +806,15 @@ async function handleRoomDelete(req, res, roomId) {
     return writeJson(res, 404, { error: 'Room not found' }, corsHeaders(req))
   }
 
-  await destroyRoom(room)
-  auditLog('room_deleted', { roomId: room.id })
+  const removed = await destroyRoom(room)
+  auditLog('room_deleted', { roomId: room.id, dirRemoved: removed })
+
+  // 即使磁盘目录没删干净，房间在服务端也已经不存在了 —— 对外仍报成功，
+  // 否则调用方会以为删除失败而反复重试，反而放大问题。
   return writeJson(res, 200, {
     deleted: true,
-    roomId: room.id
+    roomId: room.id,
+    storageRemoved: removed
   }, corsHeaders(req))
 }
 
@@ -697,6 +836,7 @@ async function cleanupRooms() {
     }
   }
 
+  // 每个房间独立处理：一个房间删除失败不能中断整轮清理（否则后续房间永远等不到回收）
   for (const { room, age, reason } of expired) {
     auditLog('room_expired', {
       roomId: room.id,
@@ -704,7 +844,16 @@ async function cleanupRooms() {
       ageMs: age,
       storedBytes: room.storedBytes ?? 0
     })
-    await destroyRoom(room)
+
+    try {
+      await destroyRoom(room)
+    } catch (error) {
+      // destroyRoom 内部已经吞掉了 rm 失败；这里兜住任何意外，保证清理循环不中断
+      auditLog('room_expire_failed', {
+        roomId: room.id,
+        message: error instanceof Error ? error.message : String(error)
+      })
+    }
   }
 
   if (totalStoredBytes < 0) {
@@ -885,10 +1034,25 @@ setInterval(() => {
  * 启动时扫描 UPLOAD_DIR。
  *
  * 房间只存在于内存，所以**启动瞬间磁盘上的每个目录都是「无主目录」** ——
- * 它们已无法通过任何 HTTP 路径访问（房间 404），却会被永久计入全局配额、把磁盘占住，
- * 而且没有任何回收路径（不可逆）。默认直接回收；`RELAY_KEEP_ORPHAN_UPLOADS=true` 可保留
- * （保留时仍计入配额，只能人工清理）。
+ * 它们已无法通过任何 HTTP 路径访问（房间 404），却会被永久计入全局配额、把磁盘占住。
+ *
+ * ⚠️ 但回收**必须可判定**：只删「内含本程序写的归属标记、且标记里的 roomId 与目录名一致」的目录。
+ * 无标记 / 标记不匹配 / 标记损坏的目录一律**不动**（宁可留一点占用，也不能误删运维自己的数据），
+ * 并且不计入配额 —— 它们不是本程序产生的，与配额无关。
  */
+async function measureDirectoryBytes(dirPath) {
+  let total = 0
+  const files = await readdir(dirPath, { withFileTypes: true })
+
+  for (const file of files) {
+    if (!file.isFile()) continue
+    const fileStat = await stat(join(dirPath, file.name))
+    total += fileStat.size
+  }
+
+  return total
+}
+
 async function initStoredBytes() {
   totalStoredBytes = 0
 
@@ -900,24 +1064,31 @@ async function initStoredBytes() {
     return
   }
 
-  let orphanDirs = 0
-  let orphanBytes = 0
+  let reclaimedDirs = 0
+  let reclaimedBytes = 0
   let keptBytes = 0
+  const foreignDirs = []
+  let strayFiles = 0
 
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue
+    const entryPath = join(UPLOAD_DIR, entry.name)
 
-    const dirPath = join(UPLOAD_DIR, entry.name)
+    if (!entry.isDirectory()) {
+      strayFiles += 1
+      continue
+    }
+
+    const sentinelRoomId = await readRoomSentinel(entryPath)
+    if (!sentinelRoomId || sentinelRoomId !== entry.name || !sanitizeRoomId(sentinelRoomId)) {
+      foreignDirs.push(entry.name)
+      continue
+    }
+
     let dirBytes = 0
-
     try {
-      const files = await readdir(dirPath, { withFileTypes: true })
-      for (const file of files) {
-        if (!file.isFile()) continue
-        const fileStat = await stat(join(dirPath, file.name))
-        dirBytes += fileStat.size
-      }
+      dirBytes = await measureDirectoryBytes(entryPath)
     } catch {
+      foreignDirs.push(entry.name)
       continue
     }
 
@@ -926,24 +1097,42 @@ async function initStoredBytes() {
       continue
     }
 
-    orphanDirs += 1
-    orphanBytes += dirBytes
-    await rm(dirPath, { recursive: true, force: true })
+    try {
+      await rm(entryPath, { recursive: true, force: true })
+      reclaimedDirs += 1
+      reclaimedBytes += dirBytes
+    } catch (error) {
+      // 删不掉就保留并计入配额 —— 启动过程绝不能因为一个目录删不掉而失败
+      keptBytes += dirBytes
+      console.warn(`[relay] 无主上传目录删除失败，已保留并计入配额：${entryPath} —— ${error instanceof Error ? error.message : error}`)
+    }
   }
 
-  if (orphanDirs > 0) {
-    auditLog('orphan_uploads_reclaimed', { dirs: orphanDirs, bytes: orphanBytes })
-    console.log(`[relay] 已回收 ${orphanDirs} 个无主上传目录（${orphanBytes} 字节）：房间仅存于内存，重启后这些文件已不可访问。`)
+  if (reclaimedDirs > 0) {
+    auditLog('orphan_uploads_reclaimed', { dirs: reclaimedDirs, bytes: reclaimedBytes })
+    console.log(`[relay] 已回收 ${reclaimedDirs} 个无主上传目录（${reclaimedBytes} 字节）：房间仅存于内存，重启后这些文件已不可访问。`)
   }
   if (keptBytes > 0) {
-    console.warn(`[relay] 保留了 ${keptBytes} 字节无主上传文件（RELAY_KEEP_ORPHAN_UPLOADS=true）：仍计入配额，且只能人工清理。`)
+    console.warn(`[relay] 保留了 ${keptBytes} 字节无主上传文件（RELAY_KEEP_ORPHAN_UPLOADS=true 或删除失败）：仍计入配额，只能人工清理。`)
+  }
+  if (foreignDirs.length > 0) {
+    // 这里是刻意不删、也不计账的：无法证明它们是本程序产生的
+    console.warn(`[relay] ⚠️ UPLOAD_DIR 下有 ${foreignDirs.length} 个目录不属于本程序（无有效归属标记），已跳过、不计入配额、也不会被删除：`)
+    console.warn(`[relay]    ${foreignDirs.slice(0, 10).join(', ')}${foreignDirs.length > 10 ? ` …（共 ${foreignDirs.length} 个）` : ''}`)
+    console.warn('[relay]    若确认这些是历史版本遗留的上传目录，请人工删除或迁移；UPLOAD_DIR 建议指向专用子目录。')
+  }
+  if (strayFiles > 0) {
+    console.warn(`[relay] UPLOAD_DIR 根目录下有 ${strayFiles} 个散落文件：既不计入配额也不会被回收，请确认 UPLOAD_DIR 配置是否正确。`)
   }
 
   totalStoredBytes = keptBytes
 }
 
 setInterval(() => {
-  void cleanupRooms()
+  // 定时任务绝不允许抛未处理拒绝 —— 那会让整个 relay 进程退出
+  cleanupRooms().catch((error) => {
+    console.error(`[relay] 房间清理任务异常：${error instanceof Error ? error.message : error}`)
+  })
 }, ROOM_CLEANUP_INTERVAL_MS).unref()
 
 // fail-closed：非回环监听且未配置 RELAY_TOKEN 时拒绝启动，防止公网裸奔

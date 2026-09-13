@@ -228,7 +228,7 @@ const uploadSelectedFileToRelay = async () => {
         throw new Error('接收端存储配额已满，请联系收集人清理')
       }
       if (response.status === 429) {
-        throw new Error('上传过于频繁，请稍后再试')
+        throw new Error('该房间上传过于频繁或文件数已达上限，请稍后再试')
       }
       throw new Error(payload?.error ?? `HTTP 上传失败（${response.status}）`)
     }

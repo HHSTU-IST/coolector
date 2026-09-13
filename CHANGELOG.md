@@ -6,85 +6,92 @@
 
 ## [1.0.0] - 2026-09-13
 
-首个正式版本。基于**四轮**上线前全检（代码审查 + 安全审计 + QA 测试）完成安全与质量加固：
+首个正式版本。基于**五轮**上线前全检（代码审查 + 安全审计 + QA 测试）完成安全与质量加固：
 第一轮修复 26 项发现；第二轮以独立视角重检并修复 Iteration 1 的 6 项发布阻塞问题；
-第三轮修正 2 项未真正修好的声称并补上 3 条阻塞项；第四轮修掉复检发现的配额层缺陷
-（并发击穿、元数据不计配额、孤儿目录泄漏等）。
+第三轮修正 2 项未真正修好的声称并补上 3 条阻塞项；第四轮修掉配额层缺陷；
+第五轮把**房间生命周期与资源记账**整体重构（统一预占原语 / 目录归属标记 / 错误隔离边界）。
 
 ### Security
 
-- **配额检查与累加改为原子预占**：原先两者之间隔着 `await persistUpload`，并发请求全部读到旧值 ——
-  实测 32×1MB 打 4MB 配额房间可落盘 **8.39×**。现在进入 `await` 前**同步预占**，落盘失败在 `catch` 里回滚
+- **房间目录引入归属标记 + 启动回收收紧到可判定范围**：此前启动时无差别递归删除 `UPLOAD_DIR`
+  下**所有**子目录，`UPLOAD_DIR` 一旦指向共享数据根就会删掉无关数据（实测把 `notes.backup/`、
+  `my notes/` 一并删光）。现在每个房间目录首次落盘时写入 `.coolector-room`（含 roomId），
+  启动回收**只删**「标记存在且标记 roomId == 目录名」的目录；无标记目录不删、不计配额，并在启动日志列出
+- **所有的「检查 + 消耗」统一走进原子预占原语**：`reserveStorageQuota` 与 `reserveUploadSlot`
+  都在**任何 `await` 之前**同步完成，失败时回滚。历史上这两类资源各自被并发绕过过一次
+  （字节 8.39×、条数 10×），根因都是 check-then-act 被 `await` 切断
+- **删除失败不得冒泡成进程退出**：`destroyRoom` 的 `rm` 全面 try/catch，清理循环逐房间独立捕获，
+  定时任务挂 `.catch`。此前 `rm` 因文件被占用而失败会经未处理拒绝让 relay **exit 1**（整站下线）
+- **在途上传感知房间销毁**：`destroyRoom` 先置 `destroyed` 标记，上传落盘后复查，
+  已销毁则删掉刚写的文件、回滚配额、返回 **410** —— 此前会返回 201，发送方以为成功而接收端永远收不到
+- **落盘后释放内存里的 base64 副本**：`details` 端点改为按需从磁盘读回。此前一份 10MB 上传
+  会让 RSS 多出 1.33×（峰值 8.9×），而配额只按解码后大小计
+- **配额检查与累加改为原子预占**：原先两者之间隔着 `await persistUpload`，并发可把 4MB 配额打到 8.39×
 - **元数据纳入配额并加上限**：`name` / `mimeType` / `lastModified` 此前无长度约束、也不计配额，
-  0 字节文件可携带数 MB 元数据以 `storedBytes=0` 通过（实测单条 SSE 帧被放大到 2MB、RSS +58MB）。
-  现文件名截断到 `MAX_UPLOAD_NAME_BYTES`（255 字节，尽量保留扩展名）、
-  `mimeType` 清洗后限制 `type`/`subtype` 各 127 字节、`lastModified` 校验并归一为 ISO，
-  元数据字节与提取文本一并计入房间配额
-- **单房间上传条数上限** `MAX_ROOM_UPLOADS`（默认 500）：即使全是 0 字节文件也不能让房间无限增长
-- **启动时回收「无主上传目录」**：房间只存在于内存，重启后磁盘残留目录此前会被永久计入全局配额，
-  且没有任何回收路径（实测新房间传 1KB 即 507）。现默认回收并记审计日志，
-  `RELAY_KEEP_ORPHAN_UPLOADS=true` 可保留（保留时仍计入配额）
-- **房间绝对存活上限不再豁免接收端**：原先 `ROOM_MAX_LIFETIME_MS` 被 `&& !room.receiver` 门控 ——
-  持一条 SSE 连接即可让房间与配额永不过期，与「绝对上限」的语义不符
+  0 字节文件可携带数 MB 元数据以 `storedBytes=0` 通过（实测单条 SSE 帧被放大到 2MB、RSS +58MB）
+- **单房间上传条数上限** `MAX_ROOM_UPLOADS`（默认 500），返回 **429** 而非误导性的 507
+- **房间绝对存活上限不再豁免接收端**，清理周期可配 `ROOM_CLEANUP_INTERVAL_MS`
 - **上传字节限流改为按请求体字节记账**（原先按解码后大小，0 字节上传完全不记账）
-- 新增单房间配额 `MAX_ROOM_UPLOAD_BYTES`（默认全局的 1/8）：免凭据的发送方只能填满自己那个房间
-- 新增上传字节限流 `MAX_UPLOAD_BYTES_PER_WINDOW`（默认 256MB/IP/窗口）
+- 新增单房间配额 `MAX_ROOM_UPLOAD_BYTES`（默认全局的 1/8）与上传字节限流 `MAX_UPLOAD_BYTES_PER_WINDOW`
 - **数值型环境变量改为 fail-closed 校验**：`MAX_FILE_BYTES=10mb` 这类笔误此前会让值为 `NaN`，
   而 `size > NaN` 恒为 false → **体积校验静默全失效**（实测 12MB 文件被照单全收）；现在非法即拒绝启动
-- **MIME 类型清洗**：`text/plain\r\nX-Injected: 1` 一类畸形值此前会直通响应头
-  （既可能注入，也让该文件因响应头非法而永久下载 400），现统一中和为 `application/octet-stream`
+- **MIME 类型清洗**：畸形值此前会直通响应头（既可能注入，也让该文件因响应头非法而永久下载 400），
+  现统一中和为 `application/octet-stream`，并限制 `type`/`subtype` 各 127 字节
 - 下载响应新增 `X-Content-Type-Options: nosniff`
-- **信封 `text` 字段上限**（`MAX_TEXT_BYTES`，默认 1MB），超出即按 UTF-8 边界截断并标记 `textTruncated`
-- **前端不再持有接收端管理密钥**：移除 `VITE_RELAY_TOKEN` 的构建期注入与全部读取点。
-  该变量会被 Vite 内联进公开的 `dist/` 产物，等于把接收端凭据分发给每个发送方；
-  现改由用户在界面填写、仅存本机 `localStorage`，发送方则完全不需要密钥。
+- **前端不再持有接收端管理密钥**：移除 `VITE_RELAY_TOKEN` 的构建期注入与全部读取点
 - **发送方走公开写路径**：`POST /api/rooms/:roomId/uploads` 免凭据，房间 ID（默认完整 UUID）即能力凭据；
-  同时**移除「上传即建房」**——房间必须由接收端先创建，否则 404（原先发送方会落进没有接收端的房间，
-  且任何人可用自造 ID 无限建房占用内存与磁盘）
-- **`?token=` 查询参数彻底移除**：鉴权只接受 `Authorization: Bearer <token>`。
-  原先该兼容分支对**任意** `/api/*` 生效（含 `DELETE`），使一次性票据机制形同虚设
-- 房间 ID 长度下限由 4 位提高到 8 位；`demo-room` 等弱房间名会记 `weak_room_id` 审计日志
-- Relay 鉴权改为 fail-closed：未设置 `RELAY_TOKEN` 且监听非回环地址时拒绝启动
-- SSE 改用一次性短时效票据（`POST /api/rooms/:roomId/stream-ticket`），避免长期 token 进入 URL（日志 / Referer / 浏览器历史）
-- 上传落盘目录磁盘配额在启动时按实际磁盘占用初始化，防止进程重启绕过配额
-- Relay 增加固定窗口速率限制（默认 60 秒 120 次 / 来源 IP），超限返回 429
-- 移除 API 响应中的服务端存储文件名与上传目录绝对路径
-- 未知内部错误统一模糊为 `Bad request`，内部细节只写入结构化安全审计日志
+  同时**移除「上传即建房」** —— 房间必须由接收端先创建，否则 404
+- **`?token=` 查询参数彻底移除**：鉴权只接受 `Authorization: Bearer <token>`
+- 房间 ID 长度下限由 4 位提高到 8 位；弱房间名会记 `weak_room_id` 审计日志
+- Relay 鉴权改为 fail-closed；SSE 改用一次性短时效票据；启动时按磁盘占用初始化配额
+- 新增固定窗口请求计数与写入字节双限流；未知内部错误统一模糊为 `Bad request`
 - `x-forwarded-proto` / `x-forwarded-host` 仅在 `RELAY_TRUST_PROXY=true`（可信代理后）才采信
-- **密钥泄露 CI 守卫** `pnpm guard:no-secret`：构建后断言产物中不含任何密钥值
+- **密钥泄露 CI 守卫** `pnpm guard:no-secret`；根目录新增 `.dockerignore`（此前缺失，
+  构建上下文会把含真实密钥的 `.env` 一并送进 daemon）
 - （**运维动作**）轮换 `RELAY_TOKEN` —— 旧值曾以内联形式出现在公开产物中，必须视为已泄露
 
 ### Fixed
 
+- **房间目录删除失败会让 relay 进程退出**：清理任务由定时器驱动，未处理的 `rm` 拒绝
+  会经未处理拒绝把进程带走（实测 exit 1，整站下线）。现 `rm` 全面 try/catch、清理循环逐房间
+  独立捕获、定时任务挂 `.catch`；`DELETE` 即使删不掉磁盘也返回 200 并如实标记 `storageRemoved:false`
+- **在途上传在房间被删后仍返回 201**（静默丢件：发送方以为成功、接收端永远收不到）：
+  `destroyRoom` 先置 `destroyed` 标记，上传落盘后复查，已销毁则删掉刚写的文件、回滚配额、返回 410
+- **条数上限并发击穿**：`MAX_ROOM_UPLOADS` 的判断与占用跨 `await`（限额 5、50 并发可全部通过）；
+  现走与配额同源的原子预占
+- **`limitUploadName` 在上限极小时越界**：为保留扩展名而把 `budget` 钳到 1，
+  导致 `MAX_UPLOAD_NAME_BYTES=8` 时输出 17 字节；现扩展名放不下就整段丢弃
+- 条数上限的错误码由 507 改为 **429**（507 会被前端解读成「配额已满」，而此时并未满额）
+- `details` 端点改为按需从磁盘读回 base64（内存不再常驻副本），契约不变
+- `UPLOAD_DIR` 根目录下的散落文件启动时给出告警（既不计配额也不回收）
+- 前端 429 文案改为涵盖「上传过于频繁或文件数已达上限」
+- 接收端面板新增「存储用量」展示（已用 / 上限，接近上限时标红），使 507 可自诊
 - **配额并发击穿**：32 个 1MB 并发上传可让 4MB 配额的房间落盘 8.39×；现改为预占 + 回滚，实测降到 0.79×
 - **元数据资源放大**：0 字节文件携带 3MB 文件名时，房间快照会被放大到 3.1MB、单条 SSE 帧到 2MB、
-  40 条这类上传可使 relay RSS +58MB 而配额记为 0；现将文件名截断到 255 字节并计入配额，快照回落到约 1.1KB
-- **超长 `mimeType` 让文件永久不可下载**：`sanitizeMimeType` 此前只防注入不限长度，
-  ≥16KB 的 mimeType 会让下载响应头溢出（`UND_ERR_HEADERS_OVERFLOW`）；现超长回落 `application/octet-stream`
-- **重启后配额不可逆泄漏**：无主上传目录被永久计入全局配额且无法回收；现启动时回收
+  40 条这类上传可使 relay RSS +58MB 而配额记为 0；现将元数据与文本纳入配额并加上限，快照回落到约 1.1KB
+- **超长 `mimeType` 让文件永久不可下载**：≥16KB 的 mimeType 会让下载响应头溢出
+  （`UND_ERR_HEADERS_OVERFLOW`）；现超长回落 `application/octet-stream`
+- **重启后配额不可逆泄漏**：无主上传目录被永久计入全局配额且无法回收；现启动时回收（带归属判定）
 - **`ROOM_MAX_LIFETIME_MS` 被接收端豁免**：持一条 SSE 即可让房间永不过期；现绝对上限不参与豁免
 - **集成测试空转**：harness 把 `MAX_UPLOAD_BYTES_PER_WINDOW` 设为 `'0'`（关闭刚新增的字节限流），
   使该逻辑零覆盖；现移除关闭值并补上专门的 429 用例
 - 审计日志不再写入完整文件名（改记前 120 字符 + 长度），避免超长名把日志放大到 MB 级
-- 接收端面板新增「存储用量」展示（已用 / 上限，接近上限时标红），使 507 可自诊
 - **`MAX_BODY_BYTES` 漏算信封里的 `text`**：派生上限只算了 base64 膨胀，没算 docx 同时携带的提取正文，
-  导致带正文的 docx 有效上限掉到约 8.55MB（名义 10MB，实测阈值 8.5MB+2MB→201、8.55MB+2MB→413）。
-  现派生式为 `base64(4/3) + MAX_TEXT_BYTES + 128KB`，前端正文也按 256KB 截断
+  导致带正文的 docx 有效上限掉到约 8.55MB（名义 10MB）。现派生式为 `base64(4/3) + MAX_TEXT_BYTES + 128KB`
 - **`pnpm start` 的 host 回退分支不可达**：`process.loadEnvFile('.env')` 会把文件值写进 `process.env`，
-  而 `.env.example` 恰好带 `HOST=0.0.0.0` → `process.env.HOST ?? '127.0.0.1'` 永远走不到，
-  relay 仍因 fail-closed 拒绝启动、整栈全灭。现未配置令牌时**强制**回环并打印覆盖提示
-- **启动失败时退出码恒为 0**：`shutdown()` 的定时器被 `.unref()`，子进程先死后事件循环排空，
-  Node 以 0 退出，CI 与脚本完全感知不到失败。现显式设置 `process.exitCode`
-- **Windows 下遗留孤儿进程**：pnpm 经 shell 派生，真正的 vite 是孙进程，`child.kill()` 杀不到它，
-  会继续占用 5174。现按进程树结束（`taskkill /T`）
+  而 `.env.example` 恰好带 `HOST=0.0.0.0` → 回退分支永远走不到，relay 仍因 fail-closed 整栈退出。
+  现未配置令牌时**强制**回环并打印覆盖提示
+- **启动失败时退出码恒为 0**：`shutdown()` 的定时器被 `.unref()`，子进程先死后事件循环排空；
+  现显式设置 `process.exitCode`
+- **Windows 下遗留孤儿进程**：pnpm 经 shell 派生，真正的 vite 是孙进程，`child.kill()` 杀不到它；
+  现按进程树结束（`taskkill /T`）
 - **0 字节文件被拒**：`contentBase64: ''` 被 falsy 判空 → `400 Missing file content`；现用 `typeof` 判存在
-- `readBody` 删掉不可达的 `limit * 4` 强断分支（`if (exceeded) return` 先于累加，`size` 不会再增长）
-- 发送方上传成功提示不再展示 `downloadUrl` —— 该端点需要接收端凭据，发送方打开只会得到 401
-- 前端按状态码给出可读提示（413 文件超限 / 507 配额满 / 429 过于频繁）
-- 接收端展示被截断的正文时附带说明；`RelayUploadSummary` 补 `textTruncated` 与 `serverStored`
+- `readBody` 删掉不可达的 `limit * 4` 强断分支
+- 发送方上传成功提示不再展示 `downloadUrl`（该端点需要接收端凭据，发送方打开只会得到 401）
+- 前端按状态码给出可读提示（413 文件超限 / 507 配额满 / 429 过于频繁或文件数达上限）
 - **中文文件名上传在主路径上直接失败**：发送方曾把文件名放进 `X-Relay-Filename` 请求头，
   而浏览器 `fetch` 只接受 ISO-8859-1 头值，含中文时**请求未出网即抛 `TypeError`**。
-  现文件名一律走 JSON 信封 body；`decodeHeaderValue` 只修服务端解码，无法替代客户端编码
+  现文件名一律走 JSON 信封 body
 - **`.json` / `.ipynb` 上传必失败**：服务端曾仅凭 `Content-Type: application/json` 判定信封，
   而正文本身就是 JSON 的文件会被误判为信封并报 `Missing file content`。
   现改为只在显式 `X-Relay-Envelope: 1` 时解析信封
@@ -104,31 +111,38 @@
 
 ### Changed
 
-- 前端新增 `src/utils/relay.ts` 统一凭据存储、地址归一与房间 ID 校验；两个组件不再各写一份
-- 房间 ID 默认改为完整 `randomUUID()`（128 bit 熵），替代原先 8 位十六进制
+- **房间生命周期与资源记账整体重构**（不再逐条打补丁）：
+  - 所有「检查 + 消耗」统一走原子预占原语（`reserveStorageQuota` / `reserveUploadSlot`），
+    从结构上消灭 check-then-act 被 `await` 切断的隐患
+  - 所有房间目录带归属标记 `.coolector-room`，删除与回收只认标记
+  - 所有删除/清理路径都有错误隔离边界，故障只记录并重试，不冒泡
+- 房间目录删除改为可重试语义：`DELETE` 返回 `storageRemoved` 字段，删不掉磁盘也不谎报失败
+- 上传落盘成功后内存不再保留 base64 副本；`details` 端点按需从磁盘读回
+- 审计日志新增 `room_delete_failed` / `room_expire_failed` / `orphan_file_cleanup_failed`
+- `scripts/receiver.mjs` 改为生成随机 UUID 房间号，不再建议 `demo-room`
+- 前端新增 `src/utils/relay.ts` 统一凭据存储、地址归一与房间 ID 校验；接收端面板新增「存储用量」
 - 上传与下载的体积口径统一：客户端 `MAX_FILE_SIZE` ≡ 服务端 `MAX_FILE_BYTES`
 - 构建期依赖（Tailwind / PostCSS / autoprefixer）从 `dependencies` 迁至 `devDependencies`
-- 移除未使用的 `@tailwindcss/typography` 依赖
-- 统一 `formatFileSize` / `formatDate` 实现到 `src/utils/format.ts`
-- `scripts/receiver.mjs` 改为生成随机 UUID 房间号，不再建议 `demo-room`
-- `docker-compose.yml` 透传 `RELAY_TRUST_PROXY` / `MAX_FILE_BYTES` / `STREAM_TICKET_TTL_MS` / `RATE_LIMIT_*`
-- 文档同步：README、RECEIVER_SETUP、RELAY_DEPLOY、`.env.example` 全部按新鉴权模型重写，
-  删除「令牌会打进前端产物」的旧说明
+- 移除未使用的 `@tailwindcss/typography` 依赖；统一 `formatFileSize` / `formatDate` 到 `src/utils/format.ts`
+- `docker-compose.yml` 透传 `RELAY_TRUST_PROXY` / `MAX_FILE_BYTES` / `MAX_TEXT_BYTES` /
+  `MAX_ROOM_UPLOAD_BYTES` / `MAX_ROOM_UPLOADS` / `MAX_QUEUE_EVENTS` / `MAX_UPLOAD_BYTES_PER_WINDOW` 等
+- 文档同步：README、RECEIVER_SETUP、RELAY_DEPLOY、`.env.example` 全部按新鉴权模型与运行期语义重写
 
 ### Added
 
-- **Relay HTTP 层集成测试** `server/relay-server.test.js`（24 项，起真实进程打真实 HTTP）：
+- **Relay HTTP 层集成测试** `server/relay-server.test.js`（31 项，起真实进程打真实 HTTP）：
   覆盖鉴权边界、公开写路径、裸 body 与信封的区分、0 字节文件、413/507/429、
-  房间配额隔离（另一房间不受影响）、**并发上传不能击穿配额**、
-  **元数据截断与配额计量**、**上传字节限流 429 且不误伤读请求**、
-  **持 SSE 不能阻止房间绝对上限**、**重启回收无主目录**、配置校验 fail-closed。
+  房间配额隔离、**并发上传不能击穿字节配额与条数上限**、元数据截断与配额计量、
+  上传字节限流 429 且不误伤读请求、持 SSE 不能阻止房间绝对上限、
+  **启动回收的归属门控（无关目录不被删）**、**删除失败不让进程退出**、
+  **在途上传与房间删除的交界不留无人认领文件**、details 端点契约与归属标记。
   此前**路由层长期零覆盖**，而多条发布阻塞缺陷正发生在这里
 - **真实浏览器端到端回归** `scripts/e2e-upload.mjs`（`pnpm e2e`，25 项断言，纳入 CI）：
   覆盖中文名 `.md`/`.docx`/`.ipynb`/`.json` 上传、接收端 SSE 收齐与逐字文件名比对、
   二进制占位渲染、8.5MB 大文件、413 可读响应体、404 房间不存在、`?token=` 被拒、
   发送方全程不持有密钥；并断言「浏览器仍禁止非 ISO-8859-1 头值」以防测试空转
 - **密钥泄露守卫** `scripts/check-no-secrets.mjs`（`pnpm guard:no-secret`）
-- Relay Server 单元测试（`server/relay-utils.test.js`，57 项），并抽离可测试纯函数到 `server/relay-utils.js`
+- Relay Server 单元测试（`server/relay-utils.test.js`，58 项），并抽离可测试纯函数到 `server/relay-utils.js`
 - 项目版本号与 CHANGELOG
 
 ### CI

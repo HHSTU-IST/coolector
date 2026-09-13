@@ -20,6 +20,9 @@ dist-ssr
 *.sln
 *.sw?
 
+# 编辑器自动下载的 JSON schema 缓存（VSCode YAML 扩展等）
+.vscode/schemas/
+
 .workbuddy
 deliverables
 

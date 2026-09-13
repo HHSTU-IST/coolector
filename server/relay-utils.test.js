@@ -51,6 +51,16 @@ describe('limitUploadName', () => {
     expect(Buffer.byteLength(result.name, 'utf8')).toBeLessThanOrEqual(32)
   })
 
+  it('上限极小时不会为了保留扩展名而越界', () => {
+    const longName = `${'a'.repeat(60)}.md`
+
+    for (const maxBytes of [1, 2, 3, 4, 8, 16, 32]) {
+      const result = limitUploadName(longName, maxBytes)
+      expect(result.truncated).toBe(true)
+      expect(Buffer.byteLength(result.name, 'utf8')).toBeLessThanOrEqual(maxBytes)
+    }
+  })
+
   it('空值安全', () => {
     expect(limitUploadName('', 32)).toEqual({ name: '', truncated: false })
     expect(limitUploadName(undefined, 32)).toEqual({ name: '', truncated: false })
