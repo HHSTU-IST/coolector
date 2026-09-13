@@ -6,9 +6,9 @@ RUN addgroup -S relay && adduser -S relay -G relay
 
 WORKDIR /app
 
-# 仅拷贝 Relay Server（无依赖，无需 node_modules）
-COPY server/relay-server.js ./relay-server.js
-COPY server/relay-utils.js ./relay-utils.js
+# 拷贝 Relay 的全部服务端模块（无第三方依赖，无需 node_modules）。
+# 用通配符而不是逐个列举：模块拆分过一次，逐个 COPY 漏一个就是「镜像能 build、容器起不来」。
+COPY server/*.js ./
 
 # 上传落盘目录，挂卷持久化
 ENV UPLOAD_DIR=/data/uploads
