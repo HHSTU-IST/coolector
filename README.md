@@ -204,9 +204,20 @@ curl -H "Authorization: Bearer $RELAY_TOKEN" http://localhost:8787/api/rooms/<ro
 > 完整部署清单（Docker / 反向代理 / 环境变量 / 安全）见 [RELAY_DEPLOY.md](./RELAY_DEPLOY.md)。
 > 部署到公网时务必设置 `RELAY_TOKEN` 与 `RELAY_ALLOWED_ORIGINS`，强制 HTTPS，
 > 并开启 `RELAY_TRUST_PROXY=true`（否则回调地址是 `http://`，浏览器会拦截混合内容）。
-> 未设置 `RELAY_TOKEN` 且监听非回环地址时，Relay 会拒绝启动（fail-closed）；
+> **未设置 `RELAY_TOKEN` 且监听非回环地址时，Relay 会拒绝启动（fail-closed）**；
 > `pnpm start` 在这种情况会**强制**把 relay 回退到 `127.0.0.1` 并打印提示，
 > 因此新克隆仓库直接 `pnpm start` 即可本地跑起来，不会整栈退出。
+
+### 运行期语义（务必知悉）
+
+- **房间与上传都只存在于内存 / 本地磁盘，重启即失效**：重启后旧房间一律 404，
+  接收端需要重新建房并把新的房间号发给发送方。服务启动时会回收磁盘上残留的
+  「无主上传目录」（`RELAY_KEEP_ORPHAN_UPLOADS=true` 可改为保留），
+  否则它们会被永久计入磁盘配额却无法回收。
+- **配额按房间计**（`MAX_ROOM_UPLOAD_BYTES`，默认全局的 1/8）：
+  免凭据的发送方只能填满自己那个房间，不会把全局配额吃光导致其它班级一起失败。
+  计费口径是「正文 + 元数据 + 服务端保留的文本字段」，文本类文件约为文件大小的 2 倍。
+- **房间有绝对存活上限**（`ROOM_MAX_LIFETIME_MS`，默认 24h），即使接收端一直连着也会到点回收。
 
 ## 使用说明
 

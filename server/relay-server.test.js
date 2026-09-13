@@ -50,9 +50,9 @@ async function waitForHealth(baseUrl, timeoutMs = 15000) {
 }
 
 /** 起一个真实 relay 进程；返回停止函数 */
-async function startRelay(env = {}) {
+async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
   const port = await getFreePort()
-  const uploadDir = await mkdtemp(join(tmpdir(), 'coolector-it-'))
+  const uploadDir = fixedUploadDir ?? (await mkdtemp(join(tmpdir(), 'coolector-it-')))
 
   const child = spawn(process.execPath, ['server/relay-server.js'], {
     cwd: ROOT,
@@ -62,8 +62,10 @@ async function startRelay(env = {}) {
       PORT: String(port),
       RELAY_TOKEN: TOKEN,
       UPLOAD_DIR: uploadDir,
+      // 限流保持"开启但足够宽松"——注意**不要**设为 0 把它关掉，
+      // 否则等于把刚新增的限流逻辑从测试里删掉（专门用例见「上传字节限流」一节）
       RATE_LIMIT_MAX: '10000',
-      MAX_UPLOAD_BYTES_PER_WINDOW: '0',
+      MAX_UPLOAD_BYTES_PER_WINDOW: '104857600',
       ...env
     },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -78,14 +80,15 @@ async function startRelay(env = {}) {
 
   return {
     baseUrl,
+    uploadDir,
     logs,
-    async stop() {
+    async stop({ keepUploadDir = false } = {}) {
       child.kill('SIGTERM')
       await new Promise((resolve) => {
         child.once('exit', resolve)
         setTimeout(resolve, 2000)
       })
-      await rm(uploadDir, { recursive: true, force: true })
+      if (!keepUploadDir) await rm(uploadDir, { recursive: true, force: true })
     }
   }
 }
@@ -312,7 +315,13 @@ describe('房间配额隔离', () => {
     const crowded = await createRoom(relay.baseUrl, 'crowded-room-1')
     const neighbour = await createRoom(relay.baseUrl, 'neighbour-room-1')
 
-    const payload = envelopeBody({ name: 'big.md', content: Buffer.alloc(600 * 1024, 0x43) })
+    // 用二进制 mimeType：文本类文件的服务端会另存一份提取文本，占用约为文件大小 ×2，
+    // 这里要测的是"房间配额隔离"而非计费口径，故选不产生提取文本的类型
+    const payload = envelopeBody({
+      name: 'big.bin',
+      mimeType: 'application/octet-stream',
+      content: Buffer.alloc(600 * 1024, 0x43)
+    })
     const send = (roomId) => fetch(`${relay.baseUrl}/api/rooms/${roomId}/uploads`, {
       method: 'POST',
       headers: ENVELOPE_HEADERS,
@@ -362,4 +371,283 @@ describe('配置校验 fail-closed', () => {
     expect(code).toBe(1)
     expect(output).toMatch(/拒绝启动/u)
   }, 20000)
+}, 60000)
+
+describe('元数据上限与配额计量', () => {
+  let relay
+
+  beforeAll(async () => {
+    relay = await startRelay({
+      MAX_FILE_BYTES: String(1024 * 1024),
+      MAX_ROOM_UPLOAD_BYTES: String(2 * 1024 * 1024),
+      MAX_UPLOAD_NAME_BYTES: '255',
+      MAX_ROOM_UPLOADS: '3'
+    })
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  it('超长文件名被截断，且元数据计入配额', async () => {
+    const room = await createRoom(relay.baseUrl, 'metadata-room-1')
+
+    // 0 字节正文 + 4KB 文件名：过去这是「零配额成本」的资源放大入口
+    const longName = `${'n'.repeat(4096)}.md`
+    const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: longName, content: '' })
+    })
+
+    expect(response.status).toBe(201)
+    const payload = await response.json()
+    expect(Buffer.byteLength(payload.upload.name, 'utf8')).toBeLessThanOrEqual(255)
+    expect(payload.upload.name.endsWith('.md')).toBe(true)
+
+    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+    // 关键回归：配额必须被真实占用，而不是恒为 0
+    expect(state.storedBytes).toBeGreaterThan(0)
+    expect(state.storedBytes).toBeLessThanOrEqual(2 * 1024 * 1024)
+  })
+
+  it('荒谬超长的文件名被请求体上限直接挡住（413）', async () => {
+    const room = await createRoom(relay.baseUrl, 'metadata-room-oversize')
+
+    const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: `${'n'.repeat(3 * 1024 * 1024)}.md`, content: '' })
+    })
+
+    expect(response.status).toBe(413)
+  })
+
+  it('房间快照不会被超长元数据放大', async () => {
+    const room = await createRoom(relay.baseUrl, 'metadata-room-2')
+
+    await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: `${'n'.repeat(1024 * 1024)}.md`, content: '' })
+    })
+
+    const raw = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).text()
+    expect(Buffer.byteLength(raw, 'utf8')).toBeLessThan(64 * 1024)
+  })
+
+  it('房间上传条数上限返回 507', async () => {
+    const room = await createRoom(relay.baseUrl, 'metadata-room-3')
+    const send = (index) => fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: `n${index}.md`, content: 'x' })
+    })
+
+    expect((await send(1)).status).toBe(201)
+    expect((await send(2)).status).toBe(201)
+    expect((await send(3)).status).toBe(201)
+
+    const overflow = await send(4)
+    expect(overflow.status).toBe(507)
+    expect((await overflow.json()).error).toMatch(/upload count limit/iu)
+  })
+
+  it('超长 mimeType 被中和为 octet-stream，且该文件仍可下载', async () => {
+    const room = await createRoom(relay.baseUrl, 'metadata-room-4')
+
+    const upload = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({
+        name: 'long-mime.md',
+        mimeType: `application/${'a'.repeat(200000)}`,
+        content: 'hi'
+      })
+    })
+
+    expect(upload.status).toBe(201)
+    const { upload: summary } = await upload.json()
+    expect(summary.mimeType).toBe('application/octet-stream')
+
+    // 过去超长 mimeType 会让下载响应头溢出，客户端连响应头都解析不了 → 永久不可下载
+    const download = await fetch(summary.downloadUrl, { headers: authHeaders })
+    expect(download.status).toBe(200)
+    expect(download.headers.get('content-type')).toBe('application/octet-stream')
+  })
+}, 60000)
+
+describe('配额并发安全', () => {
+  let relay
+  const ROOM_QUOTA = 1024 * 1024
+
+  beforeAll(async () => {
+    relay = await startRelay({
+      MAX_FILE_BYTES: String(600 * 1024),
+      MAX_ROOM_UPLOAD_BYTES: String(ROOM_QUOTA),
+      MAX_TOTAL_UPLOAD_BYTES: String(8 * ROOM_QUOTA)
+    })
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  it('并发上传不能击穿单房间配额', async () => {
+    const room = await createRoom(relay.baseUrl, 'concurrent-room-1')
+    const payload = envelopeBody({
+      name: 'c.bin',
+      mimeType: 'application/octet-stream',
+      content: Buffer.alloc(600 * 1024, 0x44)
+    })
+
+    const results = await Promise.all(Array.from({ length: 16 }, () => fetch(
+      `${relay.baseUrl}/api/rooms/${room.roomId}/uploads`,
+      { method: 'POST', headers: ENVELOPE_HEADERS, body: payload }
+    )))
+
+    const accepted = results.filter((response) => response.status === 201).length
+    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+
+    // 预占配额后，并发请求必须有一部分被 507 拒绝，而不是全部落盘（过去 16 个全落盘）
+    expect(accepted).toBeGreaterThan(0)
+    expect(accepted).toBeLessThan(16)
+    // 核心断言：占用不得超过配额
+    expect(state.storedBytes).toBeLessThanOrEqual(ROOM_QUOTA)
+  })
+}, 60000)
+
+describe('上传字节限流', () => {
+  let relay
+
+  beforeAll(async () => {
+    relay = await startRelay({
+      MAX_FILE_BYTES: String(1024 * 1024),
+      MAX_ROOM_UPLOAD_BYTES: String(64 * 1024 * 1024),
+      // 窗口额度 4MB：每次请求体约 1.4MB（1MB 正文的 base64），第 3 次越界
+      MAX_UPLOAD_BYTES_PER_WINDOW: String(4 * 1024 * 1024),
+      RATE_LIMIT_MAX: '10000'
+    })
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  it('超出窗口字节额度返回 429，且不误伤同窗口内的读请求', async () => {
+    const room = await createRoom(relay.baseUrl, 'byte-window-room')
+    const payload = envelopeBody({
+      name: 'w.bin',
+      mimeType: 'application/octet-stream',
+      content: Buffer.alloc(1024 * 1024, 0x45)
+    })
+    const send = () => fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: payload
+    })
+
+    expect((await send()).status).toBe(201)
+    expect((await send()).status).toBe(201)
+
+    // 第三次会超出 4MB 窗口额度
+    const limited = await send()
+    expect(limited.status).toBe(429)
+    expect((await limited.json()).error).toMatch(/rate exceeded/iu)
+
+    // 同窗口内的读请求不应被误伤
+    expect((await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).status).toBe(200)
+    expect((await fetch(`${relay.baseUrl}/`)).status).toBe(200)
+  })
+}, 60000)
+
+describe('房间生命周期', () => {
+  let relay
+
+  beforeAll(async () => {
+    relay = await startRelay({
+      // 绝对上限 1 秒、扫描周期 200ms，用来验证"绝对上限不豁免接收端"
+      ROOM_MAX_LIFETIME_MS: '1000',
+      ROOM_CLEANUP_INTERVAL_MS: '200',
+      ROOM_TTL_MS: '3600000'
+    })
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  it('持有一条 SSE 连接也不能阻止绝对存活上限生效', async () => {
+    const room = await createRoom(relay.baseUrl, 'lifetime-room-1')
+
+    const ticketResponse = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/stream-ticket`, {
+      method: 'POST',
+      headers: authHeaders
+    })
+    const { ticket } = await ticketResponse.json()
+
+    // 保持一条 SSE 长连接
+    const controller = new AbortController()
+    const stream = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/events?ticket=${encodeURIComponent(ticket)}`, {
+      signal: controller.signal
+    })
+    expect(stream.status).toBe(200)
+
+    const reader = stream.body.getReader()
+    void reader.read()
+
+    // 等超过绝对上限 + 若干扫描周期
+    await new Promise((resolve) => {
+      setTimeout(resolve, 2500)
+    })
+
+    const state = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })
+    expect(state.status).toBe(404)
+
+    controller.abort()
+    await reader.cancel().catch(() => {})
+  }, 20000)
+}, 60000)
+
+describe('启动时回收无主上传目录', () => {
+  let uploadDir
+
+  beforeAll(async () => {
+    uploadDir = await mkdtemp(join(tmpdir(), 'coolector-orphan-'))
+  }, 30000)
+
+  afterAll(async () => {
+    await rm(uploadDir, { recursive: true, force: true })
+  })
+
+  it('重启后无主目录被回收，不再永久占用全局配额', async () => {
+    const first = await startRelay({ MAX_FILE_BYTES: String(1024 * 1024) }, { uploadDir })
+    const room = await createRoom(first.baseUrl, 'orphan-room-1')
+
+    await fetch(`${first.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: 'o.md', content: Buffer.alloc(512 * 1024, 0x46) })
+    })
+
+    // 重启：房间只在内存里，磁盘上的目录随即变成"无主目录"
+    await first.stop({ keepUploadDir: true })
+
+    const second = await startRelay({ MAX_FILE_BYTES: String(1024 * 1024) }, { uploadDir })
+    try {
+      const root = await (await fetch(`${second.baseUrl}/`)).json()
+      // 关键回归：不再把无主字节计入配额（否则新房间会被 507 挡住且无法回收）
+      expect(root.storageUsedBytes).toBe(0)
+
+      const fresh = await createRoom(second.baseUrl, 'orphan-room-2')
+      const upload = await fetch(`${second.baseUrl}/api/rooms/${fresh.roomId}/uploads`, {
+        method: 'POST',
+        headers: ENVELOPE_HEADERS,
+        body: envelopeBody({ name: 'n.md', content: 'ok' })
+      })
+      expect(upload.status).toBe(201)
+    } finally {
+      await second.stop()
+    }
+  }, 40000)
 }, 60000)

@@ -24,10 +24,14 @@ export function parsePositiveInt(raw, { fallback = 0, min = 1, max = Number.MAX_
   return { ok: true, value, usedFallback: false }
 }
 
+/** MIME 类型 `type` / `subtype` 各自的长度上限（RFC 惯例），防止超长值撑爆响应头 */
+export const MAX_MIME_PART_LENGTH = 127
+
 /**
- * 清洗 MIME 类型：只保留标准的 `type/subtype`，丢掉参数与控制字符。
- * 防止把 `text/plain\r\nX-Injected: 1` 一类值直通响应头 —— 既可能注入，
- * 也会让该文件因为响应头非法而永久无法下载。
+ * 清洗 MIME 类型：只保留标准的 `type/subtype`，丢掉参数与控制字符，并限制长度。
+ *
+ * 只防注入是不够的：超长的 `mimeType` 会让下载响应头溢出，客户端连响应头都解析不了
+ * （实测 node fetch 抛 `UND_ERR_HEADERS_OVERFLOW`、curl 退出码 100），该文件将**永久无法下载**。
  */
 export function sanitizeMimeType(value) {
   const raw = String(value ?? '').trim()
@@ -40,8 +44,41 @@ export function sanitizeMimeType(value) {
   if (!type || !subtype || !token.test(type) || !token.test(subtype)) {
     return 'application/octet-stream'
   }
+  if (type.length > MAX_MIME_PART_LENGTH || subtype.length > MAX_MIME_PART_LENGTH) {
+    return 'application/octet-stream'
+  }
 
   return `${type}/${subtype}`
+}
+
+/**
+ * 规范化日期字符串：校验可解析并统一为 ISO，同时限制长度。
+ * 客户端传来的 `lastModified` 若不加约束，就是一个可写入任意长度内容的字段。
+ */
+export function normalizeIsoDate(value, fallback) {
+  const raw = String(value ?? '').trim().slice(0, 64)
+  if (!raw) return fallback
+
+  const time = Date.parse(raw)
+  return Number.isFinite(time) ? new Date(time).toISOString() : fallback
+}
+
+/**
+ * 限制上传文件名长度。超长名会同时放大内存、房间快照、SSE 帧与审计日志，
+ * 也是「元数据不计配额」绕过的入口。
+ * 截断时尽量保留扩展名，避免接收端把 `.md` / `.docx` 识别成无扩展名文件。
+ */
+export function limitUploadName(name, maxBytes) {
+  const raw = String(name ?? '')
+  if (Buffer.byteLength(raw, 'utf8') <= maxBytes) return { name: raw, truncated: false }
+
+  const dotIndex = raw.lastIndexOf('.')
+  const extension = dotIndex > 0 && dotIndex >= raw.length - 16 ? raw.slice(dotIndex) : ''
+  const extensionBytes = Buffer.byteLength(extension, 'utf8')
+  const budget = Math.max(maxBytes - extensionBytes, 1)
+  const stem = truncateUtf8(extension ? raw.slice(0, dotIndex) : raw, budget).text
+
+  return { name: `${stem}${extension}`, truncated: true }
 }
 
 /** 按 UTF-8 字节数截断字符串，不产生半个码点（不完整的多字节序列被 StringDecoder 丢弃） */

@@ -82,6 +82,12 @@
                 <p class="font-medium text-gray-900">{{ roomState?.uploadCount ?? 0 }}</p>
               </div>
               <div>
+                <p class="text-gray-500">存储用量</p>
+                <p class="font-medium" :class="storageUsageRatio >= 0.9 ? 'text-red-600' : 'text-gray-900'">
+                  {{ storageUsageLabel }}
+                </p>
+              </div>
+              <div>
                 <p class="text-gray-500">接收端连接</p>
                 <p class="font-medium text-gray-900">{{ roomState?.stats.receiverConnections ?? 0 }}</p>
               </div>
@@ -118,6 +124,7 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { useCollectionStore } from '../stores/collection'
 import { useFileStore } from '../stores/file'
+import { formatFileSize } from '../utils/format'
 import {
   DEFAULT_RELAY_URL,
   isWeakRoomId,
@@ -169,6 +176,10 @@ interface RoomSnapshot {
   hasReceiver: boolean
   queuedEvents: number
   uploadCount: number
+  /** 本房间已占用配额（正文 + 元数据） */
+  storedBytes: number
+  /** 本房间配额上限 */
+  storageLimitBytes: number
   uploads: RelayUploadSummary[]
   stats: {
     receiverConnections: number
@@ -202,6 +213,19 @@ const roomIdHint = computed(() => {
   const id = roomId.value.trim()
   if (!id || !isWeakRoomId(id)) return ''
   return '该房间号较容易被猜到，建议留空让服务端生成随机房间号'
+})
+
+/** 本房间配额使用率（0–1），用于接近上限时把数字标红 */
+const storageUsageRatio = computed(() => {
+  const limit = roomState.value?.storageLimitBytes ?? 0
+  if (limit <= 0) return 0
+  return Math.min((roomState.value?.storedBytes ?? 0) / limit, 1)
+})
+
+const storageUsageLabel = computed(() => {
+  const snapshot = roomState.value
+  if (!snapshot) return '—'
+  return `${formatFileSize(snapshot.storedBytes)} / ${formatFileSize(snapshot.storageLimitBytes)}`
 })
 const connectionState = ref<'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'>('idle')
 const statusMessage = ref('尚未建立连接')

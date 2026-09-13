@@ -9,10 +9,12 @@ import {
   isLoopbackHost,
   isTextMimeType,
   isWeakRoomId,
+  limitUploadName,
   makeAuthorizer,
   makeCorsHeaders,
   makeTicketStore,
   normalizeAllowedOrigins,
+  normalizeIsoDate,
   parsePositiveInt,
   sanitizeMimeType,
   sanitizeRoomId,
@@ -73,6 +75,16 @@ const MAX_ROOM_UPLOAD_BYTES = requirePositiveInt(
 )
 // 单个来源 IP 在限流窗口内可写入的字节数（0 = 关闭）。与请求计数限流互补，直接限制配额消耗速率。
 const MAX_UPLOAD_BYTES_PER_WINDOW = requirePositiveInt('MAX_UPLOAD_BYTES_PER_WINDOW', 256 * 1024 * 1024, { min: 0 })
+// 单个房间的上传条数上限：即使每个文件都是 0 字节，也不能让 room.uploads 无限增长
+const MAX_ROOM_UPLOADS = requirePositiveInt('MAX_ROOM_UPLOADS', 500)
+// 上传文件名上限（字节）。文件名会进入内存、房间快照、SSE 帧与审计日志，必须有界
+const MAX_UPLOAD_NAME_BYTES = requirePositiveInt('MAX_UPLOAD_NAME_BYTES', 255)
+// 房间清理扫描周期（毫秒）
+const ROOM_CLEANUP_INTERVAL_MS = requirePositiveInt('ROOM_CLEANUP_INTERVAL_MS', 30 * 60 * 1000)
+// 启动时是否保留「无主目录」（磁盘存在但内存无对应房间的目录）。
+// 默认回收：房间只活在内存里，重启后这些文件已无法通过任何 HTTP 路径访问，
+// 却会被 initStoredBytes 永久计入全局配额，且没有回收路径。
+const KEEP_ORPHAN_UPLOADS = (process.env.RELAY_KEEP_ORPHAN_UPLOADS ?? 'false') === 'true'
 // 仅在可信反向代理之后才信任 x-forwarded-* 头，避免直连时被伪造出错误跳转地址。
 const TRUST_PROXY = (process.env.RELAY_TRUST_PROXY ?? 'false') === 'true'
 // SSE 票据有效期（毫秒），短时效一次性，替代 URL 中的长期 token。
@@ -345,12 +357,13 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
     }
 
     const decoded = Buffer.from(contentBase64, 'base64')
+    const safeName = limitUploadName(fileName, MAX_UPLOAD_NAME_BYTES).name
     return {
-      name: String(fileName),
+      name: safeName,
       mimeType: safeMimeType,
-      lastModified: String(lastModified),
+      lastModified: normalizeIsoDate(lastModified, nowIso()),
       contentBase64,
-      text: text ?? (isTextMimeType(safeMimeType, String(fileName)) ? decoded.toString('utf8') : null)
+      text: text ?? (isTextMimeType(safeMimeType, safeName) ? decoded.toString('utf8') : null)
     }
   }
 
@@ -361,16 +374,16 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
   }
 
   const safeMimeType = sanitizeMimeType(headers['x-relay-mime-type'] ?? 'application/octet-stream')
-  const lastModified = headers['x-relay-last-modified'] ?? nowIso()
+  const safeName = limitUploadName(fileName, MAX_UPLOAD_NAME_BYTES).name
   const contentBase64 = bodyBuffer.toString('base64')
-  const text = isTextMimeType(safeMimeType, String(fileName))
+  const text = isTextMimeType(safeMimeType, safeName)
     ? bodyBuffer.toString('utf8')
     : null
 
   return {
-    name: String(fileName),
+    name: safeName,
     mimeType: safeMimeType,
-    lastModified: String(lastModified),
+    lastModified: normalizeIsoDate(headers['x-relay-last-modified'], nowIso()),
     contentBase64,
     text
   }
@@ -491,22 +504,36 @@ async function handleUpload(req, res, room, query) {
     throw new HttpError(413, `File exceeds size limit (${MAX_FILE_BYTES} bytes)`)
   }
 
-  // 单房间配额：免凭据的发送方最多只能填满「自己那个房间」，
-  // 不会把全局配额吃光导致其它班级一起 507
-  if (room.storedBytes + size > MAX_ROOM_UPLOAD_BYTES) {
-    throw new HttpError(507, `Room storage quota exceeded (limit ${MAX_ROOM_UPLOAD_BYTES} bytes)`)
+  if (room.uploads.size >= MAX_ROOM_UPLOADS) {
+    throw new HttpError(507, `Room upload count limit reached (${MAX_ROOM_UPLOADS})`)
   }
 
-  if (totalStoredBytes + size > MAX_TOTAL_UPLOAD_BYTES) {
-    throw new HttpError(507, `Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
-  }
-
-  if (isUploadBytesExceeded(req, size)) {
+  if (isUploadBytesExceeded(req, body.length)) {
     throw new HttpError(429, `Upload rate exceeded (limit ${MAX_UPLOAD_BYTES_PER_WINDOW} bytes per window)`)
   }
 
   // 正文只用于预览/展示，按 UTF-8 边界截断，避免第三方客户端塞入超大正文撑爆内存
   const textField = metadata.text === null ? null : truncateUtf8(metadata.text, MAX_TEXT_BYTES)
+
+  // 元数据也要计入配额：`name` / `mimeType` / `lastModified` / `text` 都会常驻内存，
+  // 并进入房间快照与 SSE 帧。过去只按 contentBase64 计费，0 字节文件带数 MB 文件名
+  // 就能以 storedBytes=0 通过全部配额检查。
+  const metadataBytes = Buffer.byteLength(metadata.name, 'utf8')
+    + Buffer.byteLength(metadata.mimeType, 'utf8')
+    + Buffer.byteLength(metadata.lastModified, 'utf8')
+    + (textField ? Buffer.byteLength(textField.text, 'utf8') : 0)
+  const quotaBytes = size + metadataBytes
+
+  // ⚠️ 配额判断与累加之间不能有 await：否则并发请求会全部读到旧值而击穿配额。
+  // 这里先**同步预占**，落盘失败再在 catch 里回滚。
+  if (room.storedBytes + quotaBytes > MAX_ROOM_UPLOAD_BYTES) {
+    throw new HttpError(507, `Room storage quota exceeded (limit ${MAX_ROOM_UPLOAD_BYTES} bytes)`)
+  }
+  if (totalStoredBytes + quotaBytes > MAX_TOTAL_UPLOAD_BYTES) {
+    throw new HttpError(507, `Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
+  }
+  room.storedBytes += quotaBytes
+  totalStoredBytes += quotaBytes
 
   const upload = {
     id: randomUUID(),
@@ -516,21 +543,29 @@ async function handleUpload(req, res, room, query) {
     lastModified: metadata.lastModified,
     uploadedAt: nowIso(),
     size,
+    /** 该条上传占用配额的字节数（正文 + 元数据），回收时按此值扣减 */
+    quotaBytes,
     contentBase64: metadata.contentBase64,
     text: textField ? textField.text : null,
     textTruncated: Boolean(textField?.truncated),
     previewText: textField ? textField.text.slice(0, 4096) : null
   }
 
-  await persistUpload(upload)
-  totalStoredBytes += size
-  room.storedBytes += size
+  try {
+    await persistUpload(upload)
+  } catch (error) {
+    // 落盘失败必须退回预占的配额，否则房间会被永久"占额"
+    room.storedBytes -= quotaBytes
+    totalStoredBytes -= quotaBytes
+    throw error
+  }
 
   room.uploads.set(upload.id, upload)
   room.stats.uploads += 1
   room.updatedAt = upload.uploadedAt
   room.lastActivity = Date.now()
-  auditLog('upload_created', { roomId: room.id, name: upload.name, size })
+  // 只记录截断后的名字与长度，避免超长文件名把审计日志放大到 MB 级
+  auditLog('upload_created', { roomId: room.id, name: upload.name.slice(0, 120), nameLength: upload.name.length, size })
 
   // 响应里带上完整正文，广播事件里只带元信息
   const uploadPayload = uploadSummary(upload, req)
@@ -617,7 +652,7 @@ function handleEvents(req, res, room) {
 }
 
 /** 删除房间并回收其占用的磁盘配额 */
-function destroyRoom(room) {
+async function destroyRoom(room) {
   closeReceiver(room)
   rooms.delete(room.id)
 
@@ -626,16 +661,17 @@ function destroyRoom(room) {
   room.storedBytes = 0
   room.uploads.clear()
 
-  void rm(join(UPLOAD_DIR, room.id), { recursive: true, force: true })
+  // 等待删除完成：调用方（DELETE / 清理任务）需要磁盘与计数同步，否则刚删完又占 507
+  await rm(join(UPLOAD_DIR, room.id), { recursive: true, force: true })
 }
 
-function handleRoomDelete(req, res, roomId) {
+async function handleRoomDelete(req, res, roomId) {
   const room = getRoom(roomId)
   if (!room) {
     return writeJson(res, 404, { error: 'Room not found' }, corsHeaders(req))
   }
 
-  destroyRoom(room)
+  await destroyRoom(room)
   auditLog('room_deleted', { roomId: room.id })
   return writeJson(res, 200, {
     deleted: true,
@@ -643,26 +679,32 @@ function handleRoomDelete(req, res, roomId) {
   }, corsHeaders(req))
 }
 
-function cleanupRooms() {
+async function cleanupRooms() {
   const now = Date.now()
   const idleCutoff = now - ROOM_TTL_MS
+  const expired = []
 
   for (const room of rooms.values()) {
     const age = now - new Date(room.createdAt).getTime()
     // 空闲回收：无接收端且长时间无活动（上传会刷新 lastActivity，这是有意的）
     const expiredByIdle = room.lastActivity < idleCutoff && !room.receiver
-    // 绝对年龄上限：否则「每 <TTL 传 1 字节」就能把房间与配额永久占住
-    const expiredByAge = age > ROOM_MAX_LIFETIME_MS && !room.receiver
+    // 绝对年龄上限：**不豁免 receiver** —— 否则持一条 SSE 连接就能把房间与配额永久钉住，
+    // 「绝对上限」也就名不副实了。
+    const expiredByAge = age > ROOM_MAX_LIFETIME_MS
 
     if (expiredByIdle || expiredByAge) {
-      auditLog('room_expired', {
-        roomId: room.id,
-        reason: expiredByAge ? 'max_lifetime' : 'idle',
-        ageMs: age,
-        storedBytes: room.storedBytes ?? 0
-      })
-      destroyRoom(room)
+      expired.push({ room, age, reason: expiredByAge ? 'max_lifetime' : 'idle' })
     }
+  }
+
+  for (const { room, age, reason } of expired) {
+    auditLog('room_expired', {
+      roomId: room.id,
+      reason,
+      ageMs: age,
+      storedBytes: room.storedBytes ?? 0
+    })
+    await destroyRoom(room)
   }
 
   if (totalStoredBytes < 0) {
@@ -766,7 +808,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'DELETE' && !subresource) {
-      handleRoomDelete(req, res, roomId)
+      await handleRoomDelete(req, res, roomId)
       return
     }
 
@@ -839,30 +881,70 @@ setInterval(() => {
   }
 }, RATE_LIMIT_WINDOW_MS).unref()
 
-/** 启动时扫描 UPLOAD_DIR，用磁盘实际占用初始化配额计数，避免重启后配额归零被绕过 */
+/**
+ * 启动时扫描 UPLOAD_DIR。
+ *
+ * 房间只存在于内存，所以**启动瞬间磁盘上的每个目录都是「无主目录」** ——
+ * 它们已无法通过任何 HTTP 路径访问（房间 404），却会被永久计入全局配额、把磁盘占住，
+ * 而且没有任何回收路径（不可逆）。默认直接回收；`RELAY_KEEP_ORPHAN_UPLOADS=true` 可保留
+ * （保留时仍计入配额，只能人工清理）。
+ */
 async function initStoredBytes() {
+  totalStoredBytes = 0
+
+  let entries
   try {
-    const entries = await readdir(UPLOAD_DIR, { withFileTypes: true })
-    let total = 0
+    entries = await readdir(UPLOAD_DIR, { withFileTypes: true })
+  } catch {
+    // 目录不存在（首次启动），无需初始化
+    return
+  }
 
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      const files = await readdir(join(UPLOAD_DIR, entry.name), { withFileTypes: true })
+  let orphanDirs = 0
+  let orphanBytes = 0
+  let keptBytes = 0
 
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+
+    const dirPath = join(UPLOAD_DIR, entry.name)
+    let dirBytes = 0
+
+    try {
+      const files = await readdir(dirPath, { withFileTypes: true })
       for (const file of files) {
         if (!file.isFile()) continue
-        const fileStat = await stat(join(UPLOAD_DIR, entry.name, file.name))
-        total += fileStat.size
+        const fileStat = await stat(join(dirPath, file.name))
+        dirBytes += fileStat.size
       }
+    } catch {
+      continue
     }
 
-    totalStoredBytes = total
-  } catch {
-    totalStoredBytes = 0
+    if (KEEP_ORPHAN_UPLOADS) {
+      keptBytes += dirBytes
+      continue
+    }
+
+    orphanDirs += 1
+    orphanBytes += dirBytes
+    await rm(dirPath, { recursive: true, force: true })
   }
+
+  if (orphanDirs > 0) {
+    auditLog('orphan_uploads_reclaimed', { dirs: orphanDirs, bytes: orphanBytes })
+    console.log(`[relay] 已回收 ${orphanDirs} 个无主上传目录（${orphanBytes} 字节）：房间仅存于内存，重启后这些文件已不可访问。`)
+  }
+  if (keptBytes > 0) {
+    console.warn(`[relay] 保留了 ${keptBytes} 字节无主上传文件（RELAY_KEEP_ORPHAN_UPLOADS=true）：仍计入配额，且只能人工清理。`)
+  }
+
+  totalStoredBytes = keptBytes
 }
 
-setInterval(cleanupRooms, 30 * 60 * 1000).unref()
+setInterval(() => {
+  void cleanupRooms()
+}, ROOM_CLEANUP_INTERVAL_MS).unref()
 
 // fail-closed：非回环监听且未配置 RELAY_TOKEN 时拒绝启动，防止公网裸奔
 if (!RELAY_TOKEN && !isLoopbackHost(HOST)) {

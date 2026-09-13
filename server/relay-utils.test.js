@@ -6,16 +6,56 @@ import {
   isLoopbackHost,
   isTextMimeType,
   isWeakRoomId,
+  limitUploadName,
   makeAuthorizer,
   makeCorsHeaders,
   makeTicketStore,
   normalizeAllowedOrigins,
+  normalizeIsoDate,
   parsePositiveInt,
   sanitizeMimeType,
   sanitizeRoomId,
   sanitizeStorageFileName,
   truncateUtf8
 } from './relay-utils.js'
+
+describe('normalizeIsoDate', () => {
+  it('合法日期归一为 ISO', () => {
+    expect(normalizeIsoDate('2026-09-13T00:00:00.000Z', 'fallback')).toBe('2026-09-13T00:00:00.000Z')
+    expect(normalizeIsoDate('2026-09-13', 'fallback')).toBe('2026-09-13T00:00:00.000Z')
+  })
+
+  it('非法值回退到缺省值', () => {
+    expect(normalizeIsoDate('not-a-date', 'fallback')).toBe('fallback')
+    expect(normalizeIsoDate('', 'fallback')).toBe('fallback')
+    expect(normalizeIsoDate(undefined, 'fallback')).toBe('fallback')
+    expect(normalizeIsoDate('x'.repeat(4096), 'fallback')).toBe('fallback')
+  })
+})
+
+describe('limitUploadName', () => {
+  it('未超限时原样返回', () => {
+    expect(limitUploadName('张三-20230101.md', 255)).toEqual({ name: '张三-20230101.md', truncated: false })
+  })
+
+  it('超限时截断并保留扩展名', () => {
+    const result = limitUploadName(`${'n'.repeat(4096)}.docx`, 64)
+    expect(result.truncated).toBe(true)
+    expect(Buffer.byteLength(result.name, 'utf8')).toBeLessThanOrEqual(64)
+    expect(result.name.endsWith('.docx')).toBe(true)
+  })
+
+  it('无扩展名时直接截断', () => {
+    const result = limitUploadName('文'.repeat(500), 32)
+    expect(result.truncated).toBe(true)
+    expect(Buffer.byteLength(result.name, 'utf8')).toBeLessThanOrEqual(32)
+  })
+
+  it('空值安全', () => {
+    expect(limitUploadName('', 32)).toEqual({ name: '', truncated: false })
+    expect(limitUploadName(undefined, 32)).toEqual({ name: '', truncated: false })
+  })
+})
 
 describe('parsePositiveInt', () => {
   it('空值回退到默认值', () => {
@@ -84,6 +124,13 @@ describe('sanitizeMimeType', () => {
       expect(hasControlChar).toBe(false)
       expect(result).toMatch(/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u)
     }
+  })
+
+  it('超长 mimeType 回落为 octet-stream（否则下载响应头会溢出、该文件永久无法下载）', () => {
+    expect(sanitizeMimeType(`application/${'a'.repeat(127)}`)).toBe(`application/${'a'.repeat(127)}`)
+    expect(sanitizeMimeType(`application/${'a'.repeat(128)}`)).toBe('application/octet-stream')
+    expect(sanitizeMimeType(`${'a'.repeat(200)}/json`)).toBe('application/octet-stream')
+    expect(sanitizeMimeType(`application/${'a'.repeat(200000)}`)).toBe('application/octet-stream')
   })
 
   it('畸形值回退为 application/octet-stream', () => {
