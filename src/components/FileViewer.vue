@@ -16,7 +16,7 @@
               {{ fileStore.selectedFile.filenameValidation.message }}
             </p>
           </div>
-          <button @click="fileStore.selectedFile = null"
+          <button @click="fileStore.clearSelection()"
             class="shrink-0 rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
             <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -97,6 +97,7 @@ import { computed, ref } from 'vue'
 import { useFileStore } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
+import { formatDate, formatFileSize } from '../utils/format'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -144,18 +145,6 @@ const metadataItems = computed(() => {
     { label: '文件来源', value: fileStore.selectedFile.source === 'relay' ? 'Relay 接收' : '本地上传' }
   ]
 })
-
-const formatFileSize = (bytes: number): string => {
-  if (bytes === 0) return '0 Bytes'
-  const k = 1024
-  const sizes = ['Bytes', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-}
-
-const formatDate = (date: Date): string => {
-  return date.toLocaleString('zh-CN')
-}
 
 const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/u, '')
 

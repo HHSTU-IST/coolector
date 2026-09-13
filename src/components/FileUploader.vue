@@ -116,20 +116,13 @@ import { useFileStore } from '../stores/file'
 import type { FileInfo } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
+import { formatFileSize } from '../utils/format'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
 const fileInput = ref<HTMLInputElement>()
 const collectionInput = ref<HTMLInputElement>()
 const filenamePatternInput = ref(String(fileStore.filenamePattern))
-
-const formatFileSize = (bytes: number): string => {
-  if (bytes === 0) return '0 Bytes'
-  const k = 1024
-  const sizes = ['Bytes', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-}
 
 const formatExtractedInfo = (file: FileInfo) => {
   const studentId = file.metadata.studentId ? `学号: ${file.metadata.studentId}` : '学号: 未识别'

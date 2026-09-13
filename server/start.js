@@ -11,13 +11,14 @@ const config = {
 const processes = []
 let isShuttingDown = false
 
-function startProcess(name, command, args, env = {}) {
+function startProcess(name, command, args, env = {}, options = {}) {
   const child = spawn(command, args, {
     env: {
       ...process.env,
       ...env
     },
-    stdio: 'inherit'
+    stdio: 'inherit',
+    ...options
   })
 
   processes.push({ name, child })
@@ -53,7 +54,14 @@ console.log('[start] Coolector quick start')
 console.log(`[start] Web app: http://localhost:${config.appPort}`)
 console.log(`[start] Relay:   http://localhost:${config.relayPort}`)
 
-startProcess('web app', 'pnpm', ['exec', 'vite', '--host', config.appHost, '--port', config.appPort])
+// Windows 下 pnpm 实际是 pnpm.cmd，需经 shell 解析才能启动
+startProcess(
+  'web app',
+  'pnpm',
+  ['exec', 'vite', '--host', config.appHost, '--port', config.appPort],
+  {},
+  { shell: process.platform === 'win32' }
+)
 
 // 存在根 .env 时用 Node 原生 --env-file 注入 Relay（RELAY_* 由 Relay 读，VITE_* 由 Vite 自读）
 const relayArgs = ['server/relay-server.js']

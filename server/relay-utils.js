@@ -2,6 +2,7 @@
 // relay-server.js 导入本模块复用；本模块不含副作用，可安全被 Vitest 加载。
 
 import { basename } from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 /** 房间 ID 只允许字母数字、下划线、连字符，长度 4–64 */
 export function sanitizeRoomId(roomId) {
@@ -106,5 +107,41 @@ export function makeAuthorizer(relayToken) {
     }
 
     return false
+  }
+}
+
+/**
+ * 短时效、一次性 SSE 票据存储。
+ * 用票据替代 URL 中的长期 token，规避 token 进入访问日志 / Referer / 浏览器历史。
+ * 注入 `now` 便于单元测试。
+ */
+export function makeTicketStore({ ttlMs = 60_000, now = () => Date.now() } = {}) {
+  const tickets = new Map()
+
+  const prune = () => {
+    const current = now()
+    for (const [ticket, entry] of tickets) {
+      if (entry.expiresAt <= current) tickets.delete(ticket)
+    }
+  }
+
+  return {
+    /** 为指定房间签发一次性票据 */
+    issue(roomId) {
+      prune()
+      const ticket = randomUUID()
+      tickets.set(ticket, { roomId, expiresAt: now() + ttlMs })
+      return ticket
+    },
+    /** 校验并消费票据；房间不匹配 / 过期 / 已用一律 false */
+    consume(ticket, roomId) {
+      if (!ticket) return false
+      const entry = tickets.get(ticket)
+      tickets.delete(ticket)
+      return Boolean(entry) && entry.expiresAt > now() && entry.roomId === roomId
+    },
+    get size() {
+      return tickets.size
+    }
   }
 }

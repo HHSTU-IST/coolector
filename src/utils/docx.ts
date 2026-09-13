@@ -82,11 +82,36 @@ function readEntryData(view: DataView, entry: ZipEntry): Uint8Array | null {
   return new Uint8Array(view.buffer, view.byteOffset + dataOffset, entry.compressedSize)
 }
 
+/** 解压输出上限（64 MB），防止「压缩炸弹」式 docx 撑爆内存 */
+const MAX_INFLATED_BYTES = 64 * 1024 * 1024
+
 async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
   // 显式拷贝：DOM BlobPart 要求视图底层是 ArrayBuffer 而非 SharedArrayBuffer
   const payload = new Uint8Array(data)
   const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
-  return new Uint8Array(await new Response(stream).arrayBuffer())
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    total += value.byteLength
+    if (total > MAX_INFLATED_BYTES) {
+      await reader.cancel()
+      throw new Error('docx 解压体积超限')
+    }
+    chunks.push(value)
+  }
+
+  const result = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    result.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return result
 }
 
 function decodeXmlEntities(value: string): string {

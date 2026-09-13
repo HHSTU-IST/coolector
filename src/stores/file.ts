@@ -376,6 +376,10 @@ export const useFileStore = defineStore('file', () => {
         selectedFile.value = file
     }
 
+    const clearSelection = () => {
+        selectedFile.value = null
+    }
+
     const clearFiles = () => {
         files.value = []
         selectedFile.value = null
@@ -393,6 +397,7 @@ export const useFileStore = defineStore('file', () => {
         extractFileMetadata,
         removeFileById,
         selectFile,
+        clearSelection,
         clearFiles
     }
 })

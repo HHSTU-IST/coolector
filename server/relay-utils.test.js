@@ -7,6 +7,7 @@ import {
   isTextMimeType,
   makeAuthorizer,
   makeCorsHeaders,
+  makeTicketStore,
   normalizeAllowedOrigins,
   sanitizeRoomId,
   sanitizeStorageFileName
@@ -155,5 +156,34 @@ describe('isLoopbackHost', () => {
   it('非回环返回 false', () => {
     expect(isLoopbackHost('0.0.0.0')).toBe(false)
     expect(isLoopbackHost('::')).toBe(false)
+  })
+})
+
+describe('makeTicketStore', () => {
+  it('签发的票据可用且一次性', () => {
+    const store = makeTicketStore()
+    const ticket = store.issue('room-a')
+    expect(store.consume(ticket, 'room-a')).toBe(true)
+    expect(store.consume(ticket, 'room-a')).toBe(false)
+  })
+
+  it('房间不匹配拒绝', () => {
+    const store = makeTicketStore()
+    const ticket = store.issue('room-a')
+    expect(store.consume(ticket, 'room-b')).toBe(false)
+  })
+
+  it('过期票据拒绝', () => {
+    let clock = 1_000
+    const store = makeTicketStore({ ttlMs: 100, now: () => clock })
+    const ticket = store.issue('room-a')
+    clock = 1_101
+    expect(store.consume(ticket, 'room-a')).toBe(false)
+  })
+
+  it('空票据拒绝', () => {
+    const store = makeTicketStore()
+    expect(store.consume(null, 'room-a')).toBe(false)
+    expect(store.consume(undefined, 'room-a')).toBe(false)
   })
 })

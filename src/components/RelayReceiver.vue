@@ -109,6 +109,7 @@ interface RelayRoomResponse {
   roomId: string
   createdAt: string
   streamUrl: string
+  streamTicketUrl: string
   uploadUrl: string
   stateUrl: string
 }
@@ -413,6 +414,25 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
   }
 }
 
+/**
+ * 构造 SSE 连接地址。有 token 时先换取一次性短时效票据，避免长期 token 进入 URL
+ * （会被访问日志 / Referer / 浏览器历史记录）。无 token 时直接连接。
+ */
+const buildStreamUrl = async (room: RelayRoomResponse): Promise<string> => {
+  if (!RELAY_TOKEN) return room.streamUrl
+
+  const response = await fetch(room.streamTicketUrl, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+  })
+  if (!response.ok) {
+    throw new Error(`获取流票据失败（HTTP ${response.status}）`)
+  }
+
+  const payload = await response.json() as { ticket: string }
+  return `${room.streamUrl}?ticket=${encodeURIComponent(payload.ticket)}`
+}
+
 const connect = async (isReconnect = false) => {
   // 首次连接重置计数与手动断开标记；重连复用已有参数
   if (!isReconnect) {
@@ -439,8 +459,8 @@ const connect = async (isReconnect = false) => {
 
     await refreshRoomState()
 
-    // SSE 无法自定义请求头，token 通过查询参数携带（Relay 端 isAuthorized 已支持 ?token=）
-    const streamUrl = RELAY_TOKEN ? `${room.streamUrl}?token=${encodeURIComponent(RELAY_TOKEN)}` : room.streamUrl
+    // SSE 无法自定义请求头：改用一次性短时效票据，避免长期 token 进 URL（日志/Referer/历史）
+    const streamUrl = await buildStreamUrl(room)
     const source = new EventSource(streamUrl)
     eventSource.value = source
 

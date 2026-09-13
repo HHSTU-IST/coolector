@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { join, relative } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   contentDisposition,
@@ -10,6 +10,7 @@ import {
   isTextMimeType,
   makeAuthorizer,
   makeCorsHeaders,
+  makeTicketStore,
   normalizeAllowedOrigins,
   sanitizeRoomId,
   sanitizeStorageFileName
@@ -29,6 +30,10 @@ const RELAY_TOKEN = process.env.RELAY_TOKEN ?? ''
 const ALLOWED_ORIGINS = normalizeAllowedOrigins(process.env.RELAY_ALLOWED_ORIGINS)
 // UPLOAD_DIR 的磁盘配额，超出后拒绝新上传，避免磁盘被无限写满。
 const MAX_TOTAL_UPLOAD_BYTES = Number(process.env.MAX_TOTAL_UPLOAD_BYTES ?? 1024 * 1024 * 1024)
+// 仅在可信反向代理之后才信任 x-forwarded-* 头，避免直连时被伪造出错误跳转地址。
+const TRUST_PROXY = (process.env.RELAY_TRUST_PROXY ?? 'false') === 'true'
+// SSE 票据有效期（毫秒），短时效一次性，替代 URL 中的长期 token。
+const STREAM_TICKET_TTL_MS = Number(process.env.STREAM_TICKET_TTL_MS ?? 60_000)
 
 const rooms = new Map()
 
@@ -41,15 +46,46 @@ const corsHeaders = makeCorsHeaders(ALLOWED_ORIGINS)
 /** 未配置 RELAY_TOKEN 时放行所有请求；配置后要求 Bearer 头或 ?token= 查询参数（SSE 用） */
 const isAuthorized = makeAuthorizer(RELAY_TOKEN)
 
+/** SSE 短时效一次性票据存储（避免长期 token 进 URL） */
+const streamTickets = makeTicketStore({ ttlMs: STREAM_TICKET_TTL_MS })
+
 function nowIso() {
   return new Date().toISOString()
 }
 
+/** 结构化安全审计日志（房间/上传/鉴权失败/限流等关键事件） */
+function auditLog(event, details = {}) {
+  console.log(`[relay][audit] ${JSON.stringify({ ts: nowIso(), event, ...details })}`)
+}
+
 function baseUrl(req) {
-  const forwardedProto = req.headers['x-forwarded-proto']
-  const protocol = typeof forwardedProto === 'string' ? forwardedProto : 'http'
+  // 仅在可信代理后才采信 x-forwarded-*，否则忽略（防止直连时被伪造出恶意跳转地址）
+  if (TRUST_PROXY) {
+    const forwardedProto = req.headers['x-forwarded-proto']
+    const forwardedHost = req.headers['x-forwarded-host']
+    const protocol = typeof forwardedProto === 'string' ? forwardedProto : 'http'
+    const host = typeof forwardedHost === 'string' ? forwardedHost : (req.headers.host ?? `localhost:${PORT}`)
+    return `${protocol}://${host}`
+  }
+
   const host = req.headers.host ?? `localhost:${PORT}`
-  return `${protocol}://${host}`
+  return `http://${host}`
+}
+
+/** /events 允许携带一次性票据代替长期 token；票据与房间绑定、用后即焚 */
+function isStreamTicketAuthorized(req, pathname) {
+  const match = pathname.match(/^\/api\/rooms\/([^/]+)\/events$/u)
+  if (!match) return false
+
+  const roomId = sanitizeRoomId(match[1])
+  if (!roomId) return false
+
+  try {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    return streamTickets.consume(url.searchParams.get('ticket'), roomId)
+  } catch {
+    return false
+  }
 }
 
 function createRoom(roomId = randomUUID()) {
@@ -123,9 +159,8 @@ function uploadSummary(upload, req, { includeContent = true } = {}) {
     contentBase64: includeContent ? upload.contentBase64 : null,
     detailsUrl,
     downloadUrl: `${detailsUrl}?download=1`,
-    serverStored: Boolean(upload.storagePath),
-    storageFileName: upload.storageFileName ?? null,
-    storageRelativePath: upload.storagePath ? relative(UPLOAD_DIR, upload.storagePath) : null
+    // 只暴露「是否已落盘」，不返回服务端存储文件名/相对路径，避免路径信息泄露
+    serverStored: Boolean(upload.storagePath)
   }
 
   return summary
@@ -313,12 +348,14 @@ async function handleCreateRoom(req, res) {
       roomId: room.room.id,
       createdAt: room.room.createdAt
     })
+    auditLog('room_created', { roomId: room.room.id, ip: req.socket.remoteAddress })
   }
 
   return writeJson(res, 201, {
     roomId: room.room.id,
     createdAt: room.room.createdAt,
     streamUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/events`,
+    streamTicketUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/stream-ticket`,
     uploadUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/uploads`,
     stateUrl: `${baseUrl(req)}/api/rooms/${room.room.id}`
   }, corsHeaders(req))
@@ -354,6 +391,7 @@ async function handleUpload(req, res, room, query) {
   room.stats.uploads += 1
   room.updatedAt = upload.uploadedAt
   room.lastActivity = Date.now()
+  auditLog('upload_created', { roomId: room.id, name: upload.name, size })
 
   // 响应里带上完整正文，广播事件里只带元信息
   const uploadPayload = uploadSummary(upload, req)
@@ -411,6 +449,7 @@ function handleEvents(req, res, room) {
   room.receiver = { res, heartbeat }
   room.stats.receiverConnections += 1
   room.lastActivity = Date.now()
+  auditLog('receiver_connected', { roomId: room.id })
 
   writeSseFrame(res, 'receiver.ready', {
     id: randomUUID(),
@@ -456,6 +495,7 @@ function handleRoomDelete(req, res, roomId) {
   }
 
   destroyRoom(room)
+  auditLog('room_deleted', { roomId: room.id })
   return writeJson(res, 200, {
     deleted: true,
     roomId: room.id
@@ -495,6 +535,7 @@ const server = createServer(async (req, res) => {
 
     // 速率限制：/api 请求按来源 IP 计数，超出上限返回 429
     if (pathname.startsWith('/api/') && isRateLimited(req)) {
+      auditLog('rate_limited', { ip: req.socket.remoteAddress, path: pathname })
       writeJson(res, 429, { error: 'Too many requests' }, cors)
       return
     }
@@ -507,13 +548,13 @@ const server = createServer(async (req, res) => {
           createRoom: 'POST /api/rooms',
           roomState: 'GET /api/rooms/:roomId',
           receiverStream: 'GET /api/rooms/:roomId/events',
+          streamTicket: 'POST /api/rooms/:roomId/stream-ticket',
           upload: 'POST /api/rooms/:roomId/uploads',
           uploadDetails: 'GET /api/rooms/:roomId/uploads/:uploadId',
           download: 'GET /api/rooms/:roomId/uploads/:uploadId?download=1',
           deleteRoom: 'DELETE /api/rooms/:roomId',
           healthz: 'GET /healthz'
         },
-        uploadDir: UPLOAD_DIR,
         authRequired: Boolean(RELAY_TOKEN),
         storageUsedBytes: totalStoredBytes,
         storageLimitBytes: MAX_TOTAL_UPLOAD_BYTES
@@ -530,8 +571,9 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    // /api 下的业务接口统一走鉴权；未配置 RELAY_TOKEN 时默认放行
-    if (pathname.startsWith('/api/') && !isAuthorized(req)) {
+    // /api 下的业务接口统一走鉴权；SSE 额外允许短时效一次性票据（避免长期 token 进 URL）
+    if (pathname.startsWith('/api/') && !isAuthorized(req) && !isStreamTicketAuthorized(req, pathname)) {
+      auditLog('auth_failed', { method: req.method, path: pathname, ip: req.socket.remoteAddress })
       writeJson(res, 401, { error: 'Unauthorized' }, cors)
       return
     }
@@ -541,7 +583,7 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    const roomMatch = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(events|uploads)(?:\/([^/]+))?)?$/u)
+    const roomMatch = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/(events|uploads|stream-ticket)(?:\/([^/]+))?)?$/u)
     if (!roomMatch) {
       writeJson(res, 404, { error: 'Not found' }, cors)
       return
@@ -574,6 +616,17 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    if (req.method === 'POST' && subresource === 'stream-ticket') {
+      if (!room) {
+        writeJson(res, 404, { error: 'Room not found' }, cors)
+        return
+      }
+      const ticket = streamTickets.issue(room.id)
+      auditLog('stream_ticket_issued', { roomId: room.id, ip: req.socket.remoteAddress })
+      writeJson(res, 201, { ticket, expiresInMs: STREAM_TICKET_TTL_MS }, cors)
+      return
+    }
+
     if (req.method === 'GET' && subresource === 'events') {
       handleEvents(req, res, room)
       return
@@ -591,8 +644,11 @@ const server = createServer(async (req, res) => {
 
     writeJson(res, 405, { error: 'Method not allowed' }, cors)
   } catch (error) {
+    // 对外只回传已知的客户端校验错误，其余统一模糊为 Bad request，细节落审计日志
     const message = error instanceof Error ? error.message : 'Unexpected error'
-    writeJson(res, 400, { error: message }, corsHeaders(req))
+    auditLog('request_error', { path: req.url, message })
+    const isClientError = /^(Missing |Invalid |Request body too large|Upload storage quota)/u.test(message)
+    writeJson(res, 400, { error: isClientError ? message : 'Bad request' }, corsHeaders(req))
   }
 })
 
