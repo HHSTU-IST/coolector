@@ -43,3 +43,18 @@ jobs:
 
       - name: Build project
         run: pnpm build
+
+      # 前端产物是公开的：一旦有人把密钥经 VITE_* 注入，产物里就会带上明文。
+      # 这条断言让「产物不含密钥」变成 CI 的可执行门禁。
+      - name: Guard against secret leakage in build output
+        run: pnpm guard:no-secret
+
+      # 真实浏览器回归：curl 不会做请求头的 ISO-8859-1 校验，
+      # 因此中文文件名让 fetch 在出网前抛 TypeError 这类缺陷只能靠浏览器发现。
+      - name: Install Chromium for browser E2E
+        if: matrix.node-version == '24.x'
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser end-to-end regression
+        if: matrix.node-version == '24.x'
+        run: node scripts/e2e-upload.mjs

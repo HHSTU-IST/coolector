@@ -31,10 +31,23 @@
           </div>
 
           <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">
+              接收端密钥 <span class="font-normal text-gray-400">（可选）</span>
+            </label>
+            <input v-model="relayToken" type="password" autocomplete="off" spellcheck="false"
+              class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+              placeholder="Relay 的 RELAY_TOKEN，仅保存在本机浏览器">
+            <p class="mt-1 text-xs text-gray-500">
+              密钥不再随页面分发，只保存在本机 localStorage。若 Relay 未配置 RELAY_TOKEN 可留空。
+            </p>
+          </div>
+
+          <div>
             <label class="block text-sm font-medium text-gray-700 mb-2">房间 ID</label>
             <input v-model="roomId" type="text"
               class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-              placeholder="demo-room">
+              placeholder="留空则由服务端生成随机房间号">
+            <p v-if="roomIdHint" class="mt-1 text-xs text-amber-600">{{ roomIdHint }}</p>
           </div>
 
           <div class="grid gap-3 sm:flex sm:flex-wrap">
@@ -51,7 +64,8 @@
           <div class="rounded-xl bg-indigo-50 border border-indigo-100 p-4 text-sm text-indigo-900">
             <p class="font-medium">连接说明</p>
             <p class="mt-1">
-              组件会先创建或进入房间，然后打开 `/events` 的 SSE 通道，接收到 `upload.created` 后自动拉取文件内容。
+              连接后会创建或进入房间，然后打开 `/events` 的 SSE 通道，接收到 `upload.created` 后自动拉取文件内容。
+              房间号需先在此创建、再分享给发送方 —— 发送方无需任何密钥。
             </p>
           </div>
         </form>
@@ -104,6 +118,14 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { useCollectionStore } from '../stores/collection'
 import { useFileStore } from '../stores/file'
+import {
+  DEFAULT_RELAY_URL,
+  isWeakRoomId,
+  normalizeRelayUrl,
+  relayToken,
+  validateRoomId,
+  withAuth
+} from '../utils/relay'
 
 interface RelayRoomResponse {
   roomId: string
@@ -165,14 +187,19 @@ interface LogEntry {
   createdAt: string
 }
 
-const DEFAULT_RELAY_URL = import.meta.env.VITE_RELAY_URL ?? 'http://127.0.0.1:8787'
-const RELAY_TOKEN = import.meta.env.VITE_RELAY_TOKEN ?? ''
-
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
 
 const relayBaseUrl = ref(DEFAULT_RELAY_URL)
-const roomId = ref('demo-room')
+// 留空由服务端生成完整 UUID 房间号 —— 发送方公开写模型下房间号即能力凭据，默认值不能硬编码
+const roomId = ref('')
+
+/** 房间号偏弱时给出非阻断提示（房间号需分享给发送方，过易猜可能被灌入文件） */
+const roomIdHint = computed(() => {
+  const id = roomId.value.trim()
+  if (!id || !isWeakRoomId(id)) return ''
+  return '该房间号较容易被猜到，建议留空让服务端生成随机房间号'
+})
 const connectionState = ref<'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'>('idle')
 const statusMessage = ref('尚未建立连接')
 const roomState = ref<RoomSnapshot | null>(null)
@@ -212,19 +239,20 @@ const statusBadgeClass = computed(() => {
   }
 })
 
-const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/u, '')
-
 const ensureRoom = async (baseUrl: string, targetRoomId: string) => {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (RELAY_TOKEN) headers['Authorization'] = `Bearer ${RELAY_TOKEN}`
+  // 房间号留空时不传 roomId，由服务端生成完整 UUID
+  const body = targetRoomId ? JSON.stringify({ roomId: targetRoomId }) : '{}'
 
   const response = await fetch(`${baseUrl}/api/rooms`, {
     method: 'POST',
-    headers,
-    body: JSON.stringify({ roomId: targetRoomId })
+    headers: withAuth({ 'Content-Type': 'application/json' }),
+    body
   })
 
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('鉴权失败：请检查接收端密钥是否与 Relay 的 RELAY_TOKEN 一致')
+    }
     throw new Error(await response.text())
   }
 
@@ -234,10 +262,7 @@ const ensureRoom = async (baseUrl: string, targetRoomId: string) => {
 const refreshRoomState = async () => {
   if (!stateUrl.value) return
 
-  const headers: Record<string, string> = {}
-  if (RELAY_TOKEN) headers['Authorization'] = `Bearer ${RELAY_TOKEN}`
-
-  const response = await fetch(stateUrl.value, { headers })
+  const response = await fetch(stateUrl.value, { headers: withAuth() })
   if (!response.ok) return
   roomState.value = await response.json() as RoomSnapshot
 }
@@ -316,16 +341,23 @@ const decodeRelayContent = (upload: RelayUploadSummary) => {
     return upload.contentText
   }
 
-  if (upload.contentBase64) {
-    try {
-      return atob(upload.contentBase64)
-    } catch {
-      return ''
-    }
+  if (upload.previewText) {
+    return upload.previewText
   }
 
-  return upload.previewText ?? ''
+  return binaryPlaceholder(upload.name)
 }
+
+/**
+ * 二进制文件在接收端的占位文案，与本地文件路径（src/stores/file.ts）保持同一措辞。
+ * 过去这里会对 contentBase64 做 atob，得到一串不可打印字符并直接渲染成乱码。
+ */
+const binaryPlaceholder = (fileName: string) =>
+  `此文件为二进制格式（${fileName}），已接收但暂不支持内容预览。`
+
+/** 是否拿到了可读文本；决定 FileViewer 以等宽字体还是普通字体渲染 */
+const hasReadableText = (upload: RelayUploadSummary) =>
+  upload.contentText !== null || Boolean(upload.previewText)
 
 /**
  * SSE 广播只带元信息（contentIncluded:false），正文需按 detailsUrl 按需拉取。
@@ -336,10 +368,7 @@ const fetchUploadDetails = async (upload: RelayUploadSummary): Promise<RelayUplo
     return upload
   }
 
-  const headers: Record<string, string> = {}
-  if (RELAY_TOKEN) headers['Authorization'] = `Bearer ${RELAY_TOKEN}`
-
-  const response = await fetch(upload.detailsUrl, { headers })
+  const response = await fetch(upload.detailsUrl, { headers: withAuth() })
   if (!response.ok) {
     throw new Error(`拉取文件正文失败（HTTP ${response.status}）`)
   }
@@ -359,7 +388,7 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
       name: full.name,
       content,
       contentBase64: full.contentBase64 ?? undefined,
-      hasTextContent: full.contentText !== null || Boolean(full.previewText),
+      hasTextContent: hasReadableText(full),
       size: full.size,
       type: full.mimeType,
       lastModified: full.lastModified,
@@ -383,12 +412,12 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
     statusMessage.value = `已接收文件：${full.name}`
     void refreshRoomState()
   } catch (error) {
-    const fallbackContent = upload.previewText ?? ''
+    const fallbackContent = decodeRelayContent(upload)
     const file = fileStore.upsertRelayFile({
       name: upload.name,
       content: fallbackContent,
       contentBase64: upload.contentBase64 ?? undefined,
-      hasTextContent: Boolean(fallbackContent),
+      hasTextContent: hasReadableText(upload),
       size: upload.size,
       type: upload.mimeType,
       lastModified: upload.lastModified,
@@ -419,11 +448,12 @@ const handleUploadCreated = async (event: MessageEvent<string>) => {
  * （会被访问日志 / Referer / 浏览器历史记录）。无 token 时直接连接。
  */
 const buildStreamUrl = async (room: RelayRoomResponse): Promise<string> => {
-  if (!RELAY_TOKEN) return room.streamUrl
+  // 未配置接收端密钥时服务端不做鉴权，直接用 streamUrl 即可
+  if (!relayToken.value) return room.streamUrl
 
   const response = await fetch(room.streamTicketUrl, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+    headers: withAuth()
   })
   if (!response.ok) {
     throw new Error(`获取流票据失败（HTTP ${response.status}）`)
@@ -448,9 +478,10 @@ const connect = async (isReconnect = false) => {
   try {
     const baseUrl = normalizeRelayUrl(relayBaseUrl.value)
     const targetRoomId = roomId.value.trim()
+    const roomIdError = validateRoomId(targetRoomId, { allowEmpty: true })
 
-    if (!targetRoomId) {
-      throw new Error('房间 ID 不能为空')
+    if (roomIdError) {
+      throw new Error(roomIdError)
     }
 
     const room = await ensureRoom(baseUrl, targetRoomId)

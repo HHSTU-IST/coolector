@@ -31,5 +31,5 @@ server {
     proxy_cache off;
     proxy_buffering off;          # 关键：SSE 不缓冲，事件实时下发
     chunked_transfer_encoding on;
-    client_max_body_size 20m;     # 允许单文件最大 20MB，需 >= RELAY MAX_BODY_BYTES
+    client_max_body_size 20m;     # 需 >= Relay 派生的 MAX_BODY_BYTES（默认约 13.4MB = MAX_FILE_BYTES 10MB × 4/3 + 余量）
 }

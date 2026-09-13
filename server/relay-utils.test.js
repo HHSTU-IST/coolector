@@ -5,6 +5,7 @@ import {
   decodeHeaderValue,
   isLoopbackHost,
   isTextMimeType,
+  isWeakRoomId,
   makeAuthorizer,
   makeCorsHeaders,
   makeTicketStore,
@@ -24,12 +25,47 @@ describe('sanitizeRoomId', () => {
     expect(sanitizeRoomId('  demo-room  ')).toBe('demo-room')
   })
 
+  it('长度下限为 8（房间 ID 是发送方唯一能力凭据）', () => {
+    expect(sanitizeRoomId('abcdefgh')).toBe('abcdefgh')
+    expect(sanitizeRoomId('abcdefg')).toBeNull()
+    expect(sanitizeRoomId('room1')).toBeNull()
+  })
+
   it('拒绝过短 / 非法字符 / 超长 / 非字符串', () => {
     expect(sanitizeRoomId('ab')).toBeNull()
     expect(sanitizeRoomId('room/../etc')).toBeNull()
     expect(sanitizeRoomId('a'.repeat(65))).toBeNull()
     expect(sanitizeRoomId(null)).toBeNull()
     expect(sanitizeRoomId(undefined)).toBeNull()
+  })
+})
+
+describe('isWeakRoomId', () => {
+  it('UUID 视为强', () => {
+    expect(isWeakRoomId('2a1bc04f-ca01-420b-a3f9-7e6f22a4daa4')).toBe(false)
+    expect(isWeakRoomId('2A1BC04F-CA01-420B-A3F9-7E6F22A4DAA4')).toBe(false)
+  })
+
+  it('常见弱命名视为弱', () => {
+    expect(isWeakRoomId('demo-room')).toBe(true)
+    expect(isWeakRoomId('Demo-Room')).toBe(true)
+    expect(isWeakRoomId('test-room')).toBe(true)
+  })
+
+  it('字符种类单一或过短视为弱', () => {
+    expect(isWeakRoomId('abcdefghij')).toBe(true)
+    expect(isWeakRoomId('1234567890')).toBe(true)
+    expect(isWeakRoomId('abc12345')).toBe(true)
+  })
+
+  it('混合字符且足够长视为强', () => {
+    expect(isWeakRoomId('class-2026-A')).toBe(false)
+    expect(isWeakRoomId('2026-class-3a')).toBe(false)
+  })
+
+  it('空值视为弱', () => {
+    expect(isWeakRoomId('')).toBe(true)
+    expect(isWeakRoomId(undefined)).toBe(true)
   })
 })
 
@@ -115,9 +151,15 @@ describe('makeAuthorizer', () => {
     expect(auth({ headers: { authorization: 'Bearer secret' }, url: '/' })).toBe(true)
   })
 
-  it('?token= 查询参数放行（SSE）', () => {
+  it('拒绝 ?token= 查询参数（长期密钥不得进 URL）', () => {
     const auth = makeAuthorizer('secret')
-    expect(auth({ headers: {}, url: '/api/rooms/x/events?token=secret' })).toBe(true)
+    expect(auth({ headers: {}, url: '/api/rooms/x/events?token=secret' })).toBe(false)
+    expect(auth({ headers: {}, url: '/api/rooms?token=secret' })).toBe(false)
+  })
+
+  it('拒绝裸 token，必须是 Bearer 形式', () => {
+    const auth = makeAuthorizer('secret')
+    expect(auth({ headers: { authorization: 'secret' }, url: '/' })).toBe(false)
   })
 
   it('错误 token 拒绝', () => {

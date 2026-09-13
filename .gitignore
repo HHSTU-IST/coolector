@@ -21,6 +21,7 @@ dist-ssr
 *.sw?
 
 .workbuddy
+deliverables
 
 # Environment
 .env

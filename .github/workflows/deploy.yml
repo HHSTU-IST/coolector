@@ -41,9 +41,13 @@ jobs:
                   # 前端连接 Relay 的绝对地址（Vite 构建期注入）。
                   # 在仓库 Settings → Secrets and variables → Actions → Variables 里配置。
                   VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}
-                  # Relay 鉴权令牌（Vite 构建期注入到产物；见 RECEIVER_SETUP.md 的安全说明）。
-                  # 在仓库 Settings → Secrets and variables → Actions → Secrets 里配置。
-                  VITE_RELAY_TOKEN: ${{ secrets.VITE_RELAY_TOKEN }}
+                  # ⚠️ 这里刻意不再注入任何密钥。
+                  # 前端产物发布在公开的 GitHub Pages 上，任何 VITE_* 变量都会被内联进 dist/
+                  # 并被访问者从 JS 中提取。接收端密钥改由用户在界面上填写、存本机 localStorage；
+                  # 发送方（学生）不需要密钥 —— 房间号本身就是能力凭据。
+
+            - name: Guard against secret leakage in build output
+              run: pnpm guard:no-secret
 
             - name: Setup Pages
               uses: actions/configure-pages@v6

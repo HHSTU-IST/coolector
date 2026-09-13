@@ -32,14 +32,18 @@ cloudflared --version
 
 ## 2. 准备令牌与配置
 
-`.env` 已生成（gitignored），含 `RELAY_TOKEN` 与 `VITE_RELAY_TOKEN`（一致）。
-**务必保管好 `RELAY_TOKEN`**，泄露等同于任何人可向你电脑上传文件。
+`.env` 已生成（gitignored），含 `RELAY_TOKEN`。
+**务必保管好 `RELAY_TOKEN`**：它是接收端管理密钥，泄露等同于任何人可查看、下载、删除你的全部收集。
+
+> 该密钥**只**存在于服务端与你本机的浏览器（填在接收端面板里、存 `localStorage`）。
+> 它**不会**被打进前端产物 —— 前端产物是公开的，任何 `VITE_*` 变量都会被访问者读出来。
+> 仓库里有一条 CI 门禁 `pnpm guard:no-secret` 专门断言「产物中不含密钥」。
 
 如需自换令牌：
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(32))"
-# 把输出同时填到 .env 的 RELAY_TOKEN 与 VITE_RELAY_TOKEN
+# 把输出填到 .env 的 RELAY_TOKEN，然后重启 pnpm start
 ```
 
 ## 3. 启动（关键顺序：先起 Relay 隧道，再起服务）
@@ -85,17 +89,29 @@ cloudflared tunnel --url http://localhost:5174
 
 ## 4. 使用
 
-- **你（接收端）**：浏览器打开 `http://localhost:5174`，页面顶部「接收端」区填房间 ID（默认 `demo-room`）→ 连接。
-  此时你的电脑即接收端，收到的文件会落 `server/uploads/` 并出现在页面。
-- **发送方（外网）**：把 `https://yyyy.trycloudflared.com` 发给他。他打开后：
-  - 底部「预览/文件查看器」填同样的房间 ID + 选文件 → 发送；
-  - 或自己部署的静态前端（见 `RELAY_DEPLOY.md`）填 `VITE_RELAY_URL=<RELAY_URL>` 后访问。
-- 双方房间 ID 一致即可点对点收集。
+关键顺序：**先由接收端建房，再把房间号发给发送方**。发送方不需要任何密钥，但房间必须已经存在
+（不再支持「上传即建房」）。
+
+- **你（接收端）**：浏览器打开 `http://localhost:5174` →
+  1. 「公网接收长连接」面板的 **接收端密钥** 填入 `.env` 里的 `RELAY_TOKEN`（只存本机浏览器）；
+  2. **房间 ID 留空**，点「建立长连接」—— 服务端会生成一个完整 UUID 房间号；
+  3. 复制页面上显示的房间号，连同发送方地址一起发给学生。
+  收到的文件会落 `server/uploads/<roomId>/` 并出现在页面。
+- **发送方（外网）**：打开你给的地址 → 选文件 → 在「房间 ID」填你给的房间号 → 点「HTTP 上传到 Relay」。
+  他无需填密钥，也不需要登录。
+- 双方房间号一致即可点对点收集。房间号就是发送方的唯一凭据，**不要公开张贴**，只说给该交作业的人。
+
+> 房间 ID 至少 8 位；使用 `demo-room`、`test-room` 这类易猜名字时，服务端会写一条
+> `weak_room_id` 审计日志。留空让服务端生成 UUID 是最稳妥的做法。
 
 ## 5. 安全清单
 
-- [x] `RELAY_TOKEN` 已设置，所有 `/api` 需令牌；SSE 走 `?token=` 查询参数携带。
+- [x] `RELAY_TOKEN` 已设置，接收端侧 `/api`（建房/状态/票据/删除）需 Bearer 令牌。
+- [x] 令牌**不随前端产物分发**：只存本机 `localStorage`，由 CI 门禁 `pnpm guard:no-secret` 守住。
+- [x] SSE 不把长期令牌放进 URL：改用一次性短时效票据（默认 60 秒、用后即焚）。
+- [x] 发送方无需密钥，凭不可猜的房间号（默认完整 UUID）上传。
 - [x] `.env` 已被 `.gitignore` 忽略，不会提交到仓库。
+- [ ] 房间号 = 发送方凭据，**不要公开张贴**；只发给该交作业的人。
 - [ ] 公网暴露期间 `RELAY_ALLOWED_ORIGINS` 建议收窄为前端实际来源（见 `.env` 注释），而非 `*`。
 - [ ] 用完即停：关闭两个 `cloudflared` 终端与 `pnpm start`，隧道随即失效，避免长期暴露。
 - [ ] 磁盘配额 `MAX_TOTAL_UPLOAD_BYTES`（默认 1GB）限制本机被写满；按需调整。
@@ -106,10 +122,15 @@ cloudflared tunnel --url http://localhost:5174
 | 现象                        | 原因 / 处理                                                                                                   |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | 接收端显示「连接失败」      | `VITE_RELAY_URL` 未填或填错；Relay 隧道未起；检查 `.env` 后重启 `pnpm start`                                  |
-| 发送方上传 401 Unauthorized | 前端 `VITE_RELAY_TOKEN` 与 Relay `RELAY_TOKEN` 不一致，或发送方前端未带该变量构建                             |
+| 接收端提示「鉴权失败」      | 面板里填的接收端密钥与 Relay 的 `RELAY_TOKEN` 不一致                                                          |
+| 发送方上传 404              | 房间不存在或已过期：必须**先由接收端建房**再把房间号发出去；房间 6h 无活动会被回收                            |
+| 发送方上传 401              | 该请求命中了受保护路由。发送方只应调用 `POST /api/rooms/:roomId/uploads`，不应带管理类请求                    |
+| 发送方上传「房间号至少 8 位」| 房间 ID 下限已从 4 位提到 8 位（过短易被猜到）                                                               |
 | 发送方上传被 CORS 拦截      | `RELAY_ALLOWED_ORIGINS` 未包含发送方前端来源                                                                  |
+| 上传大文件报 413            | 超过 `MAX_FILE_BYTES`（默认 10MB）；请求体上限由它自动派生，无需手动改 `MAX_BODY_BYTES`                        |
 | 隧道 URL 每次都变           | quick tunnel 特性；需要固定域名请用 ngrok / cloudflared 命名隧道 / 自有域名                                   |
 | Web 隧道访问返回 403        | Vite 默认拦截非 localhost 的 Host 头；已在 `vite.config.ts` 设 `allowedHosts: ['.trycloudflare.com']`，换用其他隧道域名需同步加 |
+| 回调地址是 `http://` 导致混合内容被拦 | 反向代理后未开 `RELAY_TRUST_PROXY=true`                                                                |
 | SSE 收不到事件              | 穿透层缓冲了流；cloudflared 默认不缓冲，若套 Nginx 需 `proxy_buffering off`（见 `deploy/nginx.conf.example`） |
 
 ## 7. 更稳妥的替代：前端部署到 GitHub Pages（只穿透 Relay 一条隧道）
@@ -127,11 +148,12 @@ cloudflared tunnel --url http://localhost:5174
    - 注册 ngrok（<https://ngrok.com）→> Dashboard → Domains → New Domain，领取形如 `your-name.ngrok-free.app` 的免费静态域名。
    - 本机认证：`ngrok config add-authtoken <你的authtoken>`
 
-2. **在 GitHub 仓库配置变量/密钥**：
+2. **在 GitHub 仓库配置变量**：
    - 仓库 → Settings → Secrets and variables → Actions：
      - **Variables** 新增 `VITE_RELAY_URL` = `https://your-name.ngrok-free.app`（Relay 的稳定公网地址，不含尾斜杠）
-     - **Secrets** 新增 `VITE_RELAY_TOKEN` = 与 `.env` 里 `RELAY_TOKEN` 相同的值
-   - `deploy.yml` 的 build 步骤已读取这两个值注入构建产物。
+   - ⚠️ **不要**配置任何 `VITE_RELAY_TOKEN` 之类的密钥 Secret。
+     `deploy.yml` 只注入 `VITE_RELAY_URL`，并会跑 `pnpm guard:no-secret` 断言产物里没有密钥。
+     接收端密钥由你在浏览器面板手填、存本机 `localStorage`，发送方则完全不需要密钥。
 
 3. **推送触发部署**：`git push`（或手动触发 Actions 的 `Deploy to GitHub Pages`）。
    部署完成后前端固定地址为 `https://<用户名>.github.io/<仓库名>/`。
@@ -146,14 +168,21 @@ cloudflared tunnel --url http://localhost:5174
 
 5. **起本机服务**：`pnpm start`（Relay :8787 + 前端 :5174）。
 
-6. **你（接收端）**：浏览器开 `http://localhost:5174` → 顶部接收端填房间 ID → 连接。
+6. **你（接收端）**：浏览器开 `http://localhost:5174` → 顶部接收端填 `.env` 的 `RELAY_TOKEN`，
+   房间 ID **留空** → 连接，拿到服务端生成的 UUID 房间号。
 
-7. **发送方（外网）**：访问固定地址 `https://<用户名>.github.io/<仓库名>/`，底部填同样房间 ID + 选文件 → 发送。
+7. **发送方（外网）**：访问固定地址 `https://<用户名>.github.io/<仓库名>/`，填你给的房间号 + 选文件 → 发送。
+   他不需要密钥；房间必须已由你先创建，否则会收到 404。
 
 ### 7.3 安全须知（务必读）
 
-- **令牌会打进前端产物**：`VITE_*` 是 Vite 构建期内联进 JS bundle 的，前端一旦公开部署，
-  任何人加载页面都能从产物里读出 `VITE_RELAY_TOKEN`。因此该令牌**只能视为「防止路人随手乱传」，
-  不是强认证**。真正需要强鉴权时，应改用 ngrok 的 OAuth/基础认证或给 Relay 加登录态（超出当前实现）。
+- **接收端密钥不进前端产物**。`VITE_*` 变量会被 Vite 在构建期内联进 JS bundle，前端一旦公开部署，
+  任何人加载页面都能从产物里读出它。因此本项目**刻意不提供** `VITE_RELAY_TOKEN`：
+  密钥只由你在浏览器面板填写、存本机 `localStorage`；发送方（学生）完全不需要密钥。
+  回归防护由 `pnpm guard:no-secret` 承担 —— 它会在 CI 里断言产物中不含任何密钥值。
+- **房间号即发送方凭据**。服务端默认生成完整 UUID；房间号被谁看到，谁就能往该房间传文件。
+  不要把它写进公开的公告或群公告。
+- **SSE 用一次性票据**。EventSource 无法自定义请求头，我们没有退回「把令牌放 URL」，
+  而是由接收端先 `POST /api/rooms/:roomId/stream-ticket` 换一次性短时效票据（默认 60 秒、用后即焚）。
 - 建议把 `.env` 里 `RELAY_ALLOWED_ORIGINS` 收窄为 `https://<用户名>.github.io`，至少挡住非浏览器直连的跨域。
 - ngrok 免费档限额：1GB/月出流量、2 万请求/月、1 个在线端点，适合小规模文件收集；量大请升级或换自有域名隧道。

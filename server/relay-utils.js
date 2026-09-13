@@ -4,11 +4,39 @@
 import { basename } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-/** 房间 ID 只允许字母数字、下划线、连字符，长度 4–64 */
+/**
+ * 房间 ID 只允许字母数字、下划线、连字符，长度 8–64。
+ * 下限设为 8（而非 4）是因为「发送方公开写」模型下房间 ID 本身就是能力凭据，
+ * 过短的自定义 ID 极易被枚举。不传时由服务端生成完整 UUID。
+ */
+export const ROOM_ID_MIN_LENGTH = 8
+export const ROOM_ID_MAX_LENGTH = 64
+
 export function sanitizeRoomId(roomId) {
   if (!roomId || typeof roomId !== 'string') return null
   const normalized = roomId.trim()
-  return /^[a-zA-Z0-9_-]{4,64}$/u.test(normalized) ? normalized : null
+  if (normalized.length < ROOM_ID_MIN_LENGTH || normalized.length > ROOM_ID_MAX_LENGTH) return null
+  return /^[a-zA-Z0-9_-]+$/u.test(normalized) ? normalized : null
+}
+
+/** 常见弱房间名；仅在服务端审计告警，不阻断（班级可能确有固定命名约定） */
+const WEAK_ROOM_IDS = new Set([
+  'demo-room', 'demo-room-1', 'test-room', 'default-room', 'sample-room',
+  'classroom', 'my-room', 'coolector', 'homework', 'assignment'
+])
+
+/**
+ * 判断房间 ID 是否熵不足：弱命名，或字符种类过少（<2 类），或长度 < 12 且非 UUID 形态。
+ * 服务端据此写审计告警、前端据此提示用户「请勿公开分享房间号」。
+ */
+export function isWeakRoomId(roomId) {
+  const raw = typeof roomId === 'string' ? roomId.trim() : ''
+  if (!raw) return true
+  if (WEAK_ROOM_IDS.has(raw.toLowerCase())) return true
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(raw)) return false
+
+  const classes = [/[a-z]/u, /[A-Z]/u, /[0-9]/u, /[_-]/u].filter((re) => re.test(raw)).length
+  return classes < 2 || raw.length < 12
 }
 
 /** 清洗存储文件名：取 basename 阻断路径穿越，替换控制字符与非法字符，防纯点号名 */
@@ -47,7 +75,8 @@ export function decodeHeaderValue(value) {
 
 export function isTextMimeType(mimeType, fileName) {
   if (mimeType.startsWith('text/')) return true
-  return /\.(txt|md|json|xml|csv|log|conf|ini|yaml|yml|env|toml|sql|js|ts|tsx|jsx|css|scss|html|htm)$/iu.test(fileName)
+  // ipynb 是 JSON 文本，但浏览器常给不出可靠 MIME（空串或无注册），必须靠扩展名兜底
+  return /\.(txt|md|markdown|json|ipynb|xml|csv|log|conf|ini|yaml|yml|env|toml|sql|js|mjs|cjs|ts|tsx|jsx|vue|css|scss|html|htm|sh|py)$/iu.test(fileName)
 }
 
 /**
@@ -79,7 +108,7 @@ export function makeCorsHeaders(allowedOrigins) {
     const headers = {
       'Access-Control-Allow-Origin': allowAll ? '*' : origin,
       'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Envelope, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified'
     }
 
     if (!allowAll) {
@@ -90,23 +119,19 @@ export function makeCorsHeaders(allowedOrigins) {
   }
 }
 
-/** 鉴权工厂：未配置 token 时全放行；配置后要求 Bearer 头或 ?token= 查询参数（SSE 用） */
+/**
+ * 鉴权工厂：未配置 token 时全放行；配置后只接受 `Authorization: Bearer <token>`。
+ *
+ * 注意：这里**刻意不支持** `?token=` 查询参数。长期密钥进入 URL 会残留在访问日志、
+ * Referer 与浏览器历史中；SSE 无法自定义请求头的问题已由一次性短时效票据
+ * （见 makeTicketStore + relay-server 的 isStreamTicketAuthorized）解决。
+ */
 export function makeAuthorizer(relayToken) {
   return (req) => {
     if (!relayToken) return true
 
     const header = String(req.headers.authorization ?? '')
-    if (header === `Bearer ${relayToken}` || header === relayToken) return true
-
-    // EventSource 无法自定义请求头，SSE 连接改由查询参数携带 token
-    try {
-      const url = new URL(req.url ?? '/', 'http://localhost')
-      if (url.searchParams.get('token') === relayToken) return true
-    } catch {
-      // 忽略非法 URL
-    }
-
-    return false
+    return header === `Bearer ${relayToken}`
   }
 }
 

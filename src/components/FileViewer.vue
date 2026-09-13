@@ -69,7 +69,8 @@
                 <label class="block text-xs font-medium text-gray-500 mb-1">房间 ID</label>
                 <input v-model="relayUploadRoomId" type="text"
                   class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                  placeholder="demo-room">
+                  placeholder="由接收端提供的房间号">
+                <p v-if="roomIdHint" class="mt-1 text-xs text-amber-600">{{ roomIdHint }}</p>
               </div>
             </div>
 
@@ -81,6 +82,7 @@
 
           <p class="mt-3 text-sm text-gray-600">
             通过标准 HTTP `POST` 把当前文件发送到 Relay Server，接收端长连接会自动收到这次上传。
+            房间需由接收端先创建；发送方无需持有任何密钥。
           </p>
           <p v-if="relayUploadMessage" class="mt-2 text-sm"
             :class="relayUploadError ? 'text-red-600' : 'text-green-600'">
@@ -98,15 +100,23 @@ import { useFileStore } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
 import { formatDate, formatFileSize } from '../utils/format'
+import { DEFAULT_RELAY_URL, isWeakRoomId, normalizeRelayUrl, validateRoomId } from '../utils/relay'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
-const relayUploadBaseUrl = ref(import.meta.env.VITE_RELAY_URL ?? 'http://127.0.0.1:8787')
-const relayUploadToken = import.meta.env.VITE_RELAY_TOKEN ?? ''
-const relayUploadRoomId = ref('demo-room')
+const relayUploadBaseUrl = ref(DEFAULT_RELAY_URL)
+// 不再硬编码 demo-room：发送方公开写模型下房间 ID 就是能力凭据，必须由接收端提供
+const relayUploadRoomId = ref('')
 const isRelayUploading = ref(false)
 const relayUploadMessage = ref('')
 const relayUploadError = ref(false)
+
+/** 房间号偏弱时给出非阻断提示（房间号会被分享给发送方，过易猜则可能被灌文件） */
+const roomIdHint = computed(() => {
+  const id = relayUploadRoomId.value.trim()
+  if (!id || !isWeakRoomId(id)) return ''
+  return '该房间号较容易被猜到，建议使用接收端生成的随机房间号'
+})
 
 interface RelayUploadResponse {
   upload?: {
@@ -146,8 +156,6 @@ const metadataItems = computed(() => {
   ]
 })
 
-const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/u, '')
-
 const uploadSelectedFileToRelay = async () => {
   if (!fileStore.selectedFile) {
     relayUploadError.value = true
@@ -157,10 +165,11 @@ const uploadSelectedFileToRelay = async () => {
 
   const baseUrl = normalizeRelayUrl(relayUploadBaseUrl.value)
   const targetRoomId = relayUploadRoomId.value.trim()
+  const roomIdError = validateRoomId(targetRoomId)
 
-  if (!targetRoomId) {
+  if (roomIdError) {
     relayUploadError.value = true
-    relayUploadMessage.value = '房间 ID 不能为空'
+    relayUploadMessage.value = roomIdError
     return
   }
 
@@ -170,36 +179,38 @@ const uploadSelectedFileToRelay = async () => {
     relayUploadMessage.value = '正在通过 HTTP 上传到 Relay...'
 
     const selectedFile = fileStore.selectedFile
-    const requestBody = selectedFile.hasTextContent
-      ? selectedFile.content
-      : JSON.stringify({
-        name: selectedFile.name,
-        mimeType: selectedFile.type || 'application/octet-stream',
-        lastModified: selectedFile.lastModified.toISOString(),
-        contentBase64: selectedFile.contentBase64,
-        // 附上已提取的正文，接收端无需自行解压即可预览
-        ...(selectedFile.metadata.isExtractedText ? { text: selectedFile.content } : {})
-      })
 
-    const headers: Record<string, string> = {
-      'Content-Type': selectedFile.hasTextContent ? selectedFile.type || 'text/plain' : 'application/json',
-      'X-Relay-Filename': selectedFile.name,
-      'X-Relay-Mime-Type': selectedFile.type || 'application/octet-stream',
-      'X-Relay-Last-Modified': selectedFile.lastModified.toISOString()
+    // 文件名一律放进 JSON 信封的 body：HTTP 头值只能是 ISO-8859-1，
+    // 把中文名放进请求头会让浏览器在请求出网前就抛 TypeError（主路径阻断）。
+    const envelope: Record<string, unknown> = {
+      name: selectedFile.name,
+      mimeType: selectedFile.type || 'application/octet-stream',
+      lastModified: selectedFile.lastModified.toISOString(),
+      contentBase64: selectedFile.contentBase64
     }
-    if (relayUploadToken) {
-      headers['Authorization'] = `Bearer ${relayUploadToken}`
+    // 附上已提取的正文（如 docx），接收端无需自行解压即可预览
+    if (selectedFile.metadata.isExtractedText) {
+      envelope.text = selectedFile.content
     }
 
+    // 发送方（学生）不持有接收端管理密钥：房间 ID 本身即能力凭据，故不发送 Authorization
     const response = await fetch(`${baseUrl}/api/rooms/${encodeURIComponent(targetRoomId)}/uploads`, {
       method: 'POST',
-      headers,
-      body: requestBody
+      headers: {
+        'Content-Type': 'application/json',
+        // 显式标志：服务端仅在此头存在时按 JSON 信封解析，
+        // 否则正文本身就是 JSON 的文件（.json/.ipynb）会被误判为信封
+        'X-Relay-Envelope': '1'
+      },
+      body: JSON.stringify(envelope)
     })
 
     const payload = await response.json().catch(() => null) as RelayUploadResponse | null
     if (!response.ok) {
-      throw new Error(payload?.error ?? 'HTTP 上传失败')
+      if (response.status === 404) {
+        throw new Error('房间不存在或已过期，请向接收端确认房间号')
+      }
+      throw new Error(payload?.error ?? `HTTP 上传失败（${response.status}）`)
     }
 
     relayUploadMessage.value = payload?.upload?.downloadUrl

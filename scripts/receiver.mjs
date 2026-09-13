@@ -2,6 +2,7 @@
 // 用法：node scripts/receiver.mjs
 // 流程：起 Relay 隧道(8787) → 写 .env 的 VITE_RELAY_URL → pnpm start(web+relay) → 起 Web 隧道(5174) → 打印汇总。
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -114,11 +115,14 @@ async function main() {
 
   const { url: webUrl } = await startTunnel(APP_PORT, 'web')
 
+  // 房间号是发送方唯一的能力凭据，用完整 UUID 生成而非固定弱名称
+  const roomId = randomUUID()
+
   const summary = {
     relayUrl,
     webUrl,
     receiverLocal: `http://localhost:${APP_PORT}`,
-    roomId: 'demo-room'
+    roomId
   }
   writeFileSync(STATUS_PATH, JSON.stringify(summary, null, 2) + '\n')
 
@@ -127,7 +131,8 @@ async function main() {
   log(`Relay 公网地址 : ${relayUrl}`)
   log(`发送方地址     : ${webUrl}`)
   log(`本机接收端     : http://localhost:${APP_PORT}`)
-  log(`房间 ID        : demo-room`)
+  log(`房间 ID        : ${roomId}`)
+  log('（把「发送方地址 + 房间 ID」发给学生即可；发送方不需要任何密钥）')
   log('按 Ctrl+C 停止（关闭两条隧道与本地服务）')
   log('==============================================')
 }

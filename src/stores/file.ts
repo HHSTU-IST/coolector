@@ -44,7 +44,7 @@ export interface FileMetadata {
 /** 文件名范式最大长度，防止超长正则拖慢校验 */
 const MAX_PATTERN_LENGTH = 200
 
-/** 单个文件体积上限（10 MB，与 Relay 默认 MAX_BODY_BYTES 对齐） */
+/** 单个文件体积上限（10 MB，与 Relay 默认 MAX_FILE_BYTES 对齐） */
 export const MAX_FILE_SIZE = 10 * 1024 * 1024
 
 /** 文件总数上限，控制整体内存占用 */

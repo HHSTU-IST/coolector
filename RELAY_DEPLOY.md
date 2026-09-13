@@ -20,16 +20,25 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8787` | 监听端口 |
-| `HOST` | `0.0.0.0` | 监听地址，容器内/公网用 `0.0.0.0` |
-| `RELAY_TOKEN` | 空（关闭） | 设为非空后，所有 `/api` 请求需带 `Authorization: Bearer <token>`。**公网必填** |
+| `HOST` | `0.0.0.0` | 监听地址，容器内/公网用 `0.0.0.0`。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed） |
+| `RELAY_TOKEN` | 空（关闭） | 接收端管理密钥。设为非空后，除「发送方公开写」与 SSE 一次性票据外的所有 `/api` 请求需带 `Authorization: Bearer <token>`。**公网必填** |
 | `RELAY_ALLOWED_ORIGINS` | `*` | 逗号分隔的 CORS 白名单；`*` 表示任意。**公网务必收窄**为前端域名 |
-| `MAX_BODY_BYTES` | `10485760` (10MB) | 单请求体积上限 |
-| `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB) | 上传目录磁盘配额，超出拒绝新上传 |
+| `MAX_FILE_BYTES` | `10485760` (10MB) | **单个文件解码后的体积上限**，与前端 `MAX_FILE_SIZE` 对齐 |
+| `MAX_BODY_BYTES` | 由 `MAX_FILE_BYTES` 派生（×4/3 + 64KB ≈ 13.4MB） | HTTP 请求体上限。JSON 信封里的 base64 相比原始字节膨胀约 4/3，故不要把它等同于文件上限 |
+| `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB) | 上传目录磁盘配额，超出返回 507 拒绝上传 |
 | `ROOM_TTL_MS` | `21600000` (6h) | 房间存活时间，过期自动清理并回收磁盘 |
 | `MAX_QUEUE_EVENTS` | `200` | 房间离线事件队列上限 |
+| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `60000` / `120` | 按来源 IP 的固定窗口限流。反向代理后计数退化为代理 IP，属尽力而为 |
+| `STREAM_TICKET_TTL_MS` | `60000` | SSE 一次性票据有效期；接收端先用 `POST /api/rooms/:roomId/stream-ticket` 换票，票据与房间绑定、用后即焚 |
+| `RELAY_TRUST_PROXY` | `false` | 仅当处于可信反向代理后才设 `true`，此时才采信 `x-forwarded-proto` / `x-forwarded-host`。**HTTPS 反代必开**，否则回调地址是 `http://`，浏览器会拦截混合内容（SSE 与按需拉正文同时失效） |
 | `UPLOAD_DIR` | `./server/uploads` | 上传落盘目录，**生产务必挂持久卷** |
 
 所有变量均可选；未设置时走默认值。
+
+> **房间创建**：`POST /api/rooms/:roomId/uploads` 是唯一的免凭据写入口（发送方用），
+> 且**不会**自动创建房间 —— 房间必须由持有 `RELAY_TOKEN` 的接收端先创建。
+> 房间 ID 默认是服务端生成的完整 UUID，长度下限 8 位；`demo-room` 这类弱房间名会记一条
+> `weak_room_id` 审计日志。
 
 ## 3. Docker 部署（推荐）
 

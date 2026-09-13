@@ -8,6 +8,7 @@ import {
   decodeHeaderValue,
   isLoopbackHost,
   isTextMimeType,
+  isWeakRoomId,
   makeAuthorizer,
   makeCorsHeaders,
   makeTicketStore,
@@ -18,7 +19,11 @@ import {
 
 const PORT = Number(process.env.PORT ?? 8787)
 const HOST = process.env.HOST ?? '0.0.0.0'
-const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES ?? 10 * 1024 * 1024)
+// 单个文件「解码后」的体积上限，与前端 src/stores/file.ts 的 MAX_FILE_SIZE 保持一致
+const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? 10 * 1024 * 1024)
+// 请求体上限：JSON 信封里的 contentBase64 相比原始字节膨胀约 4/3，另留头部与字段开销余量。
+// 过去把请求体上限直接当成文件上限，导致二进制实际可用体积只有约 7.5MB，这里改为派生计算。
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES ?? Math.ceil((MAX_FILE_BYTES * 4) / 3) + 64 * 1024)
 const MAX_QUEUE_EVENTS = Number(process.env.MAX_QUEUE_EVENTS ?? 200)
 const ROOM_TTL_MS = Number(process.env.ROOM_TTL_MS ?? 6 * 60 * 60 * 1000)
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? fileURLToPath(new URL('./uploads', import.meta.url))
@@ -51,6 +56,18 @@ const streamTickets = makeTicketStore({ ttlMs: STREAM_TICKET_TTL_MS })
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+/**
+ * 带 HTTP 状态码的错误。携带状态码的错误其 message 视为「可安全回传给客户端」，
+ * 未包装的异常一律脱敏为 400 Bad request 并只落审计日志。
+ */
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message)
+    this.name = 'HttpError'
+    this.statusCode = statusCode
+  }
 }
 
 /** 结构化安全审计日志（房间/上传/鉴权失败/限流等关键事件） */
@@ -86,6 +103,11 @@ function isStreamTicketAuthorized(req, pathname) {
   } catch {
     return false
   }
+}
+
+/** 发送方公开写路径：仅 POST /api/rooms/:roomId/uploads 免凭据（房间 ID 即能力凭据） */
+function isPublicUpload(req, pathname) {
+  return req.method === 'POST' && /^\/api\/rooms\/[^/]+\/uploads$/u.test(pathname)
 }
 
 function createRoom(roomId = randomUUID()) {
@@ -244,16 +266,26 @@ async function persistUpload(upload) {
 }
 
 function parseUploadMetadata(req, bodyBuffer, headers, query) {
-  const contentType = String(req.headers['content-type'] ?? '')
-  if (contentType.includes('application/json')) {
-    const raw = bodyBuffer.length ? JSON.parse(bodyBuffer.toString('utf8')) : {}
-    const fileName = raw.name ?? raw.fileName ?? decodeHeaderValue(headers['x-relay-filename']) ?? query.get('name')
-    if (!fileName) {
-      throw new Error('Missing file name')
+  // 是否按 JSON 信封解析，只取决于显式头 X-Relay-Envelope: 1。
+  // 过去仅凭 Content-Type: application/json 判断，会把正文本身就是 JSON 的文件（如 .json/.ipynb）
+  // 误当成信封，最终报 400 Missing file content。
+  const isEnvelope = String(req.headers['x-relay-envelope'] ?? '') === '1'
+
+  if (isEnvelope) {
+    let raw
+    try {
+      raw = bodyBuffer.length ? JSON.parse(bodyBuffer.toString('utf8')) : {}
+    } catch {
+      throw new HttpError(400, 'Invalid JSON body')
     }
 
-    const mimeType = raw.mimeType ?? headers['x-relay-mime-type'] ?? 'text/plain'
-    const lastModified = raw.lastModified ?? headers['x-relay-last-modified'] ?? nowIso()
+    const fileName = raw.name ?? raw.fileName
+    if (!fileName) {
+      throw new HttpError(400, 'Missing file name')
+    }
+
+    const mimeType = raw.mimeType ?? 'text/plain'
+    const lastModified = raw.lastModified ?? nowIso()
     const text = typeof raw.text === 'string' ? raw.text : typeof raw.contentText === 'string' ? raw.contentText : null
     const contentBase64 = typeof raw.contentBase64 === 'string'
       ? raw.contentBase64
@@ -264,7 +296,7 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
           : null
 
     if (!contentBase64) {
-      throw new Error('Missing file content')
+      throw new HttpError(400, 'Missing file content')
     }
 
     const decoded = Buffer.from(contentBase64, 'base64')
@@ -277,9 +309,10 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
     }
   }
 
+  // 裸 body 分支：正文即请求体，元信息放在头或查询参数里（curl 等非浏览器客户端）
   const fileName = decodeHeaderValue(headers['x-relay-filename']) ?? query.get('name')
   if (!fileName) {
-    throw new Error('Missing file name')
+    throw new HttpError(400, 'Missing file name')
   }
 
   const mimeType = headers['x-relay-mime-type'] ?? 'application/octet-stream'
@@ -298,23 +331,40 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
   }
 }
 
-function readBody(req) {
+/**
+ * 读取请求体，超过 limit 抛 413。
+ * 超限时**不立即 destroy**：否则 socket 被抢先销毁，客户端只会看到网络中断
+ * （浏览器报 Failed to fetch）而拿不到 413 响应体。改为停止累积、继续排空，
+ * 仅在超出硬上限（4×limit）时才强制断开以防御超大体积滥用。
+ */
+function readBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = []
     let size = 0
+    let exceeded = false
 
     req.on('data', (chunk) => {
+      if (exceeded) return
       size += chunk.length
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error('Request body too large'))
-        req.destroy()
+
+      if (size > limit) {
+        exceeded = true
+        if (size > limit * 4) {
+          req.destroy()
+        }
+        reject(new HttpError(413, `Request body too large (limit ${limit} bytes)`))
         return
       }
+
       chunks.push(chunk)
     })
 
-    req.on('end', () => resolve(Buffer.concat(chunks)))
-    req.on('error', reject)
+    req.on('end', () => {
+      if (!exceeded) resolve(Buffer.concat(chunks))
+    })
+    req.on('error', (error) => {
+      if (!exceeded) reject(error)
+    })
   })
 }
 
@@ -349,6 +399,10 @@ async function handleCreateRoom(req, res) {
       createdAt: room.room.createdAt
     })
     auditLog('room_created', { roomId: room.room.id, ip: req.socket.remoteAddress })
+    // 发送方公开写模型下房间 ID 即能力凭据；自定义弱 ID 只告警不阻断（班级可能确有命名约定）
+    if (isWeakRoomId(room.room.id)) {
+      auditLog('weak_room_id', { roomId: room.room.id, ip: req.socket.remoteAddress })
+    }
   }
 
   return writeJson(res, 201, {
@@ -367,8 +421,12 @@ async function handleUpload(req, res, room, query) {
   const metadata = parseUploadMetadata(req, body, req.headers, query)
   const size = Buffer.from(metadata.contentBase64, 'base64').length
 
+  if (size > MAX_FILE_BYTES) {
+    throw new HttpError(413, `File exceeds size limit (${MAX_FILE_BYTES} bytes)`)
+  }
+
   if (totalStoredBytes + size > MAX_TOTAL_UPLOAD_BYTES) {
-    throw new Error(`Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
+    throw new HttpError(507, `Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
   }
 
   const upload = {
@@ -571,8 +629,11 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    // /api 下的业务接口统一走鉴权；SSE 额外允许短时效一次性票据（避免长期 token 进 URL）
-    if (pathname.startsWith('/api/') && !isAuthorized(req) && !isStreamTicketAuthorized(req, pathname)) {
+    // /api 下统一走鉴权，但有两类例外：
+    // 1) 发送方公开写：POST /api/rooms/:roomId/uploads 不要求凭据 —— 发送方（学生）本就不该持有
+    //    接收端管理密钥，房间 ID 本身就是不可猜的能力凭据；配合限流与体积上限控制滥用。
+    // 2) SSE 一次性票据：EventSource 无法自定义请求头，用短时效票据替代长期 token。
+    if (pathname.startsWith('/api/') && !isAuthorized(req) && !isStreamTicketAuthorized(req, pathname) && !isPublicUpload(req, pathname)) {
       auditLog('auth_failed', { method: req.method, path: pathname, ip: req.socket.remoteAddress })
       writeJson(res, 401, { error: 'Unauthorized' }, cors)
       return
@@ -596,14 +657,12 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    let room = getRoom(roomId)
-    if (!room && req.method !== 'POST') {
-      writeJson(res, 404, { error: 'Room not found' }, cors)
+    // 房间必须由接收端（持凭据）先创建。取消「上传即建房」是因为：发送方落进一个
+    // 没有接收端的房间等于进黑洞，且允许自造 ID 建房会让任何人无限占用内存与磁盘。
+    const room = getRoom(roomId)
+    if (!room) {
+      writeJson(res, 404, { error: 'Room not found or expired' }, cors)
       return
-    }
-
-    if (!room && req.method === 'POST' && subresource === 'uploads') {
-      room = createRoom(roomId).room
     }
 
     if (req.method === 'GET' && !subresource) {
@@ -617,10 +676,6 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && subresource === 'stream-ticket') {
-      if (!room) {
-        writeJson(res, 404, { error: 'Room not found' }, cors)
-        return
-      }
       const ticket = streamTickets.issue(room.id)
       auditLog('stream_ticket_issued', { roomId: room.id, ip: req.socket.remoteAddress })
       writeJson(res, 201, { ticket, expiresInMs: STREAM_TICKET_TTL_MS }, cors)
@@ -644,11 +699,17 @@ const server = createServer(async (req, res) => {
 
     writeJson(res, 405, { error: 'Method not allowed' }, cors)
   } catch (error) {
-    // 对外只回传已知的客户端校验错误，其余统一模糊为 Bad request，细节落审计日志
     const message = error instanceof Error ? error.message : 'Unexpected error'
     auditLog('request_error', { path: req.url, message })
-    const isClientError = /^(Missing |Invalid |Request body too large|Upload storage quota)/u.test(message)
-    writeJson(res, 400, { error: isClientError ? message : 'Bad request' }, corsHeaders(req))
+
+    // HttpError 的 message 由本服务自行构造，可安全回传给客户端（400/413/507 等）
+    if (error instanceof HttpError) {
+      writeJson(res, error.statusCode, { error: error.message }, corsHeaders(req))
+      return
+    }
+
+    // 任何未包装的异常一律脱敏，细节只落审计日志
+    writeJson(res, 400, { error: 'Bad request' }, corsHeaders(req))
   }
 })
 

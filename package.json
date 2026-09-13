@@ -18,7 +18,9 @@
     "typecheck": "vue-tsc -b",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "pnpm build && node scripts/e2e-upload.mjs",
+    "guard:no-secret": "node scripts/check-no-secrets.mjs"
   },
   "dependencies": {
     "pinia": "^3.0.4",
@@ -34,6 +36,7 @@
     "autoprefixer": "^10.5.4",
     "happy-dom": "^20.13.2",
     "oxlint": "^1.81.0",
+    "playwright": "^1.63.0",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
