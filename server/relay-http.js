@@ -1,7 +1,6 @@
 // 与业务无关的 HTTP 传输原语与「请求准入」：错误类型、审计日志、CORS、鉴权、限流、读写。
 // 本模块不持有房间状态，可被单测直接 import。
 
-import { randomUUID } from 'node:crypto'
 import { makeAuthorizer, makeCorsHeaders, makeTicketStore, sanitizeRoomId } from './relay-utils.js'
 import {
   ALLOWED_ORIGINS, MAX_BODY_BYTES, MAX_UPLOAD_BYTES_PER_WINDOW, PORT,
