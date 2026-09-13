@@ -25,7 +25,7 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 | `RELAY_TOKEN` | 空（关闭） | 接收端管理密钥。设为非空后，除「发送方公开写」与 SSE 一次性票据外的所有 `/api` 请求需带 `Authorization: Bearer <token>`。**公网必填** |
 | `HOST` | `0.0.0.0` | 监听地址。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed） |
 | `RELAY_ALLOWED_ORIGINS` | `*` | CORS 白名单。**公网务必收窄**为前端域名 |
-| `RELAY_TRUST_PROXY` | `false` | **HTTPS 反代必开**，否则回调地址是 `http://`，浏览器会拦截混合内容（SSE 与按需拉正文同时失效） |
+| `RELAY_PUBLIC_BASE_URL` | 空（只输出相对路径） | 对外 URL 基址。**留空即可，反代 HTTPS 部署也一样**——接收端按它填写的 Relay 地址解析相对路径。服务端不会从 `Host` / `x-forwarded-*` 推断自身地址（那会让攻击者用伪造 `Host` 把接收端的管理密钥引向外部）。仅当有非浏览器客户端需要绝对 URL 时才设，如 `https://relay.example.com` |
 | `UPLOAD_DIR` | `./server/uploads` | 上传落盘目录，**生产务必挂持久卷** |
 | `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB) | 全局磁盘配额，超出返回 **507** |
 | `MAX_ROOM_UPLOAD_BYTES` | 全局的 1/8（128MB） | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明） |

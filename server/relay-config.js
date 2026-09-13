@@ -2,7 +2,7 @@
 // 本模块**无副作用**（除校验失败时退出），可被单测直接 import。
 
 import { fileURLToPath } from 'node:url'
-import { normalizeAllowedOrigins, parsePositiveInt } from './relay-utils.js'
+import { normalizeAllowedOrigins, parsePositiveInt, parsePublicBaseUrl } from './relay-utils.js'
 
 /**
  * 读取正整数型环境变量，非法即拒绝启动。
@@ -87,8 +87,27 @@ const ROOM_CLEANUP_INTERVAL_MS = requirePositiveInt('ROOM_CLEANUP_INTERVAL_MS', 
 const KEEP_ORPHAN_UPLOADS = (process.env.RELAY_KEEP_ORPHAN_UPLOADS ?? 'false') === 'true'
 
 
-// 仅在可信反向代理之后才信任 x-forwarded-* 头，避免直连时被伪造出错误跳转地址。
-const TRUST_PROXY = (process.env.RELAY_TRUST_PROXY ?? 'false') === 'true'
+// 对外基址。**这是服务端唯一允许产生绝对 URL 的来源。**
+//
+// 服务端绝不从 `Host` / `x-forwarded-*` 推断自己的对外地址：那些请求头由调用方任意控制，
+// 而接收端前端会自动带凭据去拉取服务端返回的 URL —— 无凭据的发送方只要伪造 `Host`，
+// 就能让接收端把管理密钥发往攻击者域（F-001）。
+//
+// 留空（默认）= 对外只输出相对路径，由客户端按自己配置的 Relay 地址解析。
+// 反代 HTTPS 部署下这同样是正确的：接收端在界面上填的就是 `https://relay.example`，
+// 因此不再需要服务端猜自己的协议与域名，也就不会再有混合内容问题。
+// 只有**非浏览器客户端**（curl / 自定义集成）需要绝对 URL 时才显式设置本项。
+const PUBLIC_BASE_URL = (() => {
+  const result = parsePublicBaseUrl(process.env.RELAY_PUBLIC_BASE_URL)
+
+  if (!result.ok) {
+    console.error(`[relay] 拒绝启动：环境变量 RELAY_PUBLIC_BASE_URL 必须是 http(s) 绝对地址，且不含凭据/查询串/hash，当前值为 ${JSON.stringify(result.raw)}。`)
+    process.exit(1)
+  }
+
+  return result.value
+})()
+
 
 // SSE 票据有效期（毫秒），短时效一次性，替代 URL 中的长期 token。
 const STREAM_TICKET_TTL_MS = requirePositiveInt('STREAM_TICKET_TTL_MS', 60_000)
@@ -120,7 +139,7 @@ export {
   MAX_UPLOAD_NAME_BYTES,
   ROOM_CLEANUP_INTERVAL_MS,
   KEEP_ORPHAN_UPLOADS,
-  TRUST_PROXY,
+  PUBLIC_BASE_URL,
   STREAM_TICKET_TTL_MS,
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX

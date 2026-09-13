@@ -4,6 +4,34 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Security
+
+- **修复「对外 URL 可被请求头劫持」（F-001，Critical）**：此前服务端用 `req.headers.host`
+  拼接 `detailsUrl` / `downloadUrl` / `streamUrl` 等对外地址。**无凭据的发送方**只需在上传请求里
+  伪造 `Host: evil.example`，接收端就会经 SSE 广播收到 `http://evil.example/...`，
+  而接收端前端会**自动带着 `Authorization` 去拉取该地址** —— 全局 `RELAY_TOKEN` 因此被送进
+  攻击者服务器。现在服务端**不再从任何请求头推断自身地址**：对外只输出相对路径（如
+  `/api/rooms/<id>/uploads/<uid>`），由客户端按自己配置的 Relay 地址解析。
+  回归防护：新增「伪造 `Host` 不能进入建房响应 / 上传响应 / 房间快照 / SSE 广播」四条集成断言，
+  并附带一条元测试验证「伪造 `Host` 的手段确实生效」（否则用例会退化成空转）。
+- **前端加入第二道防线**：`resolveRelayUrl` 对服务端返回的地址做同源校验，非与用户配置的
+  Relay 源同源的绝对地址一律拒绝，绝不带着凭据请求。即便服务端被换回旧版本，密钥也不会外泄。
+- **`RELAY_TRUST_PROXY` 已移除**：它原先只用于决定是否采信 `x-forwarded-*` 来拼接对外 URL。
+  该职责由显式的 `RELAY_PUBLIC_BASE_URL` 取代；HTTPS 反代部署**不再需要任何相关配置**
+  （接收端填 `https://…`，相对路径即解析到正确来源，也就不会再有混合内容问题）。
+  仍在设置该变量的部署可安全删除 —— 未知变量会被忽略。
+
+### Changed
+
+- **新增 `RELAY_PUBLIC_BASE_URL`（可选）**：对外 URL 的显式基址，也是服务端**唯一**允许产生
+  绝对 URL 的来源。留空（默认）= 只输出相对路径，适用于浏览器场景；仅当 curl / 自定义集成等
+  非浏览器客户端需要绝对 URL 时才设置。非法值（非 http(s)、含凭据 / 查询串 / hash）会让服务端
+  拒绝启动（fail-closed）。
+- `.dockerignore` 排除 `server/*.test.js`：测试脚本不再进入生产镜像。
+- 请求行解析改用固定基准，不再以 `Host` 头为基准拼 URL。
+
 ## [1.0.0] - 2026-09-13
 
 首个正式版本。基于**五轮**上线前全检（代码审查 + 安全审计 + QA 测试）完成安全与质量加固：

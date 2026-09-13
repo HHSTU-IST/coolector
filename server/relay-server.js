@@ -19,8 +19,8 @@ import {
   ROOM_CLEANUP_INTERVAL_MS, RATE_LIMIT_WINDOW_MS, STREAM_TICKET_TTL_MS
 } from './relay-config.js'
 import {
-  HttpError, auditLog, baseUrl, corsHeaders, isAuthorized, isPublicUpload,
-  isRateLimited, isStreamTicketAuthorized, isUploadBytesExceeded, nowIso,
+  HttpError, auditLog, corsHeaders, isAuthorized, isPublicUpload,
+  isRateLimited, isStreamTicketAuthorized, isUploadBytesExceeded, nowIso, relayUrl,
   rateBuckets, readBody, sendSseHeaders, streamTickets, uploadByteBuckets,
   writeJson, writeSseFrame
 } from './relay-http.js'
@@ -133,10 +133,12 @@ async function handleCreateRoom(req, res) {
     createdAt: room.room.createdAt,
     // 「房间号偏弱」的判定权威在服务端：前端据此提示，无需自己复刻一份弱名清单
     weakRoomId: isWeakRoomId(room.room.id),
-    streamUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/events`,
-    streamTicketUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/stream-ticket`,
-    uploadUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/uploads`,
-    stateUrl: `${baseUrl(req)}/api/rooms/${room.room.id}`
+    // 这些地址默认是**相对路径**，由客户端按自己配置的 Relay 地址解析。
+    // 服务端绝不从 Host / x-forwarded-* 推断自身对外地址（见 relay-http.js 的 relayUrl / F-001）。
+    streamUrl: relayUrl(`/api/rooms/${room.room.id}/events`),
+    streamTicketUrl: relayUrl(`/api/rooms/${room.room.id}/stream-ticket`),
+    uploadUrl: relayUrl(`/api/rooms/${room.room.id}/uploads`),
+    stateUrl: relayUrl(`/api/rooms/${room.room.id}`)
   }, corsHeaders(req))
 }
 
@@ -230,13 +232,13 @@ async function handleUpload(req, res, room, query) {
   auditLog('upload_created', { roomId: room.id, name: upload.name.slice(0, 120), nameLength: upload.name.length, size })
 
   // 201 响应里带上完整正文（发送方原本就能拿到），广播事件里只带元信息
-  const uploadPayload = uploadSummary(upload, req)
+  const uploadPayload = uploadSummary(upload)
   uploadPayload.contentBase64 = metadata.contentBase64
 
   const event = dispatchEvent(room, 'upload.created', {
     roomId: room.id,
-    upload: uploadSummary(upload, req, { includeContent: false }),
-    downloadUrl: `${baseUrl(req)}/api/rooms/${room.id}/uploads/${upload.id}`
+    upload: uploadSummary(upload, { includeContent: false }),
+    downloadUrl: relayUrl(`/api/rooms/${room.id}/uploads/${upload.id}`)
   })
 
   return writeJson(res, 201, {
@@ -271,7 +273,7 @@ async function handleDownload(req, res, room, uploadId, query) {
 
   // 落盘后内存里不保留 base64 副本（见 handleUpload），这里按需从磁盘读回。
   // 只放在 `upload.contentBase64` 一处 —— 顶层曾经还有一份完全重复的副本，无人读取。
-  const summary = uploadSummary(upload, req)
+  const summary = uploadSummary(upload)
   summary.contentBase64 = upload.contentBase64 ?? (upload.storagePath
     ? (await readFile(upload.storagePath)).toString('base64')
     : null)
@@ -338,7 +340,9 @@ async function handleRoomDelete(req, res, roomId) {
 
 const server = createServer(async (req, res) => {
   try {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? `localhost:${PORT}`}`)
+    // 用固定基准解析请求行：只取 pathname 与查询串，**不采信 `Host`**。
+    // 请求头不该参与任何服务端内部计算 —— 这里曾经用 Host 当基准，属同类隐患的同一来源。
+    const url = new URL(req.url ?? '/', 'http://localhost')
     const pathname = url.pathname.replace(/\/+$/u, '') || '/'
 
     const cors = corsHeaders(req)
@@ -427,7 +431,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && !subresource) {
-      writeJson(res, 200, roomSnapshot(room, req), cors)
+      writeJson(res, 200, roomSnapshot(room), cors)
       return
     }
 

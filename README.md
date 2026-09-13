@@ -202,8 +202,11 @@ curl -H "Authorization: Bearer $RELAY_TOKEN" http://localhost:8787/api/rooms/<ro
 
 > **公网部署**：Relay Server 是有状态服务，CI 只部署静态前端，**需自行托管才能公网可达**。
 > 完整部署清单（Docker / 反向代理 / 环境变量 / 安全）见 [RELAY_DEPLOY.md](./RELAY_DEPLOY.md)。
-> 部署到公网时务必设置 `RELAY_TOKEN` 与 `RELAY_ALLOWED_ORIGINS`，强制 HTTPS，
-> 并开启 `RELAY_TRUST_PROXY=true`（否则回调地址是 `http://`，浏览器会拦截混合内容）。
+> 部署到公网时务必设置 `RELAY_TOKEN` 与 `RELAY_ALLOWED_ORIGINS`，并强制 HTTPS。
+> 反代后**无需**任何额外配置：服务端对外只返回相对路径，接收端按它自己填写的 Relay 地址
+> 解析，因此不会出现混合内容。服务端刻意**不**从 `Host` / `x-forwarded-*` 推断自身地址
+> （那会让无凭据的发送方用伪造 `Host` 把接收端的管理密钥引向攻击者域）。
+> 仅当有非浏览器客户端需要绝对 URL 时才设 `RELAY_PUBLIC_BASE_URL`。
 > **未设置 `RELAY_TOKEN` 且监听非回环地址时，Relay 会拒绝启动（fail-closed）**；
 > `pnpm start` 在这种情况会**强制**把 relay 回退到 `127.0.0.1` 并打印提示，
 > 因此新克隆仓库直接 `pnpm start` 即可本地跑起来，不会整栈退出。

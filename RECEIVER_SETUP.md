@@ -130,7 +130,7 @@ cloudflared tunnel --url http://localhost:5174
 | 上传大文件报 413            | 超过 `MAX_FILE_BYTES`（默认 10MB）；请求体上限由它自动派生，无需手动改 `MAX_BODY_BYTES`                        |
 | 隧道 URL 每次都变           | quick tunnel 特性；需要固定域名请用 ngrok / cloudflared 命名隧道 / 自有域名                                   |
 | Web 隧道访问返回 403        | Vite 默认拦截非 localhost 的 Host 头；已在 `vite.config.ts` 设 `allowedHosts: ['.trycloudflare.com']`，换用其他隧道域名需同步加 |
-| 回调地址是 `http://` 导致混合内容被拦 | 反向代理后未开 `RELAY_TRUST_PROXY=true`                                                                |
+| 回调地址是 `http://` 导致混合内容被拦 | 接收端界面里填的 Relay 地址应是 `https://…`。服务端只返回相对路径、由前端按该地址解析，因此无需 `RELAY_TRUST_PROXY` 之类的开关 |
 | SSE 收不到事件              | 穿透层缓冲了流；cloudflared 默认不缓冲，若套 Nginx 需 `proxy_buffering off`（见 `deploy/nginx.conf.example`） |
 
 ## 7. 更稳妥的替代：前端部署到 GitHub Pages（只穿透 Relay 一条隧道）

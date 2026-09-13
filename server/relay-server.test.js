@@ -12,6 +12,7 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:net'
+import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { existsSync, readdirSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -115,6 +116,83 @@ async function createRoom(baseUrl, roomId) {
   })
   expect(response.status).toBe(201)
   return response.json()
+}
+
+/**
+ * 服务端默认只返回**相对路径**（F-001 修复：绝不用请求头拼绝对地址），
+ * 而 Node 的 `fetch` 要求绝对地址 —— 这里按 harness 的 baseUrl 拼接。
+ * 语义与前端 `resolveRelayUrl` 一致（相对路径拼到配置的 Relay 地址上）。
+ */
+function resolveUrl(baseUrl, target) {
+  return target.startsWith('/') ? `${baseUrl}${target}` : target
+}
+
+/**
+ * 用 `node:http` 发请求，以便**伪造 `Host` 头**。
+ *
+ * 为什么不能直接用 `fetch`：`Host` 是 fetch 规范的 forbidden header name，undici 会
+ * 静默忽略它 —— 那样这个用例就成了空转（永远测不到真实攻击面）。
+ * `node:http` 则允许显式覆盖，能真实复现 F-001。
+ */
+function requestWithHost(port, pathname, { method = 'GET', host, headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : Buffer.from(body)
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port,
+      path: pathname,
+      method,
+      headers: {
+        ...headers,
+        ...(host ? { Host: host } : {}),
+        ...(payload ? { 'Content-Length': payload.length } : {})
+      }
+    }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        headers: res.headers,
+        text: Buffer.concat(chunks).toString('utf8')
+      }))
+    })
+
+    req.on('error', reject)
+    if (payload) req.write(payload)
+    req.end()
+  })
+}
+
+/** 读取 SSE 流直到收到指定事件类型，返回该事件的原始帧文本 */
+async function readSseEvent(streamUrl, eventName, timeoutMs = 10000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(streamUrl, { signal: controller.signal })
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const frames = buffer.split('\n\n')
+      buffer = frames.pop() ?? ''
+      for (const frame of frames) {
+        if (frame.includes(`event: ${eventName}\n`)) {
+          await reader.cancel().catch(() => {})
+          return frame
+        }
+      }
+    }
+
+    throw new Error(`未在 ${timeoutMs}ms 内收到 ${eventName}`)
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 describe('relay HTTP 层', () => {
@@ -295,7 +373,7 @@ describe('relay HTTP 层', () => {
     expect(summary.mimeType).toBe('application/octet-stream')
 
     // 过去畸形/超长 mimeType 会让下载响应头非法或溢出，该文件永久不可下载
-    const download = await fetch(summary.downloadUrl, { headers: authHeaders })
+    const download = await fetch(resolveUrl(relay.baseUrl, summary.downloadUrl), { headers: authHeaders })
     expect(download.status).toBe(200)
     expect(download.headers.get('content-type')).toBe('application/octet-stream')
     expect(download.headers.get('x-content-type-options')).toBe('nosniff')
@@ -720,7 +798,7 @@ describe('details 端点契约', () => {
     })
 
     const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
-    const details = await (await fetch(state.uploads[0].detailsUrl, { headers: authHeaders })).json()
+    const details = await (await fetch(resolveUrl(relay.baseUrl, state.uploads[0].detailsUrl), { headers: authHeaders })).json()
 
     // 只保留 `upload.contentBase64` 一处（顶层重复副本已删除）
     expect(Buffer.from(details.upload.contentBase64, 'base64').toString('utf8')).toBe(content)
@@ -786,4 +864,204 @@ describe('启动时回收无主上传目录', () => {
       await second.stop()
     }
   }, 40000)
+}, 60000)
+
+describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
+  let relay
+  let port
+
+  beforeAll(async () => {
+    relay = await startRelay()
+    port = Number(new URL(relay.baseUrl).port)
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  /**
+   * F-001：无凭据的发送方伪造 `Host` 头，曾能让服务端把 detailsUrl / downloadUrl 拼成
+   * `http://evil.example/...`，而接收端前端会自动带 `Authorization` 去拉取它 ——
+   * 于是全局 `RELAY_TOKEN` 被送进攻击者服务器。
+   *
+   * 修复后的契约：对外地址只可能是**相对路径**（或运维配置的 RELAY_PUBLIC_BASE_URL），
+   * 请求头一律不参与拼接。
+   */
+  /**
+   * 门禁自身的体检 ——「本用例的存在理由」。
+   *
+   * 下面三条 F-001 断言的判别力，完全建立在「我们真的能把 `Host` 伪造成 evil.example」之上。
+   * 如果哪天 `node:http` 不再允许覆盖 `Host`，那些断言就会变成空转（永远通过），
+   * 而漏洞可能已经悄悄回来。所以这里把伪造手段本身也验证一次。
+   */
+  it('伪造 Host 的手段确实生效（本组用例的存在理由）', async () => {
+    const echo = createHttpServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' })
+      res.end(String(req.headers.host ?? ''))
+    })
+
+    await new Promise((resolve) => { echo.listen(0, '127.0.0.1', resolve) })
+    const echoPort = echo.address().port
+
+    try {
+      const { text } = await requestWithHost(echoPort, '/', { host: 'evil.example' })
+      expect(text).toBe('evil.example')
+    } finally {
+      await new Promise((resolve) => { echo.close(resolve) })
+    }
+  })
+
+  it('伪造 Host 不能进入建房响应里的任何 URL', async () => {
+    const { status, text } = await requestWithHost(port, '/api/rooms', {
+      method: 'POST',
+      host: 'evil.example',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId: 'host-injection-room-1' })
+    })
+
+    expect(status).toBe(201)
+    expect(text).not.toContain('evil.example')
+
+    const payload = JSON.parse(text)
+    for (const key of ['streamUrl', 'streamTicketUrl', 'uploadUrl', 'stateUrl']) {
+      expect(payload[key]).toMatch(/^\/api\/rooms\//u)
+    }
+  })
+
+  it('伪造 Host 不能进入上传响应与房间快照', async () => {
+    const room = await createRoom(relay.baseUrl, 'host-injection-room-2')
+
+    const upload = await requestWithHost(port, `/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      host: 'evil.example',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: 'x.md', content: 'hi' })
+    })
+
+    expect(upload.status).toBe(201)
+    expect(upload.text).not.toContain('evil.example')
+
+    const { upload: summary } = JSON.parse(upload.text)
+    expect(summary.detailsUrl).toMatch(/^\/api\/rooms\//u)
+    expect(summary.downloadUrl).toBe(`${summary.detailsUrl}?download=1`)
+
+    const stateText = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).text()
+    expect(stateText).not.toContain('evil.example')
+  })
+
+  it('伪造 Host 不能进入 SSE 广播的 downloadUrl（F-001 的原始窃密链路）', async () => {
+    const room = await createRoom(relay.baseUrl, 'host-injection-room-3')
+
+    const ticketResponse = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/stream-ticket`, {
+      method: 'POST',
+      headers: authHeaders
+    })
+    const { ticket } = await ticketResponse.json()
+
+    // 接收端先连上 —— 它就是会被骗着把凭据发出去的一方
+    const framePromise = readSseEvent(
+      `${relay.baseUrl}/api/rooms/${room.roomId}/events?ticket=${encodeURIComponent(ticket)}`,
+      'upload.created'
+    )
+
+    const upload = await requestWithHost(port, `/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      host: 'evil.example',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: 'poisoned.md', content: 'payload' })
+    })
+    expect(upload.status).toBe(201)
+
+    const frame = await framePromise
+    // 核心断言：接收端收到的帧里不得出现攻击者域名
+    expect(frame).not.toContain('evil.example')
+
+    const dataLine = frame.split('\n').find((line) => line.startsWith('data: '))
+    const payload = JSON.parse(dataLine.slice('data: '.length))
+    expect(payload.data.downloadUrl).toMatch(/^\/api\/rooms\//u)
+    expect(payload.data.upload.detailsUrl).toMatch(/^\/api\/rooms\//u)
+  })
+
+  it('x-forwarded-* 同样不能影响对外 URL', async () => {
+    const { text } = await requestWithHost(port, '/api/rooms', {
+      method: 'POST',
+      host: 'evil.example',
+      headers: {
+        ...authHeaders,
+        'Content-Type': 'application/json',
+        'X-Forwarded-Host': 'attacker.example',
+        'X-Forwarded-Proto': 'https'
+      },
+      body: '{}'
+    })
+
+    expect(text).not.toContain('attacker.example')
+    expect(text).not.toContain('evil.example')
+  })
+}, 60000)
+
+describe('RELAY_PUBLIC_BASE_URL：唯一允许产生绝对 URL 的来源', () => {
+  let relay
+
+  beforeAll(async () => {
+    relay = await startRelay({ RELAY_PUBLIC_BASE_URL: 'https://relay.example.com' })
+  }, 30000)
+
+  afterAll(async () => {
+    await relay?.stop()
+  })
+
+  /**
+   * 这条同时是上一条的**判别力对照**：把「外部域名」放进对外 URL 时，本文件的
+   * `not.toContain('evil.example')` 断言确实会命中 —— 也就是说那些断言不是空转。
+   * 区别只在于：这里的外部域名来自运维配置，而 F-001 里它来自攻击者可控的请求头。
+   */
+  it('配置基址后输出绝对 URL，且伪造 Host 依然无法覆盖它', async () => {
+    const port = Number(new URL(relay.baseUrl).port)
+    const { text } = await requestWithHost(port, '/api/rooms', {
+      method: 'POST',
+      host: 'evil.example',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId: 'public-base-room-1' })
+    })
+
+    const payload = JSON.parse(text)
+    expect(payload.stateUrl).toBe('https://relay.example.com/api/rooms/public-base-room-1')
+    expect(payload.streamUrl).toBe('https://relay.example.com/api/rooms/public-base-room-1/events')
+
+    // 伪造的 Host 不能覆盖运维配置的基址
+    expect(text).not.toContain('evil.example')
+  })
+
+  it('非法基址拒绝启动（fail-closed，不静默回退）', async () => {
+    const port = await getFreePort()
+    const uploadDir = await mkdtemp(join(tmpdir(), 'coolector-badbase-'))
+
+    const child = spawn(process.execPath, ['server/relay-server.js'], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        HOST: '127.0.0.1',
+        PORT: String(port),
+        RELAY_TOKEN: TOKEN,
+        UPLOAD_DIR: uploadDir,
+        RELAY_PUBLIC_BASE_URL: 'ftp://example.com'
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+
+    let output = ''
+    child.stdout.on('data', (chunk) => { output += chunk.toString() })
+    child.stderr.on('data', (chunk) => { output += chunk.toString() })
+
+    const code = await new Promise((resolve) => {
+      child.once('exit', resolve)
+      setTimeout(() => { child.kill('SIGTERM'); resolve(null) }, 10000)
+    })
+
+    await rm(uploadDir, { recursive: true, force: true })
+
+    expect(code).toBe(1)
+    expect(output).toContain('RELAY_PUBLIC_BASE_URL')
+  })
 }, 60000)

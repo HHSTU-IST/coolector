@@ -13,6 +13,8 @@ import {
   looksWeakRoomId,
   normalizeRelayUrl,
   relayToken,
+  resolveRelayUrl,
+  UntrustedRelayUrlError,
   validateRoomId,
   withAuth
 } from '../utils/relay'
@@ -120,12 +122,36 @@ export function useRelayReceiver() {
     return response.json() as Promise<RelayRoomResponse>
   }
 
+  /**
+   * 服务端返回的地址（stateUrl / detailsUrl / streamUrl …）一律按**用户配置的 Relay 地址**
+   * 解析；绝对 URL 还必须同源，否则拒绝。理由见 relay.ts 的 resolveRelayUrl。
+   */
+  const toRelayRequestUrl = (target: string) => resolveRelayUrl(target, relayBaseUrl.value)
+
+  /** 尽力解析为绝对地址；解析失败（跨源/畸形）时保留原值 —— 用于纯展示字段，不该阻断入库 */
+  const safeResolveRelayUrl = (target: string) => {
+    try {
+      return toRelayRequestUrl(target)
+    } catch {
+      return target
+    }
+  }
+
   const refreshRoomState = async () => {
     if (!stateUrl.value) return
 
-    const response = await fetch(stateUrl.value, { headers: withAuth() })
-    if (!response.ok) return
-    roomState.value = await response.json() as RoomSnapshot
+    try {
+      const response = await fetch(toRelayRequestUrl(stateUrl.value), { headers: withAuth() })
+      if (!response.ok) return
+      roomState.value = await response.json() as RoomSnapshot
+    } catch (error) {
+      // 调用方是 `void refreshRoomState()`，这里必须自己收口，否则会变成未处理拒绝。
+      // 网络抖动保持静默（与原先一致）；「地址被拒绝」是安全事件，必须显式告知用户。
+      if (error instanceof UntrustedRelayUrlError) {
+        statusMessage.value = error.message
+        pushEventLog('error', error.message)
+      }
+    }
   }
 
   const parseEvent = <T,>(event: MessageEvent<string>) => {
@@ -225,7 +251,7 @@ export function useRelayReceiver() {
       return upload
     }
 
-    const response = await fetch(upload.detailsUrl, { headers: withAuth() })
+    const response = await fetch(toRelayRequestUrl(upload.detailsUrl), { headers: withAuth() })
     if (!response.ok) {
       throw new Error(`拉取文件正文失败（HTTP ${response.status}）`)
     }
@@ -249,7 +275,8 @@ export function useRelayReceiver() {
       lastModified: upload.lastModified,
       roomId,
       uploadId: upload.id,
-      downloadUrl: upload.downloadUrl
+      // 服务端默认返回相对路径，入库前解析成绝对地址，避免下游把它当 URL 直接用
+      downloadUrl: safeResolveRelayUrl(upload.downloadUrl)
     })
 
     const collectionItem = file.filenameValidation.isValid
@@ -288,10 +315,12 @@ export function useRelayReceiver() {
    * （会被访问日志 / Referer / 浏览器历史记录）。无 token 时直接连接。
    */
   const buildStreamUrl = async (room: RelayRoomResponse): Promise<string> => {
-    // 未配置接收端密钥时服务端不做鉴权，直接用 streamUrl 即可
-    if (!relayToken.value) return room.streamUrl
+    const streamUrl = toRelayRequestUrl(room.streamUrl)
 
-    const response = await fetch(room.streamTicketUrl, {
+    // 未配置接收端密钥时服务端不做鉴权，直接用 streamUrl 即可
+    if (!relayToken.value) return streamUrl
+
+    const response = await fetch(toRelayRequestUrl(room.streamTicketUrl), {
       method: 'POST',
       headers: withAuth()
     })
@@ -300,7 +329,7 @@ export function useRelayReceiver() {
     }
 
     const payload = await response.json() as { ticket: string }
-    return `${room.streamUrl}?ticket=${encodeURIComponent(payload.ticket)}`
+    return `${streamUrl}?ticket=${encodeURIComponent(payload.ticket)}`
   }
 
   const connect = async (isReconnect = false) => {

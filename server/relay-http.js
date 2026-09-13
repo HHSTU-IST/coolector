@@ -3,8 +3,8 @@
 
 import { makeAuthorizer, makeCorsHeaders, makeTicketStore, sanitizeRoomId } from './relay-utils.js'
 import {
-  ALLOWED_ORIGINS, MAX_BODY_BYTES, MAX_UPLOAD_BYTES_PER_WINDOW, PORT,
-  RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, RELAY_TOKEN, STREAM_TICKET_TTL_MS, TRUST_PROXY
+  ALLOWED_ORIGINS, MAX_BODY_BYTES, MAX_UPLOAD_BYTES_PER_WINDOW, PUBLIC_BASE_URL,
+  RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, RELAY_TOKEN, STREAM_TICKET_TTL_MS
 } from './relay-config.js'
 
 /** 按当前来源计算 CORS 响应头；来源不在白名单时返回空对象，浏览器会自行拦截 */
@@ -43,18 +43,20 @@ function auditLog(event, details = {}) {
 }
 
 
-function baseUrl(req) {
-  // 仅在可信代理后才采信 x-forwarded-*，否则忽略（防止直连时被伪造出恶意跳转地址）
-  if (TRUST_PROXY) {
-    const forwardedProto = req.headers['x-forwarded-proto']
-    const forwardedHost = req.headers['x-forwarded-host']
-    const protocol = typeof forwardedProto === 'string' ? forwardedProto : 'http'
-    const host = typeof forwardedHost === 'string' ? forwardedHost : (req.headers.host ?? `localhost:${PORT}`)
-    return `${protocol}://${host}`
-  }
-
-  const host = req.headers.host ?? `localhost:${PORT}`
-  return `http://${host}`
+/**
+ * 构造对外可用的资源地址。
+ *
+ * **默认只返回相对路径**（如 `/api/rooms/<id>/uploads/<uid>`），由客户端按自己配置的
+ * Relay 地址解析。这里刻意不接受 `req`：服务端不得从 `Host` / `x-forwarded-*` 推断自身的
+ * 对外地址 —— 这些请求头完全由调用方控制，而接收端前端会自动**带着管理密钥**去拉取服务端
+ * 返回的 URL。无凭据的发送方只要在普通上传请求里伪造 `Host: evil.example`，就能让接收端把
+ * `RELAY_TOKEN` 发往攻击者域（F-001）。
+ *
+ * 需要绝对 URL 的部署（例如给 curl / 自定义集成消费）请显式配置 `RELAY_PUBLIC_BASE_URL`；
+ * 那是唯一能产生绝对 URL 的来源，而它是运维配置而非请求输入，因此不可被外部左右。
+ */
+function relayUrl(path) {
+  return PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}${path}` : path
 }
 
 
@@ -203,7 +205,7 @@ export {
   nowIso,
   HttpError,
   auditLog,
-  baseUrl,
+  relayUrl,
   isStreamTicketAuthorized,
   isPublicUpload,
   writeJson,

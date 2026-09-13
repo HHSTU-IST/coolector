@@ -11,7 +11,7 @@ import {
   KEEP_ORPHAN_UPLOADS, MAX_QUEUE_EVENTS, MAX_ROOM_UPLOAD_BYTES,
   MAX_ROOM_UPLOADS, MAX_TOTAL_UPLOAD_BYTES, ROOM_MAX_LIFETIME_MS, ROOM_TTL_MS, UPLOAD_DIR
 } from './relay-config.js'
-import { HttpError, auditLog, baseUrl, nowIso, writeSseFrame } from './relay-http.js'
+import { HttpError, auditLog, nowIso, relayUrl, writeSseFrame } from './relay-http.js'
 
 const rooms = new Map()
 
@@ -114,11 +114,11 @@ function reserveUploadSlot(room) {
 }
 
 
-function roomSnapshot(room, req) {
+function roomSnapshot(room) {
   // 房间状态只暴露元信息与下载链接，正文走 details 端点按需拉取
   const uploads = Array.from(room.uploads.values())
     .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime())
-    .map((upload) => uploadSummary(upload, req, { includeContent: false }))
+    .map((upload) => uploadSummary(upload, { includeContent: false }))
 
   return {
     roomId: room.id,
@@ -135,9 +135,14 @@ function roomSnapshot(room, req) {
 }
 
 
-/** 生成上传摘要；SSE 广播传 includeContent:false 只推元信息，正文按需走 details 端点 */
-function uploadSummary(upload, req, { includeContent = true } = {}) {
-  const detailsUrl = `${baseUrl(req)}/api/rooms/${upload.roomId}/uploads/${upload.id}`
+/**
+ * 生成上传摘要；SSE 广播传 includeContent:false 只推元信息，正文按需走 details 端点。
+ *
+ * 刻意**不接受 `req`**：URL 由 relayUrl 生成（相对路径或运维配置的基址），
+ * 绝不让请求头参与拼接 —— 见 relay-http.js 的 relayUrl 与 F-001。
+ */
+function uploadSummary(upload, { includeContent = true } = {}) {
+  const detailsPath = `/api/rooms/${upload.roomId}/uploads/${upload.id}`
   const summary = {
     id: upload.id,
     name: upload.name,
@@ -151,8 +156,8 @@ function uploadSummary(upload, req, { includeContent = true } = {}) {
     contentIncluded: includeContent,
     contentText: includeContent ? upload.text ?? null : null,
     contentBase64: includeContent ? upload.contentBase64 : null,
-    detailsUrl,
-    downloadUrl: `${detailsUrl}?download=1`,
+    detailsUrl: relayUrl(detailsPath),
+    downloadUrl: relayUrl(`${detailsPath}?download=1`),
     // 只暴露「是否已落盘」，不返回服务端存储文件名/相对路径，避免路径信息泄露
     serverStored: Boolean(upload.storagePath)
   }

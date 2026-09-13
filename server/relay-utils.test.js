@@ -13,11 +13,44 @@ import {
   normalizeAllowedOrigins,
   normalizeIsoDate,
   parsePositiveInt,
+  parsePublicBaseUrl,
   sanitizeMimeType,
   sanitizeRoomId,
   sanitizeStorageFileName,
   truncateUtf8
 } from './relay-utils.js'
+
+describe('parsePublicBaseUrl', () => {
+  it('未设置 / 空白视为「不配置基址」，合法且值为 null', () => {
+    for (const raw of [undefined, null, '', '   ']) {
+      expect(parsePublicBaseUrl(raw)).toEqual({ ok: true, value: null })
+    }
+  })
+
+  it('http(s) 绝对地址合法，并去掉尾部斜杠', () => {
+    expect(parsePublicBaseUrl('https://relay.example.com')).toEqual({ ok: true, value: 'https://relay.example.com' })
+    expect(parsePublicBaseUrl('https://relay.example.com/')).toEqual({ ok: true, value: 'https://relay.example.com' })
+    expect(parsePublicBaseUrl('  http://127.0.0.1:8787  ')).toEqual({ ok: true, value: 'http://127.0.0.1:8787' })
+  })
+
+  it('保留路径前缀（反代常把 Relay 挂在子路径下）', () => {
+    expect(parsePublicBaseUrl('https://example.com/relay')).toEqual({ ok: true, value: 'https://example.com/relay' })
+    expect(parsePublicBaseUrl('https://example.com/relay/')).toEqual({ ok: true, value: 'https://example.com/relay' })
+  })
+
+  it.each([
+    ['非 http(s) 协议', 'ftp://example.com'],
+    ['不是 URL', 'example.com'],
+    ['裸相对路径', '/relay'],
+    ['带用户名密码', 'https://user:pass@example.com'],
+    ['带查询串', 'https://example.com/?x=1'],
+    ['带 hash', 'https://example.com/#x']
+  ])('非法值 fail-closed：%s', (_label, raw) => {
+    const result = parsePublicBaseUrl(raw)
+    expect(result.ok).toBe(false)
+    expect(result.value).toBeNull()
+  })
+})
 
 describe('normalizeIsoDate', () => {
   it('合法日期归一为 ISO', () => {

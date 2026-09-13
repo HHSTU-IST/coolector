@@ -178,6 +178,41 @@ export function normalizeAllowedOrigins(raw) {
   return value.split(',').map((entry) => entry.trim()).filter(Boolean)
 }
 
+/**
+ * 解析「对外基址」配置（`RELAY_PUBLIC_BASE_URL`）。
+ *
+ * 这是服务端**唯一**允许产生绝对 URL 的来源：请求头（`Host` / `x-forwarded-*`）完全由调用方
+ * 控制，用它拼出的绝对 URL 会把接收端的凭据引向攻击者域（详见 relay-http.js 的 relayUrl）。
+ *
+ * - 未设置 / 空白 → `{ ok: true, value: null }`，表示对外只输出**相对路径**（默认且推荐）
+ * - 非法值 → `ok: false`，由调用方 fail-closed 退出（与 `parsePositiveInt` 同一套约定）
+ * - 合法值 → 去掉尾部斜杠并保留可选路径前缀（反代常把 Relay 挂在子路径下）
+ *
+ * 刻意拒绝带用户名/密码、查询串或 hash 的值：凭据不该出现在配置的基址里，
+ * 而查询串/hash 会让拼接出的资源地址语义错乱。
+ */
+export function parsePublicBaseUrl(raw) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return { ok: true, value: null }
+  }
+
+  const value = String(raw).trim()
+  const invalid = { ok: false, value: null, raw: value }
+
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    return invalid
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return invalid
+  if (parsed.username || parsed.password) return invalid
+  if (parsed.search || parsed.hash) return invalid
+
+  return { ok: true, value: value.replace(/\/+$/u, '') }
+}
+
 /** 判断监听地址是否为回环地址（用于 fail-closed 鉴权启动检查） */
 export function isLoopbackHost(host) {
   const normalized = String(host).trim().toLowerCase().replace(/^\[|\]$/gu, '')

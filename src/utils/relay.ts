@@ -17,6 +17,58 @@ export const ROOM_ID_MIN_LENGTH = 8
 
 export const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/u, '')
 
+/**
+ * 服务端返回的地址不可信（跨源 / 畸形 / 为空）时抛出的错误。
+ *
+ * 单列一个类型是为了让调用方能把「安全拒绝」与「网络抖动」区分开：
+ * 前者必须显式告诉用户，后者静默处理即可。
+ */
+export class UntrustedRelayUrlError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'UntrustedRelayUrlError'
+  }
+}
+
+/**
+ * 把服务端返回的地址解析成可直接请求的绝对 URL，并**拒绝把带凭据的请求发往非配置的源**。
+ *
+ * 服务端现在默认只返回相对路径（`/api/rooms/...`），由这里拼到用户在界面上填写的 Relay
+ * 地址上 —— 服务端因此不需要、也不被允许从请求头推断自己的对外地址。
+ *
+ * 绝对 URL 仍被接受，但**必须与配置的 Relay 源同源**，否则抛错。这是第二道防线：
+ * 即便将来有某条响应返回了外部地址（例如服务端被换成旧版本、或又引入了请求头参与拼接），
+ * 接收端的 `RELAY_TOKEN` 也不会被送到攻击者域（F-001）。
+ *
+ * 同源判定基于 `origin`（协议 + 主机 + 端口）——`http` 与 `https`、不同端口都视为跨源。
+ */
+export const resolveRelayUrl = (target: string, baseUrl: string): string => {
+  const base = normalizeRelayUrl(baseUrl)
+  if (!base) throw new Error('未配置 Relay 地址')
+
+  const value = target.trim()
+  if (!value) throw new UntrustedRelayUrlError('Relay 返回了空地址')
+
+  // 相对路径（服务端默认形态）：拼到配置的 Relay 地址上。
+  // 注意不能依赖页面自身的 origin —— 纯静态前端常与 Relay 不同源。
+  if (value.startsWith('/')) return `${base}${value}`
+
+  let parsedTarget: URL
+  let parsedBase: URL
+  try {
+    parsedTarget = new URL(value)
+    parsedBase = new URL(base)
+  } catch {
+    throw new UntrustedRelayUrlError(`无法解析 Relay 返回的地址：${value}`)
+  }
+
+  if (parsedTarget.origin !== parsedBase.origin) {
+    throw new UntrustedRelayUrlError(`拒绝向非配置的 Relay 源发起带凭据的请求：${parsedTarget.origin}`)
+  }
+
+  return parsedTarget.toString()
+}
+
 const readStoredToken = (): string => {
   try {
     return globalThis.localStorage?.getItem(TOKEN_STORAGE_KEY) ?? ''

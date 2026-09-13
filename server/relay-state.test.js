@@ -121,23 +121,50 @@ describe('destroyRoom 的错误隔离', () => {
 })
 
 describe('uploadSummary', () => {
+  // 夹具必须在 beforeAll 之后构造：`uploadDir` 由 beforeAll 赋值，模块求值期还是 undefined
+  const makeUpload = () => ({
+    id: 'u1',
+    roomId: 'r1',
+    name: 'a.md',
+    mimeType: 'text/markdown',
+    size: 10,
+    uploadedAt: new Date(0).toISOString(),
+    lastModified: new Date(0).toISOString(),
+    previewText: null,
+    text: null,
+    storagePath: join(uploadDir, 'secret', 'u1-a.md'),
+    storageFileName: 'u1-a.md'
+  })
+
   it('不暴露服务端存储路径与文件名', () => {
-    const summary = state.uploadSummary({
-      id: 'u1',
-      roomId: 'r1',
-      name: 'a.md',
-      mimeType: 'text/markdown',
-      size: 10,
-      uploadedAt: new Date(0).toISOString(),
-      lastModified: new Date(0).toISOString(),
-      previewText: null,
-      text: null,
-      storagePath: join(uploadDir, 'secret', 'u1-a.md'),
-      storageFileName: 'u1-a.md'
-    }, { headers: { host: 'localhost:8787' } })
+    const summary = state.uploadSummary(makeUpload())
 
     expect(summary).not.toHaveProperty('storagePath')
     expect(summary).not.toHaveProperty('storageFileName')
     expect(summary.serverStored).toBe(true)
+  })
+
+  it('默认输出相对路径，不含任何主机信息（F-001 回归）', () => {
+    const summary = state.uploadSummary(makeUpload())
+
+    expect(summary.detailsUrl).toBe('/api/rooms/r1/uploads/u1')
+    expect(summary.downloadUrl).toBe('/api/rooms/r1/uploads/u1?download=1')
+  })
+
+  /**
+   * 这条断言守护的是**结构**：`uploadSummary` 一旦重新接受 `req`（哪怕只是签名上多一个参数），
+   * 就说明有人又把请求头接进了 URL 拼接 —— 那正是 F-001 的成因。
+   */
+  it('签名里不接受 req（结构上无法采信请求头）', () => {
+    expect(state.uploadSummary).toHaveLength(1)
+  })
+
+  it('includeContent:false 时不带正文，但 URL 形态一致', () => {
+    const summary = state.uploadSummary(makeUpload(), { includeContent: false })
+
+    expect(summary.contentIncluded).toBe(false)
+    expect(summary.contentText).toBeNull()
+    expect(summary.contentBase64).toBeNull()
+    expect(summary.detailsUrl).toBe('/api/rooms/r1/uploads/u1')
   })
 })
