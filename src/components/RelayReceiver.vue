@@ -145,11 +145,14 @@ interface RelayUploadSummary {
   lastModified: string
   hasTextPreview: boolean
   previewText: string | null
+  /** 正文是否因超过服务端 MAX_TEXT_BYTES 被截断 */
+  textTruncated: boolean
   contentIncluded: boolean
   contentText: string | null
   contentBase64: string | null
   detailsUrl: string
   downloadUrl: string
+  serverStored: boolean
 }
 
 interface RelayEventEnvelope<T> {
@@ -253,7 +256,8 @@ const ensureRoom = async (baseUrl: string, targetRoomId: string) => {
     if (response.status === 401) {
       throw new Error('鉴权失败：请检查接收端密钥是否与 Relay 的 RELAY_TOKEN 一致')
     }
-    throw new Error(await response.text())
+    const payload = await response.json().catch(() => null) as { error?: string } | null
+    throw new Error(payload?.error ?? `房间创建失败（HTTP ${response.status}）`)
   }
 
   return response.json() as Promise<RelayRoomResponse>
@@ -336,9 +340,12 @@ const handleReceiverReady = (event: MessageEvent<string>) => {
   void refreshRoomState()
 }
 
+/** 服务端因体积上限截断正文时，在展示内容末尾给出说明 */
+const TRUNCATION_NOTE = '\n\n—— 正文过长，已在接收端展示上限处截断；完整内容请下载原件。'
+
 const decodeRelayContent = (upload: RelayUploadSummary) => {
   if (upload.contentText !== null) {
-    return upload.contentText
+    return upload.textTruncated ? `${upload.contentText}${TRUNCATION_NOTE}` : upload.contentText
   }
 
   if (upload.previewText) {

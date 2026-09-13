@@ -10,9 +10,109 @@ import {
   makeCorsHeaders,
   makeTicketStore,
   normalizeAllowedOrigins,
+  parsePositiveInt,
+  sanitizeMimeType,
   sanitizeRoomId,
-  sanitizeStorageFileName
+  sanitizeStorageFileName,
+  truncateUtf8
 } from './relay-utils.js'
+
+describe('parsePositiveInt', () => {
+  it('空值回退到默认值', () => {
+    expect(parsePositiveInt(undefined, { fallback: 42 })).toEqual({ ok: true, value: 42, usedFallback: true })
+    expect(parsePositiveInt('', { fallback: 42 })).toEqual({ ok: true, value: 42, usedFallback: true })
+    expect(parsePositiveInt('   ', { fallback: 42 })).toEqual({ ok: true, value: 42, usedFallback: true })
+  })
+
+  it('接受合法正整数', () => {
+    expect(parsePositiveInt('1024')).toEqual({ ok: true, value: 1024, usedFallback: false })
+    expect(parsePositiveInt(' 1024 ')).toEqual({ ok: true, value: 1024, usedFallback: false })
+  })
+
+  it('拒绝非数字 —— 否则 NaN 会让体积校验静默全失效', () => {
+    for (const bad of ['abc', '10mb', '1e', '--5', 'NaN', 'Infinity']) {
+      expect(parsePositiveInt(bad, { fallback: 1 }).ok).toBe(false)
+    }
+  })
+
+  it('拒绝负数、零与小数', () => {
+    expect(parsePositiveInt('-1', { fallback: 1 }).ok).toBe(false)
+    expect(parsePositiveInt('0', { fallback: 1 }).ok).toBe(false)
+    expect(parsePositiveInt('1.5', { fallback: 1 }).ok).toBe(false)
+  })
+
+  it('让 min=0 放行 0（用于可关闭的开关型上限）', () => {
+    expect(parsePositiveInt('0', { fallback: 5, min: 0 })).toEqual({ ok: true, value: 0, usedFallback: false })
+  })
+
+  it('遵守 max 上界', () => {
+    expect(parsePositiveInt('70000', { fallback: 8787, max: 65535 }).ok).toBe(false)
+    expect(parsePositiveInt('65535', { fallback: 8787, max: 65535 }).value).toBe(65535)
+  })
+})
+
+describe('sanitizeMimeType', () => {
+  it('保留标准 mime', () => {
+    expect(sanitizeMimeType('text/markdown')).toBe('text/markdown')
+    expect(sanitizeMimeType('TEXT/Plain')).toBe('text/plain')
+    expect(sanitizeMimeType('application/vnd.openxmlformats-officedocument.wordprocessingml.document'))
+      .toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+  })
+
+  it('去掉参数部分', () => {
+    expect(sanitizeMimeType('text/plain; charset=utf-8')).toBe('text/plain')
+  })
+
+  it('含控制字符的畸形值被中和（防响应头注入，不再让该文件永久下载 400）', () => {
+    expect(sanitizeMimeType('text/plain\r\nX-Injected: 1')).toBe('application/octet-stream')
+    expect(sanitizeMimeType('text/plain\n')).toBe('text/plain')
+  })
+
+  it('任何输入的结果都不含控制字符且形如 type/subtype', () => {
+    const cases = [
+      'text/plain\r\nX-Injected: 1',
+      'text/\rhtml',
+      'a\r\nb/c',
+      'text/plain; charset=utf-8',
+      '\u0000application/json',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ]
+
+    for (const value of cases) {
+      const result = sanitizeMimeType(value)
+      const hasControlChar = Array.from(result).some((char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f)
+      expect(hasControlChar).toBe(false)
+      expect(result).toMatch(/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u)
+    }
+  })
+
+  it('畸形值回退为 application/octet-stream', () => {
+    expect(sanitizeMimeType('')).toBe('application/octet-stream')
+    expect(sanitizeMimeType(undefined)).toBe('application/octet-stream')
+    expect(sanitizeMimeType('noslash')).toBe('application/octet-stream')
+    expect(sanitizeMimeType('/')).toBe('application/octet-stream')
+    expect(sanitizeMimeType('text/plain extra')).toBe('application/octet-stream')
+  })
+})
+
+describe('truncateUtf8', () => {
+  it('未超限时原样返回', () => {
+    expect(truncateUtf8('abc', 10)).toEqual({ text: 'abc', truncated: false })
+  })
+
+  it('按 UTF-8 字节截断且不切出半个码点', () => {
+    // 每个中文字符 3 字节；限 7 字节只能装下 2 个字符
+    const result = truncateUtf8('中文中文', 7)
+    expect(result.truncated).toBe(true)
+    expect(result.text).toBe('中文')
+    expect(Buffer.byteLength(result.text, 'utf8')).toBeLessThanOrEqual(7)
+  })
+
+  it('空值安全', () => {
+    expect(truncateUtf8(null, 10)).toEqual({ text: '', truncated: false })
+    expect(truncateUtf8(undefined, 10)).toEqual({ text: '', truncated: false })
+  })
+})
 
 describe('sanitizeRoomId', () => {
   it('接受合法房间 ID', () => {

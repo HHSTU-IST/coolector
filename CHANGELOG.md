@@ -6,11 +6,25 @@
 
 ## [1.0.0] - 2026-09-13
 
-首个正式版本。基于**两轮**上线前全检（代码审查 + 安全审计 + QA 测试）完成安全与质量加固：
-第一轮修复 26 项发现；第二轮以独立视角重检并修复 Iteration 1 的 6 项发布阻塞问题。
+首个正式版本。基于**三轮**上线前全检（代码审查 + 安全审计 + QA 测试）完成安全与质量加固：
+第一轮修复 26 项发现；第二轮以独立视角重检并修复 Iteration 1 的 6 项发布阻塞问题；
+第三轮（Iteration 1 准出复检）修正了 2 项未真正修好的声称，并补上 3 条阻塞项。
 
 ### Security
 
+- **新增单房间配额**（`MAX_ROOM_UPLOAD_BYTES`，默认全局的 1/8）：原先配额是**全站单一计数**，
+  而写路径免凭据 —— 任何知道房间号的人可无凭据连发填满全局配额，导致**所有房间**（含无关班级）
+  上传返回 507。现单房间超限只影响自己
+- **新增上传字节限流**（`MAX_UPLOAD_BYTES_PER_WINDOW`，默认 256MB/IP/窗口）：
+  请求计数限流挡不住「120 次 × 10MB」量级的配额消耗，字节限流才能直接约束
+- **数值型环境变量改为 fail-closed 校验**：`MAX_FILE_BYTES=10mb` 这类笔误此前会让值为 `NaN`，
+  而 `size > NaN` 恒为 false → **体积校验静默全失效**（实测 12MB 文件被照单全收）；现在非法即拒绝启动
+- **房间增加绝对存活上限**（`ROOM_MAX_LIFETIME_MS`，默认 24h）：空闲 TTL 会被上传刷新，
+  此前「每 <6h 传 1 字节」即可永久占住房间与磁盘配额
+- **MIME 类型清洗**：`text/plain\r\nX-Injected: 1` 一类畸形值此前会直通响应头
+  （既可能注入，也让该文件因响应头非法而永久下载 400），现统一中和为 `application/octet-stream`
+- 下载响应新增 `X-Content-Type-Options: nosniff`
+- **信封 `text` 字段上限**（`MAX_TEXT_BYTES`，默认 1MB），超出即按 UTF-8 边界截断并标记 `textTruncated`
 - **前端不再持有接收端管理密钥**：移除 `VITE_RELAY_TOKEN` 的构建期注入与全部读取点。
   该变量会被 Vite 内联进公开的 `dist/` 产物，等于把接收端凭据分发给每个发送方；
   现改由用户在界面填写、仅存本机 `localStorage`，发送方则完全不需要密钥。
@@ -32,6 +46,21 @@
 
 ### Fixed
 
+- **`MAX_BODY_BYTES` 漏算信封里的 `text`**：派生上限只算了 base64 膨胀，没算 docx 同时携带的提取正文，
+  导致带正文的 docx 有效上限掉到约 8.55MB（名义 10MB，实测阈值 8.5MB+2MB→201、8.55MB+2MB→413）。
+  现派生式为 `base64(4/3) + MAX_TEXT_BYTES + 128KB`，前端正文也按 256KB 截断
+- **`pnpm start` 的 host 回退分支不可达**：`process.loadEnvFile('.env')` 会把文件值写进 `process.env`，
+  而 `.env.example` 恰好带 `HOST=0.0.0.0` → `process.env.HOST ?? '127.0.0.1'` 永远走不到，
+  relay 仍因 fail-closed 拒绝启动、整栈全灭。现未配置令牌时**强制**回环并打印覆盖提示
+- **启动失败时退出码恒为 0**：`shutdown()` 的定时器被 `.unref()`，子进程先死后事件循环排空，
+  Node 以 0 退出，CI 与脚本完全感知不到失败。现显式设置 `process.exitCode`
+- **Windows 下遗留孤儿进程**：pnpm 经 shell 派生，真正的 vite 是孙进程，`child.kill()` 杀不到它，
+  会继续占用 5174。现按进程树结束（`taskkill /T`）
+- **0 字节文件被拒**：`contentBase64: ''` 被 falsy 判空 → `400 Missing file content`；现用 `typeof` 判存在
+- `readBody` 删掉不可达的 `limit * 4` 强断分支（`if (exceeded) return` 先于累加，`size` 不会再增长）
+- 发送方上传成功提示不再展示 `downloadUrl` —— 该端点需要接收端凭据，发送方打开只会得到 401
+- 前端按状态码给出可读提示（413 文件超限 / 507 配额满 / 429 过于频繁）
+- 接收端展示被截断的正文时附带说明；`RelayUploadSummary` 补 `textTruncated` 与 `serverStored`
 - **中文文件名上传在主路径上直接失败**：发送方曾把文件名放进 `X-Relay-Filename` 请求头，
   而浏览器 `fetch` 只接受 ISO-8859-1 头值，含中文时**请求未出网即抛 `TypeError`**。
   现文件名一律走 JSON 信封 body；`decodeHeaderValue` 只修服务端解码，无法替代客户端编码
@@ -67,12 +96,16 @@
 
 ### Added
 
+- **Relay HTTP 层集成测试** `server/relay-server.test.js`（15 项，起真实进程打真实 HTTP）：
+  覆盖鉴权边界、公开写路径、裸 body 与信封的区分、0 字节文件、413/507/429、
+  房间配额隔离（另一房间不受影响）、配置校验 fail-closed（非法 env 拒绝启动）。
+  此前**路由层长期零覆盖**，而两条发布阻塞缺陷正发生在这里
 - **真实浏览器端到端回归** `scripts/e2e-upload.mjs`（`pnpm e2e`，25 项断言，纳入 CI）：
   覆盖中文名 `.md`/`.docx`/`.ipynb`/`.json` 上传、接收端 SSE 收齐与逐字文件名比对、
   二进制占位渲染、8.5MB 大文件、413 可读响应体、404 房间不存在、`?token=` 被拒、
   发送方全程不持有密钥；并断言「浏览器仍禁止非 ISO-8859-1 头值」以防测试空转
 - **密钥泄露守卫** `scripts/check-no-secrets.mjs`（`pnpm guard:no-secret`）
-- Relay Server 单元测试（`server/relay-utils.test.js`），并抽离可测试纯函数到 `server/relay-utils.js`
+- Relay Server 单元测试（`server/relay-utils.test.js`，50 项），并抽离可测试纯函数到 `server/relay-utils.js`
 - 项目版本号与 CHANGELOG
 
 ### CI

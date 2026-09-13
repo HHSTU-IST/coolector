@@ -3,6 +3,55 @@
 
 import { basename } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
+
+/**
+ * 解析正整数型环境变量。非法值**不静默回退**，而是返回 `ok:false` 让调用方 fail-closed 退出。
+ *
+ * 背景：`Number('10mb')` 是 `NaN`，而 `size > NaN` 恒为 false —— 一个笔误就能让
+ * 体积校验静默全失效（实测 12MB 文件被照单全收）。
+ */
+export function parsePositiveInt(raw, { fallback = 0, min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return { ok: true, value: fallback, usedFallback: true }
+  }
+
+  const value = Number(String(raw).trim())
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
+    return { ok: false, value: null, raw: String(raw) }
+  }
+
+  return { ok: true, value, usedFallback: false }
+}
+
+/**
+ * 清洗 MIME 类型：只保留标准的 `type/subtype`，丢掉参数与控制字符。
+ * 防止把 `text/plain\r\nX-Injected: 1` 一类值直通响应头 —— 既可能注入，
+ * 也会让该文件因为响应头非法而永久无法下载。
+ */
+export function sanitizeMimeType(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return 'application/octet-stream'
+
+  const [essence] = raw.split(';')
+  const [type, subtype] = essence.trim().toLowerCase().split('/')
+  const token = /^[a-z0-9][a-z0-9!#$&^_.+-]*$/u
+
+  if (!type || !subtype || !token.test(type) || !token.test(subtype)) {
+    return 'application/octet-stream'
+  }
+
+  return `${type}/${subtype}`
+}
+
+/** 按 UTF-8 字节数截断字符串，不产生半个码点（不完整的多字节序列被 StringDecoder 丢弃） */
+export function truncateUtf8(value, maxBytes) {
+  const text = String(value ?? '')
+  const buffer = Buffer.from(text, 'utf8')
+  if (buffer.length <= maxBytes) return { text, truncated: false }
+
+  return { text: new StringDecoder('utf8').write(buffer.subarray(0, maxBytes)), truncated: true }
+}
 
 /**
  * 房间 ID 只允许字母数字、下划线、连字符，长度 8–64。

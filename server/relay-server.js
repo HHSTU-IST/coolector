@@ -13,32 +13,70 @@ import {
   makeCorsHeaders,
   makeTicketStore,
   normalizeAllowedOrigins,
+  parsePositiveInt,
+  sanitizeMimeType,
   sanitizeRoomId,
-  sanitizeStorageFileName
+  sanitizeStorageFileName,
+  truncateUtf8
 } from './relay-utils.js'
 
-const PORT = Number(process.env.PORT ?? 8787)
+/**
+ * 读取正整数型环境变量，非法即拒绝启动。
+ * 不能让 `Number('10mb')` 这类笔误静默变成 `NaN` —— 那会让体积校验全部失效（fail-open）。
+ */
+function requirePositiveInt(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const result = parsePositiveInt(process.env[name], { fallback, min, max })
+
+  if (!result.ok) {
+    console.error(`[relay] 拒绝启动：环境变量 ${name} 必须是 ${min}–${max} 之间的整数，当前值为 ${JSON.stringify(result.raw)}。`)
+    process.exit(1)
+  }
+
+  return result.value
+}
+
+const PORT = requirePositiveInt('PORT', 8787, { max: 65535 })
 const HOST = process.env.HOST ?? '0.0.0.0'
 // 单个文件「解码后」的体积上限，与前端 src/stores/file.ts 的 MAX_FILE_SIZE 保持一致
-const MAX_FILE_BYTES = Number(process.env.MAX_FILE_BYTES ?? 10 * 1024 * 1024)
-// 请求体上限：JSON 信封里的 contentBase64 相比原始字节膨胀约 4/3，另留头部与字段开销余量。
-// 过去把请求体上限直接当成文件上限，导致二进制实际可用体积只有约 7.5MB，这里改为派生计算。
-const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES ?? Math.ceil((MAX_FILE_BYTES * 4) / 3) + 64 * 1024)
-const MAX_QUEUE_EVENTS = Number(process.env.MAX_QUEUE_EVENTS ?? 200)
-const ROOM_TTL_MS = Number(process.env.ROOM_TTL_MS ?? 6 * 60 * 60 * 1000)
+const MAX_FILE_BYTES = requirePositiveInt('MAX_FILE_BYTES', 10 * 1024 * 1024)
+// 信封里 text 字段的上限。前端只发前 256KB，这里再兜一层防止第三方客户端塞入超大正文
+const MAX_TEXT_BYTES = Math.max(
+  requirePositiveInt('MAX_TEXT_BYTES', 1024 * 1024),
+  // 不得低于客户端的正文上限，否则「10MB 文件 + 正文」会被自己的派生上限误判 413
+  256 * 1024
+)
+// 请求体上限：contentBase64 相比原始字节膨胀约 4/3，**再加上信封里同时携带的 text**，
+// 最后留 JSON 字段与头部开销余量。
+// 过去只算 base64 膨胀，导致带提取正文的 docx 有效上限掉到约 8.55MB（名义 10MB）。
+const MAX_BODY_BYTES = requirePositiveInt(
+  'MAX_BODY_BYTES',
+  Math.ceil((MAX_FILE_BYTES * 4) / 3) + MAX_TEXT_BYTES + 128 * 1024
+)
+const MAX_QUEUE_EVENTS = requirePositiveInt('MAX_QUEUE_EVENTS', 200)
+const ROOM_TTL_MS = requirePositiveInt('ROOM_TTL_MS', 6 * 60 * 60 * 1000)
+// 房间绝对存活上限：空闲 TTL 会被上传刷新，没有这一层则「每 <TTL 传 1 字节」即可永久占住配额
+const ROOM_MAX_LIFETIME_MS = requirePositiveInt('ROOM_MAX_LIFETIME_MS', 24 * 60 * 60 * 1000)
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? fileURLToPath(new URL('./uploads', import.meta.url))
 
-// 设为非空后，所有 /api 请求必须携带 `Authorization: Bearer <token>`。默认关闭以保持本地开箱可用。
+// 设为非空后，除「发送方公开写」与 SSE 一次性票据外的 /api 请求必须携带 `Authorization: Bearer <token>`。
 const RELAY_TOKEN = process.env.RELAY_TOKEN ?? ''
 // 逗号分隔的白名单；`*` 表示任意来源。部署到公网时务必收窄。
 // 空串（如 docker-compose 的 ${VAR:-} 传入）在此归一为 `*`，避免白名单被误判为空导致 CORS 头缺失。
 const ALLOWED_ORIGINS = normalizeAllowedOrigins(process.env.RELAY_ALLOWED_ORIGINS)
-// UPLOAD_DIR 的磁盘配额，超出后拒绝新上传，避免磁盘被无限写满。
-const MAX_TOTAL_UPLOAD_BYTES = Number(process.env.MAX_TOTAL_UPLOAD_BYTES ?? 1024 * 1024 * 1024)
+// 整个上传目录的磁盘配额硬上限。
+const MAX_TOTAL_UPLOAD_BYTES = requirePositiveInt('MAX_TOTAL_UPLOAD_BYTES', 1024 * 1024 * 1024)
+// 单个房间的配额上限。默认取全局的 1/8 —— 免凭据的发送方只能填满「自己那个房间」，
+// 而不是把全站配额吃光导致所有班级都上传失败。
+const MAX_ROOM_UPLOAD_BYTES = requirePositiveInt(
+  'MAX_ROOM_UPLOAD_BYTES',
+  Math.max(Math.floor(MAX_TOTAL_UPLOAD_BYTES / 8), 8 * 1024 * 1024)
+)
+// 单个来源 IP 在限流窗口内可写入的字节数（0 = 关闭）。与请求计数限流互补，直接限制配额消耗速率。
+const MAX_UPLOAD_BYTES_PER_WINDOW = requirePositiveInt('MAX_UPLOAD_BYTES_PER_WINDOW', 256 * 1024 * 1024, { min: 0 })
 // 仅在可信反向代理之后才信任 x-forwarded-* 头，避免直连时被伪造出错误跳转地址。
 const TRUST_PROXY = (process.env.RELAY_TRUST_PROXY ?? 'false') === 'true'
 // SSE 票据有效期（毫秒），短时效一次性，替代 URL 中的长期 token。
-const STREAM_TICKET_TTL_MS = Number(process.env.STREAM_TICKET_TTL_MS ?? 60_000)
+const STREAM_TICKET_TTL_MS = requirePositiveInt('STREAM_TICKET_TTL_MS', 60_000)
 
 const rooms = new Map()
 
@@ -48,7 +86,7 @@ let totalStoredBytes = 0
 /** 按当前来源计算 CORS 响应头；来源不在白名单时返回空对象，浏览器会自行拦截 */
 const corsHeaders = makeCorsHeaders(ALLOWED_ORIGINS)
 
-/** 未配置 RELAY_TOKEN 时放行所有请求；配置后要求 Bearer 头或 ?token= 查询参数（SSE 用） */
+/** 未配置 RELAY_TOKEN 时放行所有请求；配置后只接受 `Authorization: Bearer <token>`（?token= 已移除） */
 const isAuthorized = makeAuthorizer(RELAY_TOKEN)
 
 /** SSE 短时效一次性票据存储（避免长期 token 进 URL） */
@@ -129,6 +167,8 @@ function createRoom(roomId = randomUUID()) {
     receiver: null,
     queue: [],
     uploads: new Map(),
+    /** 本房间已占用的字节数，用于单房间配额（避免单个房间吃光全局配额） */
+    storedBytes: 0,
     stats: {
       receiverConnections: 0,
       uploads: 0,
@@ -159,6 +199,8 @@ function roomSnapshot(room, req) {
     hasReceiver: Boolean(room.receiver),
     queuedEvents: room.queue.length,
     uploadCount: room.uploads.size,
+    storedBytes: room.storedBytes,
+    storageLimitBytes: MAX_ROOM_UPLOAD_BYTES,
     stats: room.stats,
     uploads
   }
@@ -176,6 +218,8 @@ function uploadSummary(upload, req, { includeContent = true } = {}) {
     lastModified: upload.lastModified,
     hasTextPreview: Boolean(upload.previewText),
     previewText: upload.previewText ?? null,
+    /** 正文是否因超过 MAX_TEXT_BYTES 被截断（前端据此提示用户） */
+    textTruncated: Boolean(upload.textTruncated),
     contentIncluded: includeContent,
     contentText: includeContent ? upload.text ?? null : null,
     contentBase64: includeContent ? upload.contentBase64 : null,
@@ -284,8 +328,8 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
       throw new HttpError(400, 'Missing file name')
     }
 
-    const mimeType = raw.mimeType ?? 'text/plain'
     const lastModified = raw.lastModified ?? nowIso()
+    const safeMimeType = sanitizeMimeType(raw.mimeType ?? 'text/plain')
     const text = typeof raw.text === 'string' ? raw.text : typeof raw.contentText === 'string' ? raw.contentText : null
     const contentBase64 = typeof raw.contentBase64 === 'string'
       ? raw.contentBase64
@@ -295,17 +339,18 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
           ? Buffer.from(raw.content, 'utf8').toString('base64')
           : null
 
-    if (!contentBase64) {
+    // 用 typeof 判存在：0 字节文件的 contentBase64 是空串，不能当「缺失」拒绝
+    if (typeof contentBase64 !== 'string') {
       throw new HttpError(400, 'Missing file content')
     }
 
     const decoded = Buffer.from(contentBase64, 'base64')
     return {
       name: String(fileName),
-      mimeType: String(mimeType),
+      mimeType: safeMimeType,
       lastModified: String(lastModified),
       contentBase64,
-      text: text ?? (isTextMimeType(String(mimeType), String(fileName)) ? decoded.toString('utf8') : null)
+      text: text ?? (isTextMimeType(safeMimeType, String(fileName)) ? decoded.toString('utf8') : null)
     }
   }
 
@@ -315,16 +360,16 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
     throw new HttpError(400, 'Missing file name')
   }
 
-  const mimeType = headers['x-relay-mime-type'] ?? 'application/octet-stream'
+  const safeMimeType = sanitizeMimeType(headers['x-relay-mime-type'] ?? 'application/octet-stream')
   const lastModified = headers['x-relay-last-modified'] ?? nowIso()
   const contentBase64 = bodyBuffer.toString('base64')
-  const text = isTextMimeType(String(mimeType), String(fileName))
+  const text = isTextMimeType(safeMimeType, String(fileName))
     ? bodyBuffer.toString('utf8')
     : null
 
   return {
     name: String(fileName),
-    mimeType: String(mimeType),
+    mimeType: safeMimeType,
     lastModified: String(lastModified),
     contentBase64,
     text
@@ -333,9 +378,10 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
 
 /**
  * 读取请求体，超过 limit 抛 413。
- * 超限时**不立即 destroy**：否则 socket 被抢先销毁，客户端只会看到网络中断
- * （浏览器报 Failed to fetch）而拿不到 413 响应体。改为停止累积、继续排空，
- * 仅在超出硬上限（4×limit）时才强制断开以防御超大体积滥用。
+ *
+ * 超限时**不立即 destroy**：socket 被抢先销毁的话，客户端只会看到网络中断
+ * （浏览器报 `Failed to fetch`）而拿不到 413 响应体。这里只停止累积、丢弃后续数据，
+ * 让 Node 在响应写完后自行收尾连接。
  */
 function readBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
@@ -344,14 +390,12 @@ function readBody(req, limit = MAX_BODY_BYTES) {
     let exceeded = false
 
     req.on('data', (chunk) => {
+      // 一旦超限就只丢弃、不再累加：既保住内存上限，也把完整响应留给客户端
       if (exceeded) return
       size += chunk.length
 
       if (size > limit) {
         exceeded = true
-        if (size > limit * 4) {
-          req.destroy()
-        }
         reject(new HttpError(413, `Request body too large (limit ${limit} bytes)`))
         return
       }
@@ -415,6 +459,28 @@ async function handleCreateRoom(req, res) {
   }, corsHeaders(req))
 }
 
+/**
+ * 公开写路径的「按字节」限流：与请求计数限流互补。
+ * 请求计数限流挡不住「120 次 × 10MB」这种量级的配额消耗，字节限流才能直接约束它。
+ */
+function isUploadBytesExceeded(req, size) {
+  if (MAX_UPLOAD_BYTES_PER_WINDOW <= 0) return false
+
+  const ip = req.socket.remoteAddress ?? 'unknown'
+  const now = Date.now()
+  let bucket = uploadByteBuckets.get(ip)
+
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { bytes: 0, resetAt: now + RATE_LIMIT_WINDOW_MS }
+    uploadByteBuckets.set(ip, bucket)
+  }
+
+  if (bucket.bytes + size > MAX_UPLOAD_BYTES_PER_WINDOW) return true
+
+  bucket.bytes += size
+  return false
+}
+
 async function handleUpload(req, res, room, query) {
   const headers = corsHeaders(req)
   const body = await readBody(req)
@@ -425,9 +491,22 @@ async function handleUpload(req, res, room, query) {
     throw new HttpError(413, `File exceeds size limit (${MAX_FILE_BYTES} bytes)`)
   }
 
+  // 单房间配额：免凭据的发送方最多只能填满「自己那个房间」，
+  // 不会把全局配额吃光导致其它班级一起 507
+  if (room.storedBytes + size > MAX_ROOM_UPLOAD_BYTES) {
+    throw new HttpError(507, `Room storage quota exceeded (limit ${MAX_ROOM_UPLOAD_BYTES} bytes)`)
+  }
+
   if (totalStoredBytes + size > MAX_TOTAL_UPLOAD_BYTES) {
     throw new HttpError(507, `Upload storage quota exceeded (limit ${MAX_TOTAL_UPLOAD_BYTES} bytes)`)
   }
+
+  if (isUploadBytesExceeded(req, size)) {
+    throw new HttpError(429, `Upload rate exceeded (limit ${MAX_UPLOAD_BYTES_PER_WINDOW} bytes per window)`)
+  }
+
+  // 正文只用于预览/展示，按 UTF-8 边界截断，避免第三方客户端塞入超大正文撑爆内存
+  const textField = metadata.text === null ? null : truncateUtf8(metadata.text, MAX_TEXT_BYTES)
 
   const upload = {
     id: randomUUID(),
@@ -438,12 +517,14 @@ async function handleUpload(req, res, room, query) {
     uploadedAt: nowIso(),
     size,
     contentBase64: metadata.contentBase64,
-    text: metadata.text,
-    previewText: metadata.text ? metadata.text.slice(0, 4096) : null
+    text: textField ? textField.text : null,
+    textTruncated: Boolean(textField?.truncated),
+    previewText: textField ? textField.text.slice(0, 4096) : null
   }
 
   await persistUpload(upload)
   totalStoredBytes += size
+  room.storedBytes += size
 
   room.uploads.set(upload.id, upload)
   room.stats.uploads += 1
@@ -480,6 +561,8 @@ async function handleDownload(req, res, room, uploadId, query) {
     res.writeHead(200, {
       ...headers,
       'Content-Type': upload.mimeType,
+      // 下载是附件语义：加 nosniff 防止浏览器把内容按上传者声明的类型嗅探渲染
+      'X-Content-Type-Options': 'nosniff',
       'Content-Disposition': contentDisposition(upload.name),
       'Content-Length': buffer.length
     })
@@ -538,9 +621,9 @@ function destroyRoom(room) {
   closeReceiver(room)
   rooms.delete(room.id)
 
-  for (const upload of room.uploads.values()) {
-    totalStoredBytes -= upload.size
-  }
+  // 以房间自身的累计值为准，避免逐个上传相减时漏掉任何一条
+  totalStoredBytes -= room.storedBytes ?? 0
+  room.storedBytes = 0
   room.uploads.clear()
 
   void rm(join(UPLOAD_DIR, room.id), { recursive: true, force: true })
@@ -561,11 +644,23 @@ function handleRoomDelete(req, res, roomId) {
 }
 
 function cleanupRooms() {
-  const cutoff = Date.now() - ROOM_TTL_MS
+  const now = Date.now()
+  const idleCutoff = now - ROOM_TTL_MS
 
   for (const room of rooms.values()) {
-    // 房间过期后即使仍有上传也要回收，否则磁盘只增不减
-    if (room.lastActivity < cutoff && !room.receiver) {
+    const age = now - new Date(room.createdAt).getTime()
+    // 空闲回收：无接收端且长时间无活动（上传会刷新 lastActivity，这是有意的）
+    const expiredByIdle = room.lastActivity < idleCutoff && !room.receiver
+    // 绝对年龄上限：否则「每 <TTL 传 1 字节」就能把房间与配额永久占住
+    const expiredByAge = age > ROOM_MAX_LIFETIME_MS && !room.receiver
+
+    if (expiredByIdle || expiredByAge) {
+      auditLog('room_expired', {
+        roomId: room.id,
+        reason: expiredByAge ? 'max_lifetime' : 'idle',
+        ageMs: age,
+        storedBytes: room.storedBytes ?? 0
+      })
       destroyRoom(room)
     }
   }
@@ -714,9 +809,11 @@ const server = createServer(async (req, res) => {
 })
 
 // —— 速率限制（固定窗口，按 socket 来源 IP 计数；反向代理后为代理 IP，属尽力而为） ——
-const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60 * 1000)
-const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX ?? 120)
+const RATE_LIMIT_WINDOW_MS = requirePositiveInt('RATE_LIMIT_WINDOW_MS', 60 * 1000)
+const RATE_LIMIT_MAX = requirePositiveInt('RATE_LIMIT_MAX', 120)
 const rateBuckets = new Map()
+/** 上传字节限流的窗口桶（见 isUploadBytesExceeded） */
+const uploadByteBuckets = new Map()
 
 function isRateLimited(req) {
   const ip = req.socket.remoteAddress ?? 'unknown'
@@ -736,6 +833,9 @@ setInterval(() => {
   const now = Date.now()
   for (const [ip, bucket] of rateBuckets) {
     if (bucket.resetAt <= now) rateBuckets.delete(ip)
+  }
+  for (const [ip, bucket] of uploadByteBuckets) {
+    if (bucket.resetAt <= now) uploadByteBuckets.delete(ip)
   }
 }, RATE_LIMIT_WINDOW_MS).unref()
 

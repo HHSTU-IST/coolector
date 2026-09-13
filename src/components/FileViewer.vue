@@ -119,11 +119,21 @@ const roomIdHint = computed(() => {
 })
 
 interface RelayUploadResponse {
-  upload?: {
-    downloadUrl?: string
-  }
-  eventId?: string
   error?: string
+}
+
+/**
+ * 信封里 `text` 字段的字节上限。
+ * 服务端 `MAX_TEXT_BYTES` 默认 1MB 且会被钳制为不低于 256KB，这里取同一保守值 ——
+ * 否则「接近 10MB 的 docx + 长提取正文」会把请求体顶到服务端上限之外，被误判 413。
+ */
+const MAX_ENVELOPE_TEXT_BYTES = 256 * 1024
+
+/** 按 UTF-8 字节截断正文；`stream: true` 让不完整的多字节序列被丢弃而不是变成乱码 */
+const truncateEnvelopeText = (value: string) => {
+  const bytes = new TextEncoder().encode(value)
+  if (bytes.length <= MAX_ENVELOPE_TEXT_BYTES) return value
+  return new TextDecoder('utf-8').decode(bytes.subarray(0, MAX_ENVELOPE_TEXT_BYTES), { stream: true })
 }
 
 const collectionItem = computed(() => {
@@ -188,9 +198,10 @@ const uploadSelectedFileToRelay = async () => {
       lastModified: selectedFile.lastModified.toISOString(),
       contentBase64: selectedFile.contentBase64
     }
-    // 附上已提取的正文（如 docx），接收端无需自行解压即可预览
+    // 附上已提取的正文（如 docx），接收端无需自行解压即可预览。
+    // 按字节截断：信封同时装 contentBase64 与 text，正文过大就会顶穿服务端的请求体上限。
     if (selectedFile.metadata.isExtractedText) {
-      envelope.text = selectedFile.content
+      envelope.text = truncateEnvelopeText(selectedFile.content)
     }
 
     // 发送方（学生）不持有接收端管理密钥：房间 ID 本身即能力凭据，故不发送 Authorization
@@ -210,12 +221,20 @@ const uploadSelectedFileToRelay = async () => {
       if (response.status === 404) {
         throw new Error('房间不存在或已过期，请向接收端确认房间号')
       }
+      if (response.status === 413) {
+        throw new Error('文件超过接收端允许的体积上限')
+      }
+      if (response.status === 507) {
+        throw new Error('接收端存储配额已满，请联系收集人清理')
+      }
+      if (response.status === 429) {
+        throw new Error('上传过于频繁，请稍后再试')
+      }
       throw new Error(payload?.error ?? `HTTP 上传失败（${response.status}）`)
     }
 
-    relayUploadMessage.value = payload?.upload?.downloadUrl
-      ? `已发送到房间 ${targetRoomId}，服务端下载地址：${payload.upload.downloadUrl}`
-      : `已发送到房间 ${targetRoomId}`
+    // 不再展示 downloadUrl：该端点需要接收端凭据，发送方打开只会得到 401
+    relayUploadMessage.value = `已发送到房间 ${targetRoomId}，接收端会实时收到该文件`
   } catch (error) {
     relayUploadError.value = true
     relayUploadMessage.value = error instanceof Error ? error.message : 'HTTP 上传失败'
