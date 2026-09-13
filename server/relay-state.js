@@ -8,7 +8,7 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { sanitizeRoomId, sanitizeStorageFileName } from './relay-utils.js'
 import {
-  INJECT_RM_FAILURE, KEEP_ORPHAN_UPLOADS, MAX_QUEUE_EVENTS, MAX_ROOM_UPLOAD_BYTES,
+  KEEP_ORPHAN_UPLOADS, MAX_QUEUE_EVENTS, MAX_ROOM_UPLOAD_BYTES,
   MAX_ROOM_UPLOADS, MAX_TOTAL_UPLOAD_BYTES, ROOM_MAX_LIFETIME_MS, ROOM_TTL_MS, UPLOAD_DIR
 } from './relay-config.js'
 import { HttpError, auditLog, baseUrl, nowIso, writeSseFrame } from './relay-http.js'
@@ -242,11 +242,11 @@ async function readRoomSentinel(roomUploadDir) {
 }
 
 
-async function persistUpload(upload) {
+async function persistUpload(upload, contentBase64 = '') {
   const roomUploadDir = join(UPLOAD_DIR, upload.roomId)
   const storageFileName = `${upload.id}-${sanitizeStorageFileName(upload.name)}`
   const storagePath = join(roomUploadDir, storageFileName)
-  const buffer = Buffer.from(upload.contentBase64 ?? '', 'base64')
+  const buffer = Buffer.from(contentBase64, 'base64')
 
   await mkdir(roomUploadDir, { recursive: true })
   // 先写归属标记再写正文，保证目录一旦有内容就一定带标记
@@ -265,7 +265,7 @@ async function persistUpload(upload) {
  * 未处理的拒绝会让整个 relay 进程退出（实测 exit=1，整站下线）。
  * 删除失败时返回 false，由调用方记录并等待下次重试。
  */
-async function destroyRoom(room) {
+async function destroyRoom(room, { removeDir = rm } = {}) {
   // 先置标记：在途上传据此判断「房间已经没了」，避免落盘后静默写入无人认领的文件
   room.destroyed = true
   closeReceiver(room)
@@ -279,13 +279,7 @@ async function destroyRoom(room) {
   const roomDir = join(UPLOAD_DIR, room.id)
 
   try {
-    // 故障注入（仅测试用）：验证「删除失败不得冒泡成进程退出」这条护栏。
-    // 只影响可靠性、不涉及安全，默认关闭。
-    if (INJECT_RM_FAILURE) {
-      throw new Error('injected rm failure (RELAY_TEST_INJECT_RM_FAILURE)')
-    }
-
-    await rm(roomDir, { recursive: true, force: true })
+    await removeDir(roomDir, { recursive: true, force: true })
     return true
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -296,7 +290,7 @@ async function destroyRoom(room) {
 }
 
 
-async function cleanupRooms() {
+async function cleanupRooms({ removeDir = rm } = {}) {
   const now = Date.now()
   const idleCutoff = now - ROOM_TTL_MS
   const expired = []
@@ -324,7 +318,7 @@ async function cleanupRooms() {
     })
 
     try {
-      await destroyRoom(room)
+      await destroyRoom(room, { removeDir })
     } catch (error) {
       // destroyRoom 内部已经吞掉了 rm 失败；这里兜住任何意外，保证清理循环不中断
       auditLog('room_expire_failed', {

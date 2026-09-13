@@ -178,6 +178,8 @@ async function handleUpload(req, res, room, query) {
     throw error
   }
 
+  // 注意：`upload` 对象上**不放** contentBase64 —— 正文只作为落盘入参传一次。
+  // 过去它在对象上「赋值 → 落盘后置 null → 响应前又从 metadata 塞回」，字段在三态之间来回抖。
   const upload = {
     id: randomUUID(),
     roomId: room.id,
@@ -188,14 +190,13 @@ async function handleUpload(req, res, room, query) {
     size,
     /** 该条上传占用配额的字节数（正文 + 元数据 + 保留文本），回收时按此值扣减 */
     quotaBytes,
-    contentBase64: metadata.contentBase64,
     text: textField ? textField.text : null,
     textTruncated: Boolean(textField?.truncated),
     previewText: textField ? textField.text.slice(0, 4096) : null
   }
 
   try {
-    await persistUpload(upload)
+    await persistUpload(upload, metadata.contentBase64)
   } catch (error) {
     // 落盘失败必须退回预占的配额与槽位，否则房间会被永久"占额"
     releaseQuota()
@@ -219,10 +220,6 @@ async function handleUpload(req, res, room, query) {
     releaseSlot()
     throw new HttpError(410, 'Room was deleted while the upload was in flight')
   }
-
-  // 落盘已成功，内存里不再保留 base64 副本（details 端点按需从磁盘读）。
-  // 一份 10MB 上传若常驻 base64，会让 RSS 多出 1.33× 文件体积。
-  upload.contentBase64 = null
 
   room.uploads.set(upload.id, upload)
   releaseSlot()

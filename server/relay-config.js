@@ -86,8 +86,6 @@ const ROOM_CLEANUP_INTERVAL_MS = requirePositiveInt('ROOM_CLEANUP_INTERVAL_MS', 
 // 却会被 initStoredBytes 永久计入全局配额，且没有回收路径。
 const KEEP_ORPHAN_UPLOADS = (process.env.RELAY_KEEP_ORPHAN_UPLOADS ?? 'false') === 'true'
 
-// 仅测试用的故障注入：让 destroyRoom 的目录删除必定失败，用于验证错误隔离护栏。默认关闭。
-const INJECT_RM_FAILURE = process.env.RELAY_TEST_INJECT_RM_FAILURE === 'true'
 
 // 仅在可信反向代理之后才信任 x-forwarded-* 头，避免直连时被伪造出错误跳转地址。
 const TRUST_PROXY = (process.env.RELAY_TRUST_PROXY ?? 'false') === 'true'
@@ -122,7 +120,6 @@ export {
   MAX_UPLOAD_NAME_BYTES,
   ROOM_CLEANUP_INTERVAL_MS,
   KEEP_ORPHAN_UPLOADS,
-  INJECT_RM_FAILURE,
   TRUST_PROXY,
   STREAM_TICKET_TTL_MS,
   RATE_LIMIT_WINDOW_MS,

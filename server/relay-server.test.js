@@ -646,71 +646,10 @@ describe('启动回收的归属门控', () => {
   }, 40000)
 }, 60000)
 
-describe('删除失败的错误隔离', () => {
-  it('DELETE 时目录删除失败仍返回 200，但如实标记 storageRemoved=false', async () => {
-    const relay = await startRelay({ RELAY_TEST_INJECT_RM_FAILURE: 'true' })
-
-    try {
-      const room = await createRoom(relay.baseUrl, 'rm-failure-delete-room')
-
-      await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
-        method: 'POST',
-        headers: ENVELOPE_HEADERS,
-        body: envelopeBody({ name: 'x.md', content: 'x' })
-      })
-
-      const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, {
-        method: 'DELETE',
-        headers: authHeaders
-      })
-
-      // 房间在服务端已经不存在；磁盘删不掉是次生问题，不能让调用方以为删除失败而反复重试
-      expect(response.status).toBe(200)
-      const payload = await response.json()
-      expect(payload.deleted).toBe(true)
-      expect(payload.storageRemoved).toBe(false)
-
-      // 配额已回收，进程仍健康
-      expect((await fetch(`${relay.baseUrl}/healthz`)).status).toBe(200)
-    } finally {
-      await relay.stop()
-    }
-  }, 40000)
-
-  it('目录删除失败不会让 relay 进程退出（清理任务必须吞掉异常）', async () => {
-    const relay = await startRelay({
-      // 故障注入：让 destroyRoom 的 rm 必定失败
-      RELAY_TEST_INJECT_RM_FAILURE: 'true',
-      ROOM_MAX_LIFETIME_MS: '800',
-      ROOM_CLEANUP_INTERVAL_MS: '300'
-    })
-
-    try {
-      const room = await createRoom(relay.baseUrl, 'rm-failure-room')
-
-      await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
-        method: 'POST',
-        headers: ENVELOPE_HEADERS,
-        body: envelopeBody({ name: 'x.md', content: 'x' })
-      })
-
-      // 等房间被绝对上限回收（此时 rm 会失败）
-      await new Promise((resolve) => {
-        setTimeout(resolve, 2000)
-      })
-
-      // 关键断言：进程仍然服务，没有被未处理拒绝带走
-      const health = await fetch(`${relay.baseUrl}/healthz`)
-      expect(health.status).toBe(200)
-
-      // 房间在服务端已经不存在
-      const state = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })
-      expect(state.status).toBe(404)
-    } finally {
-      await relay.stop()
-    }
-  }, 40000)
-}, 60000)
+// 「删除失败的错误隔离」原先在这里，靠生产代码里的故障注入开关
+// （RELAY_TEST_INJECT_RM_FAILURE）拉起进程来验证。状态拆到 relay-state.js 之后，
+// 该分支改由 server/relay-state.test.js 注入 removeDir 替身直接单测，
+// 生产代码里的注入开关已删除。
 
 describe('在途上传与房间删除的交界', () => {
   let relay
