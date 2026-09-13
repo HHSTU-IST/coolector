@@ -20,15 +20,15 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 > **完整清单以 [`.env.example`](./.env.example) 为唯一权威**（含默认值与逐项说明）。
 > 这里只列部署时**必须当面确认**的几个，其余按默认值走即可。
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `RELAY_TOKEN` | 空（关闭） | 接收端管理密钥。设为非空后，除「发送方公开写」与 SSE 一次性票据外的所有 `/api` 请求需带 `Authorization: Bearer <token>`。**公网必填** |
-| `HOST` | `0.0.0.0` | 监听地址。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed） |
-| `RELAY_ALLOWED_ORIGINS` | `*` | CORS 白名单。**公网务必收窄**为前端域名 |
-| `RELAY_PUBLIC_BASE_URL` | 空（只输出相对路径） | 对外 URL 基址。**留空即可，反代 HTTPS 部署也一样**——接收端按它填写的 Relay 地址解析相对路径。服务端不会从 `Host` / `x-forwarded-*` 推断自身地址（那会让攻击者用伪造 `Host` 把接收端的管理密钥引向外部）。仅当有非浏览器客户端需要绝对 URL 时才设，如 `https://relay.example.com` |
-| `UPLOAD_DIR` | `./server/uploads` | 上传落盘目录，**生产务必挂持久卷** |
-| `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB) | 全局磁盘配额，超出返回 **507** |
-| `MAX_ROOM_UPLOAD_BYTES` | 全局的 1/8（128MB） | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明） |
+| 变量                     | 默认值               | 说明                                                                                                                                                                                                                                                                             |
+| ------------------------ | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RELAY_TOKEN`            | 空（关闭）           | 接收端管理密钥。设为非空后，除「发送方公开写」与 SSE 一次性票据外的所有 `/api` 请求需带 `Authorization: Bearer <token>`。**公网必填**                                                                                                                                            |
+| `HOST`                   | `0.0.0.0`            | 监听地址。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed）                                                                                                                                                                                                               |
+| `RELAY_ALLOWED_ORIGINS`  | 空（不发 CORS 头）   | CORS 白名单，逗号分隔。**留空 = 拒绝所有跨源前端**（同源部署无需配置）；前后端不同源时必须显式填前端域名，`*` 只适合本机/内网。本机 `pnpm start` 会自动放行 `localhost:5174`                                                                                                     |
+| `RELAY_PUBLIC_BASE_URL`  | 空（只输出相对路径） | 对外 URL 基址。**留空即可，反代 HTTPS 部署也一样**——接收端按它填写的 Relay 地址解析相对路径。服务端不会从 `Host` / `x-forwarded-*` 推断自身地址（那会让攻击者用伪造 `Host` 把接收端的管理密钥引向外部）。仅当有非浏览器客户端需要绝对 URL 时才设，如 `https://relay.example.com` |
+| `UPLOAD_DIR`             | `./server/uploads`   | 上传落盘目录，**生产务必挂持久卷**                                                                                                                                                                                                                                               |
+| `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB)   | 全局磁盘配额，超出返回 **507**                                                                                                                                                                                                                                                   |
+| `MAX_ROOM_UPLOAD_BYTES`  | 全局的 1/8（128MB）  | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明）                                                                                                                                                                                                   |
 
 配额、体积、限流、生命周期等调优项（`MAX_FILE_BYTES` / `MAX_TEXT_BYTES` / `MAX_BODY_BYTES` /
 `MAX_ROOM_UPLOADS` / `MAX_UPLOAD_NAME_BYTES` / `ROOM_TTL_MS` / `ROOM_MAX_LIFETIME_MS` /
@@ -100,7 +100,9 @@ docker run -d --name coolector-relay \
 
 ## 4. 反向代理（TLS）
 
-Relay Server 本身不处理 TLS。生产应通过反向代理暴露 HTTPS，并由代理转发 `X-Forwarded-Proto` / `Host`（relay-server.js 已据此生成正确的绝对 URL 与 SSE 地址）。
+Relay Server 本身不处理 TLS。生产应通过反向代理暴露 HTTPS。
+
+**Relay 不读取 `X-Forwarded-Proto` / `Host` 等请求头来推断自己的对外地址。** 服务端对外**只输出相对路径**，由前端按界面填写（或构建期 `VITE_RELAY_URL`）的 Relay 地址解析。这样做是因为请求头由调用方任意控制，而接收端会自动带凭据去拉取服务端返回的 URL —— 一旦采信这些头，无凭据的发送方只要伪造 `Host`，就能让接收端把管理密钥发往攻击者域（已修复的 F-001）。因此反代侧**不需要**任何特殊配置，HTTPS 下也不存在混合内容问题。
 
 ### 4.1 Caddy（自动 TLS，最简）
 
@@ -123,8 +125,8 @@ Caddy 自动向 Let's Encrypt 申请并续期证书，SSE 默认不缓冲，开�
 `deploy/nginx.conf.example`（配合 `certbot --nginx -d relay.example.com`）：
 
 - `proxy_buffering off` 保证 SSE 事件实时下发
-- `X-Forwarded-Proto $scheme` 让 relay 生成 `https://` 的绝对地址
-- `client_max_body_size 20m` 需 >= `MAX_BODY_BYTES`
+- 样例里的 `X-Forwarded-*` / `Host` **仅供代理自身的日志与访问控制**：relay 不读取它们（见上一节），生成绝对 URL 是客户端的事
+- `client_max_body_size 20m` 需 >= `MAX_BODY_BYTES`（默认派生 15,160,662 B ≈ 15.16 MB）
 
 ## 5. 前端生产构建
 
@@ -148,7 +150,7 @@ pnpm build
 ## 6. 安全清单（公网必做）
 
 - [ ] `RELAY_TOKEN` 设为强随机值；前端调用 `/api` 时携带 `Authorization: Bearer <token>`
-- [ ] `RELAY_ALLOWED_ORIGINS` 收窄为前端域名（如 `https://app.example.com`），不要留 `*`
+- [ ] `RELAY_ALLOWED_ORIGINS` 显式设为前端域名（如 `https://app.example.com`）；留空即拒绝所有跨源，`*` 只适合本机/内网
 - [ ] 反向代理强制 HTTPS（HSTS 可选）
 - [ ] `UPLOAD_DIR` 挂持久卷，并设合理的 `MAX_TOTAL_UPLOAD_BYTES` 防磁盘写满
 - [ ] 服务器防火墙只放行 443（反代）与必要的 22；8787 不必对外暴露（由反代转发）
@@ -158,7 +160,7 @@ pnpm build
 - **上传文件**：存于 `UPLOAD_DIR`，容器请挂卷；房间 `ROOM_TTL_MS` 过期后自动删除并回收配额。
 - **房间状态**：存于内存，进程重启即清空（已落盘文件仍在 `UPLOAD_DIR`）。单实例足够；多实例不共享状态（无 Redis/DB），需扩展时请引入外部存储。
 - **日志**：stdout/stderr，compose 用 `docker compose logs`，裸跑看终端。
-- **升级**：`docker compose pull && docker compose up -d --build`（或重新 `docker build`）。
+- **升级**：`docker compose up -d --build`（本服务是本地 build + `image: coolector-relay:latest`，**没有远端仓库可 `pull`**，`docker compose pull` 会失败并阻断后续命令）；或重新 `docker build` 后重启。
 - **停服**：`docker compose down`（卷保留）；`docker compose down -v` 会删除上传卷。
 
 ## 8. 本地开发（不走公网）

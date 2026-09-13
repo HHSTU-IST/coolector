@@ -215,6 +215,5 @@ export {
   isUploadBytesExceeded,
   rateBuckets,
   uploadByteBuckets,
-  takeBucket,
   isRateLimited
 }

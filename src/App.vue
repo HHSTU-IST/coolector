@@ -8,6 +8,11 @@ import ToastHost from './components/ToastHost.vue'
 
 <template>
   <div id="app" class="min-h-screen bg-slate-50 text-slate-900">
+    <!-- 键盘用户可跳过吸顶导航直达主内容（平时视觉隐藏，获得焦点时显示） -->
+    <a href="#main"
+      class="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-30 focus:rounded-md focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-indigo-700 focus:shadow">
+      跳到主要内容
+    </a>
     <header class="sticky top-0 z-20 border-b border-slate-200/80 bg-white/90 backdrop-blur">
       <div class="mx-auto max-w-7xl px-3 sm:px-6 lg:px-8">
         <div class="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between sm:h-16 sm:py-0">
@@ -31,7 +36,7 @@ import ToastHost from './components/ToastHost.vue'
       </div>
     </header>
 
-    <main class="py-5 sm:py-8 lg:py-10">
+    <main id="main" tabindex="-1" class="py-5 sm:py-8 lg:py-10">
       <div class="mx-auto max-w-7xl px-3 sm:px-6 lg:px-8">
         <section class="mb-5 border-b border-slate-200 pb-5 sm:mb-8 sm:pb-6">
           <div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">

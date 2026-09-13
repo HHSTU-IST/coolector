@@ -170,12 +170,16 @@ export function isTextMimeType(mimeType, fileName) {
 }
 
 /**
- * 把 RELAY_ALLOWED_ORIGINS 归一为数组。空串 / undefined / 纯空白一律视为 `*`，
- * 修复 docker-compose 的 `${VAR:-}` 传入空串导致白名单被误判为空、CORS 头缺失的问题。
+ * 把 RELAY_ALLOWED_ORIGINS 归一为数组。
+ *
+ * **未配置 = 不发送任何 CORS 头**（即拒绝所有跨源前端），而不再是 `*`。
+ * 免凭据的公开写路径意味着任意站点都能向「已知房间号」灌文件，因此「谁可以跨源调用」
+ * 必须是显式决定。本机开发由 `server/start.js` 显式注入 localhost 白名单，
+ * 端到端脚本亦自带白名单，都不依赖这个默认值。
  */
 export function normalizeAllowedOrigins(raw) {
-  const value = typeof raw === 'string' && raw.trim() ? raw : '*'
-  return value.split(',').map((entry) => entry.trim()).filter(Boolean)
+  if (typeof raw !== 'string') return []
+  return raw.split(',').map((entry) => entry.trim()).filter(Boolean)
 }
 
 /**
@@ -208,9 +212,13 @@ export function parsePublicBaseUrl(raw) {
 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return invalid
   if (parsed.username || parsed.password) return invalid
-  if (parsed.search || parsed.hash) return invalid
+  // 尾随的 `?` / `#` 解析后 search / hash 都是**空串**（falsy），只看解析结果会放行，
+  // 而保留原样的 `https://x/relay?` 会拼出 `.../relay?/api/x`（路径被吞进 query → 404）。
+  // 故按**原始输入**判定分隔符是否存在。
+  if (value.includes('?') || value.includes('#')) return invalid
 
-  return { ok: true, value: value.replace(/\/+$/u, '') }
+  // 返回规范化后的 href：避免「校验的串 ≠ 输出的串」（如 `http://x/../y` 实际是 `http://x/y`）
+  return { ok: true, value: parsed.href.replace(/\/+$/u, '') }
 }
 
 /** 判断监听地址是否为回环地址（用于 fail-closed 鉴权启动检查） */

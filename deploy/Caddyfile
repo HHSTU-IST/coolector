@@ -5,6 +5,6 @@ relay.example.com {
 	reverse_proxy 127.0.0.1:8787
 
 	# SSE 长连接：关闭缓冲，Caddy 默认已支持，这里显式标注
-	# relay-server.js 已读取 x-forwarded-proto / host 生成正确的绝对 URL
+	# 注意：relay 只输出相对路径、**不读取也不采信** x-forwarded-* 与 host（见 RELAY_DEPLOY.md §4）
 	header ?X-Accel-Buffering "no"
 }

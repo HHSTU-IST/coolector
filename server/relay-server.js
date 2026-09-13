@@ -14,7 +14,7 @@ import {
   truncateUtf8
 } from './relay-utils.js'
 import {
-  HOST, MAX_FILE_BYTES, MAX_TEXT_BYTES, MAX_TOTAL_UPLOAD_BYTES,
+  ALLOWED_ORIGINS, HOST, MAX_FILE_BYTES, MAX_TEXT_BYTES, MAX_TOTAL_UPLOAD_BYTES,
   MAX_UPLOAD_BYTES_PER_WINDOW, MAX_UPLOAD_NAME_BYTES, PORT, RELAY_TOKEN,
   ROOM_CLEANUP_INTERVAL_MS, RATE_LIMIT_WINDOW_MS, STREAM_TICKET_TTL_MS
 } from './relay-config.js'
@@ -76,7 +76,9 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
       mimeType: safeMimeType,
       lastModified: normalizeIsoDate(lastModified, nowIso()),
       contentBase64,
-      text: text ?? (isTextMimeType(safeMimeType, safeName) ? decoded.toString('utf8') : null)
+      text: text ?? (isTextMimeType(safeMimeType, safeName) ? decoded.toString('utf8') : null),
+      // 客户端按 256KB 截断过提取正文时上报（服务端只知道自己那 1MB 的截断）
+      textTruncatedByClient: raw.textTruncatedByClient === true
     }
   }
 
@@ -98,7 +100,9 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
     mimeType: safeMimeType,
     lastModified: normalizeIsoDate(headers['x-relay-last-modified'], nowIso()),
     contentBase64,
-    text
+    text,
+    // 裸 body 路径没有「客户端提取正文」这一步，自然也没有客户端截断
+    textTruncatedByClient: false
   }
 }
 
@@ -193,7 +197,8 @@ async function handleUpload(req, res, room, query) {
     /** 该条上传占用配额的字节数（正文 + 元数据 + 保留文本），回收时按此值扣减 */
     quotaBytes,
     text: textField ? textField.text : null,
-    textTruncated: Boolean(textField?.truncated),
+    // 两端任一发生截断都要告诉接收端，否则用户以为看到的就是全文
+    textTruncated: Boolean(textField?.truncated) || metadata.textTruncatedByClient,
     previewText: textField ? textField.text.slice(0, 4096) : null
   }
 
@@ -256,9 +261,8 @@ async function handleDownload(req, res, room, uploadId, query) {
 
   const download = query.get('download')
   if (download === '1') {
-    const buffer = upload.storagePath
-      ? await readFile(upload.storagePath)
-      : Buffer.from(upload.contentBase64 ?? '', 'base64')
+    // 正文落盘后内存不留副本（见 handleUpload），下载一律从磁盘读回
+    const buffer = await readFile(upload.storagePath)
     res.writeHead(200, {
       ...headers,
       'Content-Type': upload.mimeType,
@@ -271,12 +275,10 @@ async function handleDownload(req, res, room, uploadId, query) {
     return
   }
 
-  // 落盘后内存里不保留 base64 副本（见 handleUpload），这里按需从磁盘读回。
-  // 只放在 `upload.contentBase64` 一处 —— 顶层曾经还有一份完全重复的副本，无人读取。
+  // 落盘后内存里不保留 base64 副本（见 handleUpload），这里从磁盘读回。
+  // 这是全仓**唯一**一处「正文 → base64」的产出路径。
   const summary = uploadSummary(upload)
-  summary.contentBase64 = upload.contentBase64 ?? (upload.storagePath
-    ? (await readFile(upload.storagePath)).toString('base64')
-    : null)
+  summary.contentBase64 = (await readFile(upload.storagePath)).toString('base64')
 
   return writeJson(res, 200, { upload: summary }, headers)
 }
@@ -465,7 +467,8 @@ const server = createServer(async (req, res) => {
     writeJson(res, 405, { error: 'Method not allowed' }, cors)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected error'
-    auditLog('request_error', { path: req.url, message })
+    // 只记 pathname：完整 req.url 会带上 SSE 一次性票据（虽然在 URL 里，但没必要落进日志）
+    auditLog('request_error', { path: String(req.url ?? '').split('?')[0], message })
 
     // HttpError 的 message 由本服务自行构造，可安全回传给客户端（400/413/507 等）
     if (error instanceof HttpError) {
@@ -500,6 +503,13 @@ if (!RELAY_TOKEN && !isLoopbackHost(HOST)) {
   console.error('[relay] 拒绝启动：未设置 RELAY_TOKEN 时仅允许监听回环地址（127.0.0.1 / localhost / ::1）。')
   console.error(`[relay] 当前 HOST=${HOST}。请在 .env 设置 RELAY_TOKEN，或将 HOST 改为回环地址用于本地调试。`)
   process.exit(1)
+}
+
+// 未配置 CORS 白名单时明确告知，避免「前端请求全被浏览器拦掉」被误诊为服务端故障。
+// 这是刻意的 fail-closed 默认值：公开写路径本就免凭据，默认放开跨源等于允许任意站点灌文件。
+if (ALLOWED_ORIGINS.length === 0) {
+  console.warn('[relay] 未配置 RELAY_ALLOWED_ORIGINS：不发送任何 CORS 头，跨源前端会被浏览器拦截。')
+  console.warn('[relay] 同源部署无需配置；前后端不同源时请显式白名单，例：RELAY_ALLOWED_ORIGINS=https://app.example.com')
 }
 
 await initStoredBytes()

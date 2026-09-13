@@ -16,9 +16,9 @@
               {{ fileStore.selectedFile.filenameValidation.message }}
             </p>
           </div>
-          <button @click="fileStore.clearSelection()"
-            class="shrink-0 rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
-            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <button type="button" aria-label="关闭文件预览" @click="fileStore.clearSelection()"
+            class="shrink-0 rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
@@ -30,11 +30,11 @@
           <div class="mb-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h3 class="text-sm font-medium text-gray-900">文件内容</h3>
             <div class="flex flex-wrap items-center gap-2">
-              <button @click="copyContent"
+              <button type="button" @click="copyContent"
                 class="rounded-md px-2 py-1 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:text-indigo-900">
                 复制内容
               </button>
-              <button v-if="collectionItem" @click="markAsCollected"
+              <button v-if="collectionItem" type="button" @click="markAsCollected"
                 class="rounded-md px-2 py-1 text-sm font-medium text-green-600 hover:bg-green-50 hover:text-green-900"
                 :disabled="collectionItem.status === 'collected'">
                 {{ collectionItem.status === 'collected' ? '已收集' : '标记为已收集' }}
@@ -60,23 +60,25 @@
           <div class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div class="grid gap-3 sm:grid-cols-2 flex-1">
               <div>
-                <label class="block text-xs font-medium text-gray-500 mb-1">Relay 地址</label>
-                <input v-model="relayUploadBaseUrl" type="url"
-                  class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                <label for="relay-upload-base-url" class="block text-xs font-medium text-gray-500 mb-1">Relay 地址</label>
+                <input id="relay-upload-base-url" v-model="relayUploadBaseUrl" type="url" autocomplete="off"
+                  spellcheck="false"
+                  class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus-visible:border-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/20"
                   placeholder="http://127.0.0.1:8787">
               </div>
               <div>
-                <label class="block text-xs font-medium text-gray-500 mb-1">房间 ID</label>
-                <input v-model="relayUploadRoomId" type="text"
-                  class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                  placeholder="由接收端提供的房间号">
+                <label for="relay-upload-room-id" class="block text-xs font-medium text-gray-500 mb-1">房间 ID</label>
+                <input id="relay-upload-room-id" v-model="relayUploadRoomId" type="text" autocomplete="off"
+                  spellcheck="false"
+                  class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus-visible:border-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/20"
+                  placeholder="由接收端提供的房间号…">
                 <p v-if="roomIdHint" class="mt-1 text-xs text-amber-600">{{ roomIdHint }}</p>
               </div>
             </div>
 
-            <button @click="uploadSelectedFileToRelay" :disabled="isRelayUploading"
+            <button type="button" @click="uploadSelectedFileToRelay" :disabled="isRelayUploading"
               class="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto">
-              {{ isRelayUploading ? '上传中' : 'HTTP 上传到 Relay' }}
+              {{ isRelayUploading ? '上传中…' : 'HTTP 上传到 Relay' }}
             </button>
           </div>
 
@@ -84,7 +86,7 @@
             通过标准 HTTP `POST` 把当前文件发送到 Relay Server，接收端长连接会自动收到这次上传。
             房间需由接收端先创建；发送方无需持有任何密钥。
           </p>
-          <p v-if="relayUploadMessage" class="mt-2 text-sm"
+          <p v-if="relayUploadMessage" role="status" aria-live="polite" class="mt-2 text-sm"
             :class="relayUploadError ? 'text-red-600' : 'text-green-600'">
             {{ relayUploadMessage }}
           </p>
@@ -132,8 +134,11 @@ const MAX_ENVELOPE_TEXT_BYTES = 256 * 1024
 /** 按 UTF-8 字节截断正文；`stream: true` 让不完整的多字节序列被丢弃而不是变成乱码 */
 const truncateEnvelopeText = (value: string) => {
   const bytes = new TextEncoder().encode(value)
-  if (bytes.length <= MAX_ENVELOPE_TEXT_BYTES) return value
-  return new TextDecoder('utf-8').decode(bytes.subarray(0, MAX_ENVELOPE_TEXT_BYTES), { stream: true })
+  if (bytes.length <= MAX_ENVELOPE_TEXT_BYTES) return { text: value, truncated: false }
+  return {
+    text: new TextDecoder('utf-8').decode(bytes.subarray(0, MAX_ENVELOPE_TEXT_BYTES), { stream: true }),
+    truncated: true
+  }
 }
 
 const collectionItem = computed(() => {
@@ -186,7 +191,7 @@ const uploadSelectedFileToRelay = async () => {
   try {
     isRelayUploading.value = true
     relayUploadError.value = false
-    relayUploadMessage.value = '正在通过 HTTP 上传到 Relay...'
+    relayUploadMessage.value = '正在通过 HTTP 上传到 Relay…'
 
     const selectedFile = fileStore.selectedFile
 
@@ -201,7 +206,11 @@ const uploadSelectedFileToRelay = async () => {
     // 附上已提取的正文（如 docx），接收端无需自行解压即可预览。
     // 按字节截断：信封同时装 contentBase64 与 text，正文过大就会顶穿服务端的请求体上限。
     if (selectedFile.metadata.isExtractedText) {
-      envelope.text = truncateEnvelopeText(selectedFile.content)
+      const { text, truncated } = truncateEnvelopeText(selectedFile.content)
+      envelope.text = text
+      // 客户端截断必须上报：服务端的 textTruncated 只反映它自己那 1MB 的截断，
+      // 不报的话 256KB–1MB 区间两端都不会给用户任何提示（内容被静默丢掉）
+      if (truncated) envelope.textTruncatedByClient = true
     }
 
     // 发送方（学生）不持有接收端管理密钥：房间 ID 本身即能力凭据，故不发送 Authorization

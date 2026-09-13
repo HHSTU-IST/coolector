@@ -21,8 +21,9 @@ services:
       PORT: 8787
       HOST: 0.0.0.0
       RELAY_TOKEN: ${RELAY_TOKEN:-}
-      # 公网务必收窄为前端域名（如 https://app.example.com），不要留 `*`
-      RELAY_ALLOWED_ORIGINS: "${RELAY_ALLOWED_ORIGINS:-*}"
+      # 未设置 = **不发任何 CORS 头**（拒绝所有跨源前端）；公网部署必须显式填前端域名，
+      # 例：RELAY_ALLOWED_ORIGINS=https://app.example.com（`*` 只适合本机/内网使用）
+      RELAY_ALLOWED_ORIGINS: "${RELAY_ALLOWED_ORIGINS:-}"
       # 对外 URL 基址。留空（推荐）= 只输出相对路径，由接收端按它填写的 Relay 地址解析，
       # 反代 HTTPS 部署同样适用。服务端**不会**从 Host / x-forwarded-* 推断自身地址
       # （那会让无凭据的发送方用伪造 Host 把接收端的管理密钥引向攻击者域）。

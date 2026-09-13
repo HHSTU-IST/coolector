@@ -16,7 +16,7 @@
               :class="statusBadgeClass">
               {{ statusLabel }}
             </span>
-            <p class="text-xs text-gray-500 mt-2">{{ statusMessage }}</p>
+            <p class="text-xs text-gray-500 mt-2" aria-live="polite">{{ statusMessage }}</p>
           </div>
         </div>
       </div>
@@ -24,29 +24,29 @@
       <div class="grid gap-5 p-4 sm:p-6 lg:grid-cols-[1.2fr_0.8fr] lg:gap-6">
         <form class="space-y-4" @submit.prevent="() => connect()">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Relay 地址</label>
-            <input v-model="relayBaseUrl" type="url"
-              class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+            <label for="relay-base-url" class="block text-sm font-medium text-gray-700 mb-2">Relay 地址</label>
+            <input id="relay-base-url" v-model="relayBaseUrl" type="url" autocomplete="off" spellcheck="false"
+              class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus-visible:border-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/20"
               placeholder="http://127.0.0.1:8787">
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">
+            <label for="relay-token" class="block text-sm font-medium text-gray-700 mb-2">
               接收端密钥 <span class="font-normal text-gray-400">（可选）</span>
             </label>
-            <input v-model="relayToken" type="password" autocomplete="off" spellcheck="false"
-              class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-              placeholder="Relay 的 RELAY_TOKEN，仅保存在本机浏览器">
+            <input id="relay-token" v-model="relayToken" type="password" autocomplete="off" spellcheck="false"
+              class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus-visible:border-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/20"
+              placeholder="Relay 的 RELAY_TOKEN，仅保存在本机浏览器…">
             <p class="mt-1 text-xs text-gray-500">
               密钥不再随页面分发，只保存在本机 localStorage。若 Relay 未配置 RELAY_TOKEN 可留空。
             </p>
           </div>
 
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">房间 ID</label>
-            <input v-model="roomId" type="text"
-              class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-              placeholder="留空则由服务端生成随机房间号">
+            <label for="relay-room-id" class="block text-sm font-medium text-gray-700 mb-2">房间 ID</label>
+            <input id="relay-room-id" v-model="roomId" type="text" autocomplete="off" spellcheck="false"
+              class="w-full rounded-lg border border-gray-300 px-4 py-2 text-sm focus-visible:border-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/20"
+              placeholder="留空则由服务端生成随机房间号…">
             <p v-if="roomIdHint" class="mt-1 text-xs text-amber-600">{{ roomIdHint }}</p>
           </div>
 
@@ -72,7 +72,7 @@
 
         <div class="space-y-4">
           <div class="rounded-xl border border-gray-200 p-4">
-            <div class="grid grid-cols-2 gap-3 text-sm">
+            <div class="grid grid-cols-2 gap-3 text-sm tabular-nums">
               <div>
                 <p class="text-gray-500">房间</p>
                 <p class="font-medium text-gray-900 truncate">{{ roomState?.roomId ?? '未连接' }}</p>

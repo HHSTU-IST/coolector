@@ -15,6 +15,7 @@ import {
   relayToken,
   resolveRelayUrl,
   UntrustedRelayUrlError,
+  validateRelayUrl,
   validateRoomId,
   withAuth
 } from '../utils/relay'
@@ -127,15 +128,6 @@ export function useRelayReceiver() {
    * 解析；绝对 URL 还必须同源，否则拒绝。理由见 relay.ts 的 resolveRelayUrl。
    */
   const toRelayRequestUrl = (target: string) => resolveRelayUrl(target, relayBaseUrl.value)
-
-  /** 尽力解析为绝对地址；解析失败（跨源/畸形）时保留原值 —— 用于纯展示字段，不该阻断入库 */
-  const safeResolveRelayUrl = (target: string) => {
-    try {
-      return toRelayRequestUrl(target)
-    } catch {
-      return target
-    }
-  }
 
   const refreshRoomState = async () => {
     if (!stateUrl.value) return
@@ -274,9 +266,8 @@ export function useRelayReceiver() {
       type: upload.mimeType,
       lastModified: upload.lastModified,
       roomId,
-      uploadId: upload.id,
-      // 服务端默认返回相对路径，入库前解析成绝对地址，避免下游把它当 URL 直接用
-      downloadUrl: safeResolveRelayUrl(upload.downloadUrl)
+      // 刻意不落 downloadUrl：全前端只写不读，留着只会给未来留一条绕过同源校验的路径
+      uploadId: upload.id
     })
 
     const collectionItem = file.filenameValidation.isValid
@@ -346,6 +337,13 @@ export function useRelayReceiver() {
 
     try {
       const baseUrl = normalizeRelayUrl(relayBaseUrl.value)
+      // 手填地址同样要校验：`relay.example.com` 这类无 scheme 的值会被当成页面相对路径，
+      // 静默把请求打到静态站自己身上（构建期变量已在 relay.ts 模块加载期校验）
+      const relayUrlError = validateRelayUrl(baseUrl)
+      if (relayUrlError) {
+        throw new Error(relayUrlError)
+      }
+
       const targetRoomId = roomId.value.trim()
       const roomIdError = validateRoomId(targetRoomId, { allowEmpty: true })
 

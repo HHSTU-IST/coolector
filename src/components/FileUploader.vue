@@ -2,24 +2,27 @@
   <div class="w-full">
     <div
       class="rounded-lg border-2 border-dashed border-gray-300 p-5 text-center transition-colors hover:border-gray-400 sm:p-8">
-      <div class="cursor-pointer" @click="triggerFileInput" @drop.prevent="handleDrop" @dragover.prevent
-        @dragleave.prevent>
-        <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
+      <!-- 用真正的 button：点击与键盘（Enter/Space）都能触发，同时接受拖放 -->
+      <button type="button"
+        class="w-full cursor-pointer rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40"
+        @click="triggerFileInput" @drop.prevent="handleDrop" @dragover.prevent @dragleave.prevent>
+        <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48"
+          aria-hidden="true">
           <path
             d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
-        <p class="mt-2 text-sm text-gray-600">
+        <span class="mt-2 block text-sm text-gray-600">
           <span class="font-medium text-indigo-600 hover:text-indigo-500">
             点击上传文件
           </span>
           或拖拽文件到此处
-        </p>
-        <p class="text-xs text-gray-500 mt-1">
+        </span>
+        <span class="text-xs text-gray-500 mt-1 block">
           支持文本文件与 .docx 文档
-        </p>
-        <input ref="fileInput" type="file" multiple class="hidden" @click.stop @change="handleFileSelect">
-      </div>
+        </span>
+      </button>
+      <input ref="fileInput" type="file" multiple class="hidden" @change="handleFileSelect">
     </div>
 
     <!-- 文件名校验 -->
@@ -35,8 +38,9 @@
           RegExp
         </span>
       </div>
-      <input v-model="filenamePatternInput" type="text"
-        class="mt-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+      <input v-model="filenamePatternInput" type="text" aria-label="文件名范式（正则表达式）" autocomplete="off"
+        spellcheck="false"
+        class="mt-3 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono focus-visible:border-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/20"
         placeholder="^.+\\.(md|ipynb|docx)$" @input="handleFilenamePatternChange">
       <p class="mt-2 text-xs" :class="fileStore.filenamePatternError ? 'text-red-600' : 'text-gray-500'">
         {{ fileStore.filenamePatternError || '示例：^\\d{8}-.+\\.(md|ipynb|docx)$ 可要求文件名以 8 位学号开头。' }}
@@ -90,21 +94,24 @@
       <h3 class="text-lg font-medium text-gray-900 mb-4">收集名单</h3>
       <div
         class="rounded-lg border-2 border-dashed border-blue-300 p-5 text-center transition-colors hover:border-blue-400 sm:p-6">
-        <div class="cursor-pointer" @click="triggerCollectionInput" @drop.prevent="handleCollectionDrop"
+        <button type="button"
+          class="w-full cursor-pointer rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+          @click="triggerCollectionInput" @drop.prevent="handleCollectionDrop"
           @dragover.prevent @dragleave.prevent>
-          <svg class="mx-auto h-10 w-10 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="mx-auto h-10 w-10 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"
+            aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
-          <p class="mt-2 text-sm text-gray-600">
+          <span class="mt-2 block text-sm text-gray-600">
             <span class="font-medium text-blue-600 hover:text-blue-500">
               上传收集名单
             </span>
             (每行一个文件名)
-          </p>
-          <input ref="collectionInput" type="file" class="hidden" @click.stop @change="handleCollectionSelect"
-            accept=".txt,.csv,.list">
-        </div>
+          </span>
+        </button>
+        <input ref="collectionInput" type="file" class="hidden" @change="handleCollectionSelect"
+          accept=".txt,.csv,.list">
       </div>
     </div>
   </div>

@@ -19,7 +19,6 @@ export interface FileInfo {
     source: 'local' | 'relay'
     relayRoomId?: string
     relayUploadId?: string
-    downloadUrl?: string
     receivedAt?: Date
 }
 
@@ -298,7 +297,6 @@ export const useFileStore = defineStore('file', () => {
         lastModified: string | Date
         roomId: string
         uploadId: string
-        downloadUrl?: string
     }) => {
         const existing = files.value.find(item => item.relayUploadId === file.uploadId)
         const normalizedLastModified = file.lastModified instanceof Date ? file.lastModified : new Date(file.lastModified)
@@ -325,7 +323,6 @@ export const useFileStore = defineStore('file', () => {
             existing.source = 'relay'
             existing.relayRoomId = file.roomId
             existing.relayUploadId = file.uploadId
-            existing.downloadUrl = file.downloadUrl
             existing.receivedAt = receivedAt
             return existing
         }
@@ -351,7 +348,6 @@ export const useFileStore = defineStore('file', () => {
             source: 'relay',
             relayRoomId: file.roomId,
             relayUploadId: file.uploadId,
-            downloadUrl: file.downloadUrl,
             receivedAt
         }
 

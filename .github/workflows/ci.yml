@@ -43,11 +43,18 @@ jobs:
 
       - name: Build project
         run: pnpm build
+        env:
+          # canary：**公开的**非密钥值，只为让密钥守卫有可核对的目标。
+          # 构建与守卫必须注入同一个值 —— 若有人把 `VITE_RELAY_TOKEN` 之类的构建期读取
+          # 加回来，Vite 会把这个值内联进 dist/，守卫随即在产物里命中并失败。
+          VITE_RELAY_TOKEN: coolector-canary-${{ github.run_id }}-${{ github.run_attempt }}
 
       # 前端产物是公开的：一旦有人把密钥经 VITE_* 注入，产物里就会带上明文。
-      # 这条断言让「产物不含密钥」变成 CI 的可执行门禁。
+      # 这条断言让「产物不含密钥」变成 CI 的可执行门禁（无可核对密钥时 fail-closed）。
       - name: Guard against secret leakage in build output
         run: pnpm guard:no-secret
+        env:
+          VITE_RELAY_TOKEN: coolector-canary-${{ github.run_id }}-${{ github.run_attempt }}
 
       # 真实浏览器回归：curl 不会做请求头的 ISO-8859-1 校验，
       # 因此中文文件名让 fetch 在出网前抛 TypeError 这类缺陷只能靠浏览器发现。

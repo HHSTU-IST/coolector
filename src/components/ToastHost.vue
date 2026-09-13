@@ -6,7 +6,9 @@ const toasts = useToasts()
 
 <template>
     <Teleport to="body">
-        <div class="pointer-events-none fixed inset-x-0 top-4 z-50 flex flex-col items-center gap-2 px-4">
+        <!-- role=status + aria-live：Toast 是纯视觉反馈，屏幕阅读器需要被主动告知 -->
+        <div role="status" aria-live="polite"
+            class="pointer-events-none fixed inset-x-0 top-4 z-50 flex flex-col items-center gap-2 px-4">
             <div
                 v-for="item in toasts"
                 :key="item.id"

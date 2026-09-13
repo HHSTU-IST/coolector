@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRelayUrl, resolveRelayUrl, UntrustedRelayUrlError } from './relay'
+import { normalizeRelayUrl, resolveRelayUrl, UntrustedRelayUrlError, validateRelayUrl } from './relay'
 
 const BASE = 'http://127.0.0.1:8787'
 
@@ -53,5 +53,31 @@ describe('resolveRelayUrl', () => {
 describe('normalizeRelayUrl', () => {
   it('去掉首尾空白与尾部斜杠', () => {
     expect(normalizeRelayUrl('  http://a.example//  ')).toBe('http://a.example')
+  })
+
+  it('剥离查询串与 hash —— 否则后续拼接的路径会被吞进 query', () => {
+    expect(normalizeRelayUrl('https://a.example/relay?x=1#y')).toBe('https://a.example/relay')
+    expect(normalizeRelayUrl('https://a.example/?x=1')).toBe('https://a.example')
+  })
+})
+
+/**
+ * 构建期注入的 `VITE_RELAY_URL` 没有任何运行期输入校验兜底，因此这里锁死它的合法形态。
+ * 两类「凭据打错地方」的值必须被拒绝：协议相对地址（外部主机）、无 scheme 的裸域名
+ * （会被当成页面相对路径，静默打到静态站自己身上）。
+ */
+describe('validateRelayUrl', () => {
+  it('接受绝对 http(s) 地址与同源路径', () => {
+    expect(validateRelayUrl('https://relay.example.com')).toBe('')
+    expect(validateRelayUrl('http://127.0.0.1:8787')).toBe('')
+    expect(validateRelayUrl('/relay')).toBe('')
+  })
+
+  it('拒绝协议相对地址、裸域名、非 http(s) 协议与空值', () => {
+    expect(validateRelayUrl('//evil.example')).not.toBe('')
+    expect(validateRelayUrl('relay.example.com')).not.toBe('')
+    expect(validateRelayUrl('javascript:alert(1)')).not.toBe('')
+    expect(validateRelayUrl('data:text/html,x')).not.toBe('')
+    expect(validateRelayUrl('   ')).not.toBe('')
   })
 })

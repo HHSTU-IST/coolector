@@ -41,13 +41,19 @@ jobs:
                   # 前端连接 Relay 的绝对地址（Vite 构建期注入）。
                   # 在仓库 Settings → Secrets and variables → Actions → Variables 里配置。
                   VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}
-                  # ⚠️ 这里刻意不再注入任何密钥。
+                  # ⚠️ 这里刻意不再注入任何**真实**密钥。
                   # 前端产物发布在公开的 GitHub Pages 上，任何 VITE_* 变量都会被内联进 dist/
                   # 并被访问者从 JS 中提取。接收端密钥改由用户在界面上填写、存本机 localStorage；
                   # 发送方（学生）不需要密钥 —— 房间号本身就是能力凭据。
+                  #
+                  # 下面这个 canary 是**公开的、非密钥**的固定串，用途与 CI 相同：
+                  # 给守卫一个可核对的目标；若有人把构建期密钥读取加回来，产物里就会出现它。
+                  VITE_RELAY_TOKEN: coolector-canary-${{ github.run_id }}-${{ github.run_attempt }}
 
             - name: Guard against secret leakage in build output
               run: pnpm guard:no-secret
+              env:
+                  VITE_RELAY_TOKEN: coolector-canary-${{ github.run_id }}-${{ github.run_attempt }}
 
             - name: Setup Pages
               uses: actions/configure-pages@v6

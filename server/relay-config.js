@@ -55,8 +55,9 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR ?? fileURLToPath(new URL('./uploads', 
 // 设为非空后，除「发送方公开写」与 SSE 一次性票据外的 /api 请求必须携带 `Authorization: Bearer <token>`。
 const RELAY_TOKEN = process.env.RELAY_TOKEN ?? ''
 
-// 逗号分隔的白名单；`*` 表示任意来源。部署到公网时务必收窄。
-// 空串（如 docker-compose 的 ${VAR:-} 传入）在此归一为 `*`，避免白名单被误判为空导致 CORS 头缺失。
+// 逗号分隔的 CORS 白名单；`*` 表示任意来源（仅建议本机/内网用）。
+// **未配置 = 不发任何 CORS 头**（拒绝所有跨源前端），这是刻意的 fail-closed 默认值：
+// 公开写路径本来就免凭据，若再默认放开跨源，任意站点都能向已知房间号灌文件。
 const ALLOWED_ORIGINS = normalizeAllowedOrigins(process.env.RELAY_ALLOWED_ORIGINS)
 
 // 整个上传目录的磁盘配额硬上限。

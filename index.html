@@ -7,7 +7,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Coolector —— 轻量文件收集工作台，支持上传、校验、收集名单与 Relay 长连接。" />
   <meta name="theme-color" content="#f9fafb" />
-  <title>coolector</title>
+  <!-- 纵深防御：URL 里可能带 SSE 一次性票据，别让它跟着 Referer 外泄（托管侧再加 HSTS 等头） -->
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <title>Coolector —— 文件收集器</title>
 </head>
 
 <body>

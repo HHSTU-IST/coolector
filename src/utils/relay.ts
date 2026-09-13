@@ -1,7 +1,49 @@
 import { ref, watch } from 'vue'
 
-/** Relay 默认地址（可被构建期 VITE_RELAY_URL 覆盖；URL 不是密钥，可安全内联） */
-export const DEFAULT_RELAY_URL = import.meta.env.VITE_RELAY_URL ?? 'http://127.0.0.1:8787'
+/** 构建期未配置时的回落地址（本机/局域网开发用；公网部署必须显式配置 VITE_RELAY_URL） */
+const FALLBACK_RELAY_URL = 'http://127.0.0.1:8787'
+
+/**
+ * Relay 地址的合法形态：绝对 http(s) 地址，或**同源绝对路径**（如 dev 代理用的 `/relay`）。
+ *
+ * 刻意拒绝两类会让「凭据打错地方」的值：
+ * - `//evil.example` —— 协议相对地址，浏览器会把它解析成**外部主机**；
+ * - `relay.example.com`（无 scheme）—— 会被当成页面相对路径，请求静默打到静态站自己身上。
+ */
+const RELAY_URL_PATTERN = /^(https?:\/\/[^\s]+|\/(?!\/)[^\s]*)$/iu
+
+/** 归一 Relay 地址：去首尾空白、查询串 / hash 与尾部斜杠（查询串会把后续拼接的路径吞进 query） */
+export const normalizeRelayUrl = (value: string) =>
+  value.trim().replace(/[?#][\s\S]*$/u, '').replace(/\/+$/u, '')
+
+/** 校验 Relay 地址形态。合法返回空串，否则返回可直接展示的错误文案。 */
+export const validateRelayUrl = (value: string): string => {
+  const normalized = normalizeRelayUrl(value)
+  if (!normalized) return 'Relay 地址不能为空'
+  if (!RELAY_URL_PATTERN.test(normalized)) {
+    return 'Relay 地址必须是 http(s) 绝对地址（如 https://relay.example.com），或同源路径（如 /relay）'
+  }
+  return ''
+}
+
+/**
+ * 构建期注入的 Relay 地址（URL 不是密钥，可安全内联）。
+ *
+ * 构建期变量没有任何运行期输入校验兜底，因此在模块加载期就判定：形态不合法即**回落**到本机
+ * 默认值并报错 —— 否则一个畸形的 `VITE_RELAY_URL` 就会把接收端凭据送到错误的地方。
+ */
+export const DEFAULT_RELAY_URL = (() => {
+  const raw = (import.meta.env.VITE_RELAY_URL ?? '').trim()
+  if (!raw) return FALLBACK_RELAY_URL
+
+  const invalid = validateRelayUrl(raw)
+  if (invalid) {
+    console.error(`[relay] VITE_RELAY_URL 非法：${invalid}（收到 ${JSON.stringify(raw)}）；已回落到 ${FALLBACK_RELAY_URL}。`)
+    return FALLBACK_RELAY_URL
+  }
+
+  return normalizeRelayUrl(raw)
+})()
 
 /**
  * 接收端管理密钥的本地存储键。
@@ -12,10 +54,8 @@ export const DEFAULT_RELAY_URL = import.meta.env.VITE_RELAY_URL ?? 'http://127.0
  */
 const TOKEN_STORAGE_KEY = 'coolector.relay-token'
 
-/** 房间 ID 长度下限，与 server/relay-utils.js 的 ROOM_ID_MIN_LENGTH 保持一致 */
-export const ROOM_ID_MIN_LENGTH = 8
-
-export const normalizeRelayUrl = (value: string) => value.trim().replace(/\/+$/u, '')
+/** 房间 ID 长度下限，与 server/relay-utils.js 的 ROOM_ID_MIN_LENGTH 保持一致（仅本模块使用） */
+const ROOM_ID_MIN_LENGTH = 8
 
 /**
  * 服务端返回的地址不可信（跨源 / 畸形 / 为空）时抛出的错误。

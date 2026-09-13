@@ -38,13 +38,21 @@ describe('parsePublicBaseUrl', () => {
     expect(parsePublicBaseUrl('https://example.com/relay/')).toEqual({ ok: true, value: 'https://example.com/relay' })
   })
 
+  it('返回规范化后的 href —— 校验的串必须就是输出的串', () => {
+    expect(parsePublicBaseUrl('http://x/../y')).toEqual({ ok: true, value: 'http://x/y' })
+  })
+
   it.each([
     ['非 http(s) 协议', 'ftp://example.com'],
     ['不是 URL', 'example.com'],
     ['裸相对路径', '/relay'],
     ['带用户名密码', 'https://user:pass@example.com'],
     ['带查询串', 'https://example.com/?x=1'],
-    ['带 hash', 'https://example.com/#x']
+    ['带 hash', 'https://example.com/#x'],
+    // 尾随分隔符：解析出的 search / hash 是**空串**，只看解析结果会漏判，
+    // 而保留原样的 `.../relay?` 会拼出 `.../relay?/api/x`（路径被吞进 query）
+    ['尾随问号', 'https://example.com/relay?'],
+    ['尾随井号', 'https://example.com/relay#']
   ])('非法值 fail-closed：%s', (_label, raw) => {
     const result = parsePublicBaseUrl(raw)
     expect(result.ok).toBe(false)
@@ -303,10 +311,10 @@ describe('decodeHeaderValue', () => {
 })
 
 describe('normalizeAllowedOrigins', () => {
-  it('空串 / undefined 归一为 *', () => {
-    expect(normalizeAllowedOrigins('')).toEqual(['*'])
-    expect(normalizeAllowedOrigins(undefined)).toEqual(['*'])
-    expect(normalizeAllowedOrigins('   ')).toEqual(['*'])
+  it('未配置 / 空白 = 不给任何来源发 CORS 头（不再默认 *）', () => {
+    expect(normalizeAllowedOrigins('')).toEqual([])
+    expect(normalizeAllowedOrigins(undefined)).toEqual([])
+    expect(normalizeAllowedOrigins('   ')).toEqual([])
   })
 
   it('逗号分隔白名单', () => {
@@ -375,6 +383,12 @@ describe('makeCorsHeaders', () => {
     const headers = cors({ headers: { origin: 'https://ok.com' } })
     expect(headers['Access-Control-Allow-Origin']).toBe('https://ok.com')
     expect(headers.Vary).toBe('Origin')
+  })
+
+  it('空白名单（未配置）不给任何来源 —— 默认不放开跨源', () => {
+    const cors = makeCorsHeaders([])
+    expect(cors({ headers: { origin: 'https://x.com' } })).toEqual({})
+    expect(cors({ headers: {} })).toEqual({})
   })
 })
 

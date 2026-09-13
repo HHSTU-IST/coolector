@@ -5,11 +5,12 @@
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 class="text-xl font-semibold text-gray-900">收集状态</h2>
           <div class="flex flex-wrap items-center gap-3">
-            <span class="text-sm text-gray-500">
+            <span class="text-sm tabular-nums text-gray-500">
               进度: {{ progress.percentage }}%
             </span>
             <button
-              @click="collectionStore.clearCollection()"
+              type="button"
+              @click="clearCollection"
               class="text-red-600 hover:text-red-900 text-sm font-medium"
             >
               清空列表
@@ -19,7 +20,7 @@
 
         <!-- 进度条 -->
         <div class="mt-4">
-          <div class="mb-2 grid grid-cols-2 gap-2 text-sm text-gray-600 sm:flex sm:justify-between">
+          <div class="mb-2 grid grid-cols-2 gap-2 text-sm tabular-nums text-gray-600 sm:flex sm:justify-between">
             <span>总文件: {{ progress.total }}</span>
             <span>已收集: {{ progress.collected }}</span>
             <span>待收集: {{ progress.pending }}</span>
@@ -27,7 +28,7 @@
           </div>
           <div class="w-full bg-gray-200 rounded-full h-2">
             <div
-              class="bg-blue-600 h-2 rounded-full transition-all duration-300"
+              class="bg-blue-600 h-2 rounded-full transition-[width] duration-300"
               :style="{ width: progress.percentage + '%' }"
             ></div>
           </div>
@@ -87,6 +88,12 @@ import { useCollectionStore } from '../stores/collection'
 const collectionStore = useCollectionStore()
 
 const progress = computed(() => collectionStore.getProgress())
+
+/** 清空名单会丢掉用户刚导入的整份名单，属破坏性操作：先确认再执行 */
+const clearCollection = () => {
+  if (!window.confirm('确定清空收集名单？该操作无法撤销。')) return
+  collectionStore.clearCollection()
+}
 
 const getStatusText = (status: string) => {
   switch (status) {

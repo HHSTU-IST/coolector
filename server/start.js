@@ -115,7 +115,14 @@ if (existsSync('.env')) {
   relayArgs.unshift('--env-file=.env')
 }
 
+// 本机开发默认放行 localhost 前端：relay 的 CORS 默认「未配置 = 不给任何来源」，
+// 而 `pnpm start` 起的 vite 在另一个端口（跨源），不显式放行就会被浏览器拦掉。
+// 用户在自己的 .env 里配置了 RELAY_ALLOWED_ORIGINS 时以用户配置为准。
+const devAllowedOrigins = process.env.RELAY_ALLOWED_ORIGINS
+  ?? `http://localhost:${config.appPort},http://127.0.0.1:${config.appPort}`
+
 startProcess('relay server', 'node', relayArgs, {
   HOST: config.relayHost,
-  PORT: config.relayPort
+  PORT: config.relayPort,
+  RELAY_ALLOWED_ORIGINS: devAllowedOrigins
 })

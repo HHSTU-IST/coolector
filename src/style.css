@@ -33,16 +33,26 @@ input {
   font: inherit;
 }
 
+/* 消除移动端双击缩放带来的点击延迟 */
+button,
+a {
+  touch-action: manipulation;
+}
+
 #app {
   min-height: 100vh;
 }
 
-section[id] {
+/* 吸顶 header 会遮住锚点目标，所有锚点都留出与 header 等高的偏移 */
+section[id],
+#preview {
   scroll-margin-top: 128px;
 }
 
 @media (min-width: 640px) {
-  section[id] {
+
+  section[id],
+  #preview {
     scroll-margin-top: 96px;
   }
 }
@@ -53,5 +63,20 @@ section[id] {
   textarea,
   select {
     font-size: 16px;
+  }
+}
+
+/* 尊重系统的「减少动态效果」设置：关掉平滑滚动与过渡动画 */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

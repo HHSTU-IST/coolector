@@ -155,7 +155,9 @@ function uploadSummary(upload, { includeContent = true } = {}) {
     textTruncated: Boolean(upload.textTruncated),
     contentIncluded: includeContent,
     contentText: includeContent ? upload.text ?? null : null,
-    contentBase64: includeContent ? upload.contentBase64 : null,
+    // 正文不常驻内存（见 relay-server 的 handleUpload）：需要正文的端点自己从磁盘读回并覆盖本字段。
+    // 过去这里读的是 `upload.contentBase64` —— 一个**从未被赋值**的字段，两个调用方都还得再覆盖一次。
+    contentBase64: null,
     detailsUrl: relayUrl(detailsPath),
     downloadUrl: relayUrl(`${detailsPath}?download=1`),
     // 只暴露「是否已落盘」，不返回服务端存储文件名/相对路径，避免路径信息泄露
@@ -449,16 +451,10 @@ export {
   reserveUploadSlot,
   roomSnapshot,
   uploadSummary,
-  trimQueue,
   closeReceiver,
-  queueEvent,
   dispatchEvent,
-  ROOM_SENTINEL_FILENAME,
-  writeRoomSentinel,
-  readRoomSentinel,
   persistUpload,
   destroyRoom,
   cleanupRooms,
-  measureDirectoryBytes,
   initStoredBytes
 }
