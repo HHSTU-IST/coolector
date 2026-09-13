@@ -25,7 +25,7 @@ export function parsePositiveInt(raw, { fallback = 0, min = 1, max = Number.MAX_
 }
 
 /** MIME 类型 `type` / `subtype` 各自的长度上限（RFC 惯例），防止超长值撑爆响应头 */
-export const MAX_MIME_PART_LENGTH = 127
+const MAX_MIME_PART_LENGTH = 127
 
 /**
  * 清洗 MIME 类型：只保留标准的 `type/subtype`，丢掉参数与控制字符，并限制长度。
@@ -99,8 +99,8 @@ export function truncateUtf8(value, maxBytes) {
  * 下限设为 8（而非 4）是因为「发送方公开写」模型下房间 ID 本身就是能力凭据，
  * 过短的自定义 ID 极易被枚举。不传时由服务端生成完整 UUID。
  */
-export const ROOM_ID_MIN_LENGTH = 8
-export const ROOM_ID_MAX_LENGTH = 64
+const ROOM_ID_MIN_LENGTH = 8
+const ROOM_ID_MAX_LENGTH = 64
 
 export function sanitizeRoomId(roomId) {
   if (!roomId || typeof roomId !== 'string') return null

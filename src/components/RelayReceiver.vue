@@ -150,7 +150,6 @@ interface RelayUploadSummary {
   size: number
   uploadedAt: string
   lastModified: string
-  hasTextPreview: boolean
   previewText: string | null
   /** 正文是否因超过服务端 MAX_TEXT_BYTES 被截断 */
   textTruncated: boolean
@@ -159,7 +158,6 @@ interface RelayUploadSummary {
   contentBase64: string | null
   detailsUrl: string
   downloadUrl: string
-  serverStored: boolean
 }
 
 interface RelayEventEnvelope<T> {

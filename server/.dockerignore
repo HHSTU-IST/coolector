@@ -1,9 +1,0 @@
-node_modules
-dist
-dist-ssr
-.git
-.env
-.env.*
-server/uploads
-*.log
-coverage

@@ -282,7 +282,6 @@ function uploadSummary(upload, req, { includeContent = true } = {}) {
     size: upload.size,
     uploadedAt: upload.uploadedAt,
     lastModified: upload.lastModified,
-    hasTextPreview: Boolean(upload.previewText),
     previewText: upload.previewText ?? null,
     /** 正文是否因超过 MAX_TEXT_BYTES 被截断（前端据此提示用户） */
     textTruncated: Boolean(upload.textTruncated),
@@ -709,19 +708,13 @@ async function handleDownload(req, res, room, uploadId, query) {
   }
 
   // 落盘后内存里不保留 base64 副本（见 handleUpload），这里按需从磁盘读回。
-  // 契约不变：details 端点仍然返回 contentBase64。
-  const storedBase64 = upload.contentBase64 ?? (upload.storagePath
+  // 只放在 `upload.contentBase64` 一处 —— 顶层曾经还有一份完全重复的副本，无人读取。
+  const summary = uploadSummary(upload, req)
+  summary.contentBase64 = upload.contentBase64 ?? (upload.storagePath
     ? (await readFile(upload.storagePath)).toString('base64')
     : null)
 
-  const summary = uploadSummary(upload, req)
-  summary.contentBase64 = storedBase64
-
-  return writeJson(res, 200, {
-    upload: summary,
-    text: upload.previewText,
-    contentBase64: storedBase64
-  }, headers)
+  return writeJson(res, 200, { upload: summary }, headers)
 }
 
 function handleEvents(req, res, room) {

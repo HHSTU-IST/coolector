@@ -798,8 +798,9 @@ describe('details 端点契约', () => {
     const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
     const details = await (await fetch(state.uploads[0].detailsUrl, { headers: authHeaders })).json()
 
-    expect(Buffer.from(details.contentBase64, 'base64').toString('utf8')).toBe(content)
+    // 只保留 `upload.contentBase64` 一处（顶层重复副本已删除）
     expect(Buffer.from(details.upload.contentBase64, 'base64').toString('utf8')).toBe(content)
+    expect(details.contentBase64).toBeUndefined()
   })
 
   it('房间目录写入归属标记（供启动回收判定）', async () => {
