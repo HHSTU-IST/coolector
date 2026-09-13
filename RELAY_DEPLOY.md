@@ -17,29 +17,23 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 
 ## 2. 环境变量
 
-| 变量                                      | 默认值                                                                | 说明                                                                                                                                                                                   |
-| ----------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`                                    | `8787`                                                                | 监听端口                                                                                                                                                                               |
-| `HOST`                                    | `0.0.0.0`                                                             | 监听地址，容器内/公网用 `0.0.0.0`。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed）                                                                                            |
-| `RELAY_TOKEN`                             | 空（关闭）                                                            | 接收端管理密钥。设为非空后，除「发送方公开写」与 SSE 一次性票据外的所有 `/api` 请求需带 `Authorization: Bearer <token>`。**公网必填**                                                  |
-| `RELAY_ALLOWED_ORIGINS`                   | `*`                                                                   | 逗号分隔的 CORS 白名单；`*` 表示任意。**公网务必收窄**为前端域名                                                                                                                       |
-| `MAX_FILE_BYTES`                          | `10485760` (10MB)                                                     | **单个文件解码后的体积上限**，与前端 `MAX_FILE_SIZE` 对齐                                                                                                                              |
-| `MAX_TEXT_BYTES`                          | `1048576` (1MB)                                                       | 信封 `text` 字段（docx 提取正文）上限，超出即截断并标记 `textTruncated`（不低于 256KB）                                                                                                |
-| `MAX_BODY_BYTES`                          | 由 `MAX_FILE_BYTES` 派生（×4/3 + `MAX_TEXT_BYTES` + 128KB ≈ 15.16MB） | HTTP 请求体上限。**必须同时算上 base64 膨胀与 `text`**，否则带提取正文的 docx 有效上限会掉到约 8.55MB                                                                                  |
-| `MAX_TOTAL_UPLOAD_BYTES`                  | `1073741824` (1GB)                                                    | 上传目录全局磁盘配额，超出返回 **507**                                                                                                                                                 |
-| `MAX_ROOM_UPLOAD_BYTES`                   | 全局的 1/8（`134217728`，128MB）                                      | **单房间**配额。免凭据的发送方只能填满自己那个房间，不会让全站一起 507。计费口径为「正文 + 元数据 + 文本字段」，文本类文件约为文件大小的 2 倍                                            |
-| `MAX_ROOM_UPLOADS`                        | `500`                                                                 | 单房间上传条数上限（即使全是 0 字节文件也不能无限增长）                                                                                                                                 |
-| `MAX_UPLOAD_NAME_BYTES`                   | `255`                                                                 | 上传文件名上限（字节），超出即截断并尽量保留扩展名                                                                                                                                     |
-| `ROOM_TTL_MS`                             | `21600000` (6h)                                                       | 房间空闲存活时间（上传会刷新）                                                                                                                                                         |
-| `ROOM_MAX_LIFETIME_MS`                    | `86400000` (24h)                                                      | 房间绝对存活上限。**不豁免已连接的接收端** —— 否则持一条 SSE 就能永久钉住房间与配额                                                                                                     |
-| `ROOM_CLEANUP_INTERVAL_MS`                | `1800000` (30min)                                                     | 房间清理扫描周期                                                                                                                                                                       |
-| `RELAY_KEEP_ORPHAN_UPLOADS`               | `false`                                                               | 启动时是否保留「无主上传目录」。默认**回收**：房间只存在于内存，重启后磁盘上的文件已无法通过任何 HTTP 路径访问，却会被永久计入配额。回收**只针对带归属标记的目录**（见下），无标记目录一律不删 |
-| `MAX_QUEUE_EVENTS`                        | `200`                                                                 | 房间离线事件队列上限                                                                                                                                                                   |
-| `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX` | `60000` / `120`                                                       | 按来源 IP 的固定窗口**请求计数**限流。反向代理后计数退化为代理 IP，属尽力而为                                                                                                          |
-| `MAX_UPLOAD_BYTES_PER_WINDOW`             | `268435456` (256MB，`0` 关闭)                                         | 按来源 IP 的固定窗口**写入字节数**限流，与请求计数互补                                                                                                                                 |
-| `STREAM_TICKET_TTL_MS`                    | `60000`                                                               | SSE 一次性票据有效期；接收端先用 `POST /api/rooms/:roomId/stream-ticket` 换票，票据与房间绑定、用后即焚                                                                                |
-| `RELAY_TRUST_PROXY`                       | `false`                                                               | 仅当处于可信反向代理后才设 `true`，此时才采信 `x-forwarded-proto` / `x-forwarded-host`。**HTTPS 反代必开**，否则回调地址是 `http://`，浏览器会拦截混合内容（SSE 与按需拉正文同时失效） |
-| `UPLOAD_DIR`                              | `./server/uploads`                                                    | 上传落盘目录，**生产务必挂持久卷**                                                                                                                                                     |
+> **完整清单以 [`.env.example`](./.env.example) 为唯一权威**（含默认值与逐项说明）。
+> 这里只列部署时**必须当面确认**的几个，其余按默认值走即可。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `RELAY_TOKEN` | 空（关闭） | 接收端管理密钥。设为非空后，除「发送方公开写」与 SSE 一次性票据外的所有 `/api` 请求需带 `Authorization: Bearer <token>`。**公网必填** |
+| `HOST` | `0.0.0.0` | 监听地址。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed） |
+| `RELAY_ALLOWED_ORIGINS` | `*` | CORS 白名单。**公网务必收窄**为前端域名 |
+| `RELAY_TRUST_PROXY` | `false` | **HTTPS 反代必开**，否则回调地址是 `http://`，浏览器会拦截混合内容（SSE 与按需拉正文同时失效） |
+| `UPLOAD_DIR` | `./server/uploads` | 上传落盘目录，**生产务必挂持久卷** |
+| `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB) | 全局磁盘配额，超出返回 **507** |
+| `MAX_ROOM_UPLOAD_BYTES` | 全局的 1/8（128MB） | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明） |
+
+配额、体积、限流、生命周期等调优项（`MAX_FILE_BYTES` / `MAX_TEXT_BYTES` / `MAX_BODY_BYTES` /
+`MAX_ROOM_UPLOADS` / `MAX_UPLOAD_NAME_BYTES` / `ROOM_TTL_MS` / `ROOM_MAX_LIFETIME_MS` /
+`ROOM_CLEANUP_INTERVAL_MS` / `RELAY_KEEP_ORPHAN_UPLOADS` / `MAX_QUEUE_EVENTS` /
+`RATE_LIMIT_*` / `MAX_UPLOAD_BYTES_PER_WINDOW` / `STREAM_TICKET_TTL_MS`）见 `.env.example`。
 
 所有变量均可选；未设置时走默认值。
 

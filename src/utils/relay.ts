@@ -48,33 +48,27 @@ export const withAuth = (headers: Record<string, string> = {}): Record<string, s
 
 /**
  * 校验房间 ID 格式。合法返回空串，否则返回可直接展示的错误文案。
- * 采用与 `server/relay-utils.js` 的 `sanitizeRoomId` 相同的规则，避免前端放行、服务端 400。
+ * 只需覆盖「明显写错」的情况做即时反馈；上界与字符集的权威判定在服务端的 `sanitizeRoomId`。
  * `allowEmpty` 为 true 时把空值视为「由服务端生成 UUID」而非错误。
  */
 export const validateRoomId = (value: string, { allowEmpty = false } = {}): string => {
   const id = value.trim()
   if (!id) return allowEmpty ? '' : '房间 ID 不能为空'
   if (id.length < ROOM_ID_MIN_LENGTH) return `房间 ID 至少 ${ROOM_ID_MIN_LENGTH} 位（过短易被猜到）`
-  if (id.length > 64) return '房间 ID 不能超过 64 位'
   if (!/^[a-zA-Z0-9_-]+$/u.test(id)) return '房间 ID 只能包含字母、数字、下划线与连字符'
   return ''
 }
 
-/**
- * 房间 ID 是否易被猜到（弱）。仅用于提示，不阻断 —— 班级场景可能确有固定命名约定。
- * 与服务端 `isWeakRoomId` 判定口径一致。
- */
-const WEAK_ROOM_IDS = new Set([
-  'demo-room', 'demo-room-1', 'test-room', 'default-room', 'sample-room',
-  'classroom', 'my-room', 'coolector', 'homework', 'assignment'
-])
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
 
-export const isWeakRoomId = (value: string): boolean => {
+/**
+ * 房间号是否「看起来不是随机生成的」—— 只做 UUID 形态判断，用于发送方的**非阻断提示**。
+ *
+ * 注意这里**刻意不再维护弱名清单**：判定「弱房间号」是服务端的职责（建房响应里带
+ * `weakRoomId`），前端复刻一份清单只会随时间与服务端脱节。
+ */
+export const looksWeakRoomId = (value: string): boolean => {
   const id = value.trim()
   if (!id) return true
-  if (WEAK_ROOM_IDS.has(id.toLowerCase())) return true
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(id)) return false
-
-  const classes = [/[a-z]/u, /[A-Z]/u, /[0-9]/u, /[_-]/u].filter((re) => re.test(id)).length
-  return classes < 2 || id.length < 12
+  return !UUID_PATTERN.test(id)
 }

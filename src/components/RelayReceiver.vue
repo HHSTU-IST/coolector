@@ -125,9 +125,10 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { useCollectionStore } from '../stores/collection'
 import { useFileStore } from '../stores/file'
 import { formatFileSize } from '../utils/format'
+import { binaryPlaceholder } from '../utils/relay-content'
 import {
   DEFAULT_RELAY_URL,
-  isWeakRoomId,
+  looksWeakRoomId,
   normalizeRelayUrl,
   relayToken,
   validateRoomId,
@@ -137,6 +138,8 @@ import {
 interface RelayRoomResponse {
   roomId: string
   createdAt: string
+  /** 服务端对该房间号的「偏弱」判定（权威） */
+  weakRoomId: boolean
   streamUrl: string
   streamTicketUrl: string
   uploadUrl: string
@@ -206,11 +209,22 @@ const relayBaseUrl = ref(DEFAULT_RELAY_URL)
 // 留空由服务端生成完整 UUID 房间号 —— 发送方公开写模型下房间号即能力凭据，默认值不能硬编码
 const roomId = ref('')
 
-/** 房间号偏弱时给出非阻断提示（房间号需分享给发送方，过易猜可能被灌入文件） */
+/** 服务端对当前房间号的「偏弱」判定；连接成功后才有值 */
+const serverWeakRoomId = ref<boolean | null>(null)
+
+/**
+ * 房间号偏弱时提示。
+ * 连接后用服务端的权威判定（它维护弱名清单），未连接时退化为「是否 UUID 形态」的启发式 ——
+ * 前端**不再复刻**一份弱名清单，避免与服务端脱节。
+ */
 const roomIdHint = computed(() => {
-  const id = roomId.value.trim()
-  if (!id || !isWeakRoomId(id)) return ''
-  return '该房间号较容易被猜到，建议留空让服务端生成随机房间号'
+  if (serverWeakRoomId.value === true) {
+    return '服务端判定该房间号偏弱，建议留空让服务端生成随机房间号'
+  }
+
+  const typed = roomId.value.trim()
+  if (!typed || !looksWeakRoomId(typed)) return ''
+  return '该房间号看起来不是随机生成，建议留空让服务端生成'
 })
 
 /** 本房间配额使用率（0–1），用于接近上限时把数字标红 */
@@ -374,15 +388,8 @@ const decodeRelayContent = (upload: RelayUploadSummary) => {
     return upload.previewText
   }
 
-  return binaryPlaceholder(upload.name)
+  return binaryPlaceholder(upload.name, '已接收')
 }
-
-/**
- * 二进制文件在接收端的占位文案，与本地文件路径（src/stores/file.ts）保持同一措辞。
- * 过去这里会对 contentBase64 做 atob，得到一串不可打印字符并直接渲染成乱码。
- */
-const binaryPlaceholder = (fileName: string) =>
-  `此文件为二进制格式（${fileName}），已接收但暂不支持内容预览。`
 
 /** 是否拿到了可读文本；决定 FileViewer 以等宽字体还是普通字体渲染 */
 const hasReadableText = (upload: RelayUploadSummary) =>
@@ -406,69 +413,52 @@ const fetchUploadDetails = async (upload: RelayUploadSummary): Promise<RelayUplo
   return payload.upload
 }
 
+/**
+ * 把一条上传落进本地文件列表并同步收集状态。
+ * 过去成功分支与失败分支各抄了一遍这段逻辑（约 20 行 ×2），改一处极易漏另一处。
+ */
+const ingestUpload = (upload: RelayUploadSummary, roomId: string) => {
+  const file = fileStore.upsertRelayFile({
+    name: upload.name,
+    content: decodeRelayContent(upload),
+    contentBase64: upload.contentBase64 ?? undefined,
+    hasTextContent: hasReadableText(upload),
+    size: upload.size,
+    type: upload.mimeType,
+    lastModified: upload.lastModified,
+    roomId,
+    uploadId: upload.id,
+    downloadUrl: upload.downloadUrl
+  })
+
+  const collectionItem = file.filenameValidation.isValid
+    ? collectionStore.checkFileStatus(file.name)
+    : null
+  if (collectionItem && collectionItem.status !== 'collected') {
+    collectionStore.updateItemStatus(collectionItem.id, 'collected')
+  }
+
+  if (!fileStore.selectedFile) {
+    fileStore.selectFile(file)
+  }
+
+  void refreshRoomState()
+}
+
 const handleUploadCreated = async (event: MessageEvent<string>) => {
   const payload = parseEvent<UploadCreatedData>(event)
-  const upload = payload.data.upload
+  const { upload, roomId: uploadRoomId } = payload.data
 
   try {
     const full = await fetchUploadDetails(upload)
-    const content = decodeRelayContent(full)
-    const file = fileStore.upsertRelayFile({
-      name: full.name,
-      content,
-      contentBase64: full.contentBase64 ?? undefined,
-      hasTextContent: hasReadableText(full),
-      size: full.size,
-      type: full.mimeType,
-      lastModified: full.lastModified,
-      roomId: payload.data.roomId,
-      uploadId: full.id,
-      downloadUrl: full.downloadUrl
-    })
-
-    const collectionItem = file.filenameValidation.isValid
-      ? collectionStore.checkFileStatus(file.name)
-      : null
-    if (collectionItem && collectionItem.status !== 'collected') {
-      collectionStore.updateItemStatus(collectionItem.id, 'collected')
-    }
-
-    if (!fileStore.selectedFile) {
-      fileStore.selectFile(file)
-    }
-
+    ingestUpload(full, uploadRoomId)
     pushEventLog(payload.type, `已接收 ${full.name}`, payload.createdAt)
     statusMessage.value = `已接收文件：${full.name}`
-    void refreshRoomState()
   } catch (error) {
-    const fallbackContent = decodeRelayContent(upload)
-    const file = fileStore.upsertRelayFile({
-      name: upload.name,
-      content: fallbackContent,
-      contentBase64: upload.contentBase64 ?? undefined,
-      hasTextContent: hasReadableText(upload),
-      size: upload.size,
-      type: upload.mimeType,
-      lastModified: upload.lastModified,
-      roomId: payload.data.roomId,
-      uploadId: upload.id,
-      downloadUrl: upload.downloadUrl
-    })
-
-    const collectionItem = file.filenameValidation.isValid
-      ? collectionStore.checkFileStatus(file.name)
-      : null
-    if (collectionItem && collectionItem.status !== 'collected') {
-      collectionStore.updateItemStatus(collectionItem.id, 'collected')
-    }
-
-    if (!fileStore.selectedFile) {
-      fileStore.selectFile(file)
-    }
-
+    // 正文拉取失败也要把文件落进列表（用 SSE 帧里带的元信息兜底），否则接收端会「少一个文件」
+    ingestUpload(upload, uploadRoomId)
     pushEventLog(payload.type, `接收成功，但正文拉取失败：${upload.name}`, payload.createdAt)
     statusMessage.value = error instanceof Error ? error.message : '正文不可用'
-    void refreshRoomState()
   }
 }
 
@@ -516,6 +506,7 @@ const connect = async (isReconnect = false) => {
     const room = await ensureRoom(baseUrl, targetRoomId)
     stateUrl.value = room.stateUrl
     roomId.value = room.roomId
+    serverWeakRoomId.value = room.weakRoomId ?? null
 
     await refreshRoomState()
 

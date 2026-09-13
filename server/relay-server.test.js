@@ -277,20 +277,27 @@ describe('relay HTTP 层', () => {
     expect(Buffer.byteLength(payload.upload.contentText, 'utf8')).toBeLessThanOrEqual(limit)
   })
 
-  it('畸形的 mimeType 被清洗，下载不再永久 400', async () => {
-    const room = await createRoom(relay.baseUrl, 'mime-clean-room')
+  it.each([
+    ['控制字符（防响应头注入）', 'text/plain\r\nX-Injected: 1', 'mime-case-inject'],
+    ['超长 subtype', `application/${'a'.repeat(200000)}`, 'mime-case-longsub'],
+    ['超长 type', `${'a'.repeat(200000)}/json`, 'mime-case-longtype']
+  ])('畸形 mimeType 被中和为 octet-stream 且该文件仍可下载：%s', async (_label, mimeType, roomId) => {
+    const room = await createRoom(relay.baseUrl, roomId)
 
     const upload = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
       method: 'POST',
       headers: ENVELOPE_HEADERS,
-      body: envelopeBody({ name: 'injected.md', mimeType: 'text/plain\r\nX-Injected: 1', content: 'hi' })
+      body: envelopeBody({ name: 'mime-case.md', mimeType, content: 'hi' })
     })
+
     expect(upload.status).toBe(201)
     const { upload: summary } = await upload.json()
     expect(summary.mimeType).toBe('application/octet-stream')
 
+    // 过去畸形/超长 mimeType 会让下载响应头非法或溢出，该文件永久不可下载
     const download = await fetch(summary.downloadUrl, { headers: authHeaders })
     expect(download.status).toBe(200)
+    expect(download.headers.get('content-type')).toBe('application/octet-stream')
     expect(download.headers.get('x-content-type-options')).toBe('nosniff')
   })
 }, 60000)
@@ -471,28 +478,6 @@ describe('元数据上限与配额计量', () => {
     expect(state.uploadCount).toBeLessThanOrEqual(3)
   })
 
-  it('超长 mimeType 被中和为 octet-stream，且该文件仍可下载', async () => {
-    const room = await createRoom(relay.baseUrl, 'metadata-room-4')
-
-    const upload = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
-      method: 'POST',
-      headers: ENVELOPE_HEADERS,
-      body: envelopeBody({
-        name: 'long-mime.md',
-        mimeType: `application/${'a'.repeat(200000)}`,
-        content: 'hi'
-      })
-    })
-
-    expect(upload.status).toBe(201)
-    const { upload: summary } = await upload.json()
-    expect(summary.mimeType).toBe('application/octet-stream')
-
-    // 过去超长 mimeType 会让下载响应头溢出，客户端连响应头都解析不了 → 永久不可下载
-    const download = await fetch(summary.downloadUrl, { headers: authHeaders })
-    expect(download.status).toBe(200)
-    expect(download.headers.get('content-type')).toBe('application/octet-stream')
-  })
 }, 60000)
 
 describe('配额并发安全', () => {
@@ -623,7 +608,7 @@ describe('房间生命周期', () => {
     expect(state.status).toBe(404)
 
     controller.abort()
-    await reader.cancel().catch(() => {})
+    await reader.cancel().catch(() => { })
   }, 20000)
 }, 60000)
 

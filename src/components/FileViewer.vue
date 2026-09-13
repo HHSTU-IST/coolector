@@ -100,7 +100,7 @@ import { useFileStore } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
 import { formatDate, formatFileSize } from '../utils/format'
-import { DEFAULT_RELAY_URL, isWeakRoomId, normalizeRelayUrl, validateRoomId } from '../utils/relay'
+import { DEFAULT_RELAY_URL, looksWeakRoomId, normalizeRelayUrl, validateRoomId } from '../utils/relay'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -114,8 +114,8 @@ const relayUploadError = ref(false)
 /** 房间号偏弱时给出非阻断提示（房间号会被分享给发送方，过易猜则可能被灌文件） */
 const roomIdHint = computed(() => {
   const id = relayUploadRoomId.value.trim()
-  if (!id || !isWeakRoomId(id)) return ''
-  return '该房间号较容易被猜到，建议使用接收端生成的随机房间号'
+  if (!id || !looksWeakRoomId(id)) return ''
+  return '该房间号看起来不是接收端生成的随机房间号，建议向接收端确认'
 })
 
 interface RelayUploadResponse {

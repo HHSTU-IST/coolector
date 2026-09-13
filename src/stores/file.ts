@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { formatFileSize } from '../utils/format'
 import { extractStudentId, getFileBaseName, getFileExtension } from '../utils/filename'
 import { extractDocxText } from '../utils/docx'
+import { binaryPlaceholder } from '../utils/relay-content'
 
 export interface FileInfo {
     id: string
@@ -241,10 +242,6 @@ export const useFileStore = defineStore('file', () => {
     const extractContainerDocumentText = (fileName: string, buffer: ArrayBuffer) => {
         if (!DOCUMENT_TEXT_EXTENSIONS.has(getFileExtension(fileName))) return Promise.resolve(null)
         return extractDocxText(buffer)
-    }
-
-    const binaryPlaceholder = (fileName: string) => {
-        return `此文件为二进制格式（${fileName}），已上传但暂不支持内容预览。`
     }
 
     const addFile = (file: File) => {

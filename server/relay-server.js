@@ -546,6 +546,8 @@ async function handleCreateRoom(req, res) {
   return writeJson(res, 201, {
     roomId: room.room.id,
     createdAt: room.room.createdAt,
+    // 「房间号偏弱」的判定权威在服务端：前端据此提示，无需自己复刻一份弱名清单
+    weakRoomId: isWeakRoomId(room.room.id),
     streamUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/events`,
     streamTicketUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/stream-ticket`,
     uploadUrl: `${baseUrl(req)}/api/rooms/${room.room.id}/uploads`,
@@ -560,15 +562,7 @@ async function handleCreateRoom(req, res) {
 function isUploadBytesExceeded(req, size) {
   if (MAX_UPLOAD_BYTES_PER_WINDOW <= 0) return false
 
-  const ip = req.socket.remoteAddress ?? 'unknown'
-  const now = Date.now()
-  let bucket = uploadByteBuckets.get(ip)
-
-  if (!bucket || bucket.resetAt <= now) {
-    bucket = { bytes: 0, resetAt: now + RATE_LIMIT_WINDOW_MS }
-    uploadByteBuckets.set(ip, bucket)
-  }
-
+  const bucket = takeBucket(uploadByteBuckets, req)
   if (bucket.bytes + size > MAX_UPLOAD_BYTES_PER_WINDOW) return true
 
   bucket.bytes += size
@@ -999,16 +993,26 @@ const rateBuckets = new Map()
 /** 上传字节限流的窗口桶（见 isUploadBytesExceeded） */
 const uploadByteBuckets = new Map()
 
-function isRateLimited(req) {
-  const ip = req.socket.remoteAddress ?? 'unknown'
+/**
+ * 取出（必要时新建）某个来源在当前限流窗口内的计数桶。
+ * 两个限流器共用这一种桶形状，避免各写一遍「取桶 → 判过期 → 新建」。
+ */
+function takeBucket(store, req) {
+  const key = req.socket.remoteAddress ?? 'unknown'
   const now = Date.now()
-  let bucket = rateBuckets.get(ip)
+  let bucket = store.get(key)
 
   if (!bucket || bucket.resetAt <= now) {
-    bucket = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS }
-    rateBuckets.set(ip, bucket)
+    bucket = { count: 0, bytes: 0, resetAt: now + RATE_LIMIT_WINDOW_MS }
+    store.set(key, bucket)
   }
 
+  return bucket
+}
+
+function isRateLimited(req) {
+  // 注意：限流一旦启用就一定计数，即使随后请求因其他原因被拒（fail-closed 方向）
+  const bucket = takeBucket(rateBuckets, req)
   bucket.count += 1
   return bucket.count > RATE_LIMIT_MAX
 }
