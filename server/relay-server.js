@@ -1,8 +1,19 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { basename, join, relative } from 'node:path'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  contentDisposition,
+  decodeHeaderValue,
+  isLoopbackHost,
+  isTextMimeType,
+  makeAuthorizer,
+  makeCorsHeaders,
+  normalizeAllowedOrigins,
+  sanitizeRoomId,
+  sanitizeStorageFileName
+} from './relay-utils.js'
 
 const PORT = Number(process.env.PORT ?? 8787)
 const HOST = process.env.HOST ?? '0.0.0.0'
@@ -14,10 +25,8 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR ?? fileURLToPath(new URL('./uploads', 
 // 设为非空后，所有 /api 请求必须携带 `Authorization: Bearer <token>`。默认关闭以保持本地开箱可用。
 const RELAY_TOKEN = process.env.RELAY_TOKEN ?? ''
 // 逗号分隔的白名单；`*` 表示任意来源。部署到公网时务必收窄。
-const ALLOWED_ORIGINS = (process.env.RELAY_ALLOWED_ORIGINS ?? '*')
-  .split(',')
-  .map((value) => value.trim())
-  .filter(Boolean)
+// 空串（如 docker-compose 的 ${VAR:-} 传入）在此归一为 `*`，避免白名单被误判为空导致 CORS 头缺失。
+const ALLOWED_ORIGINS = normalizeAllowedOrigins(process.env.RELAY_ALLOWED_ORIGINS)
 // UPLOAD_DIR 的磁盘配额，超出后拒绝新上传，避免磁盘被无限写满。
 const MAX_TOTAL_UPLOAD_BYTES = Number(process.env.MAX_TOTAL_UPLOAD_BYTES ?? 1024 * 1024 * 1024)
 
@@ -26,45 +35,11 @@ const rooms = new Map()
 /** 已落盘的字节总数，用于配额判断；进程重启后重新累计。 */
 let totalStoredBytes = 0
 
-/** 按当前来源计算 CORS 响应头；来源不在白名单时返回空对象，浏览器会自行拦截。 */
-function corsHeaders(req) {
-  const allowAll = ALLOWED_ORIGINS.includes('*')
-  const origin = req.headers.origin
-
-  if (!allowAll && !(origin && ALLOWED_ORIGINS.includes(origin))) {
-    return {}
-  }
-
-  const headers = {
-    'Access-Control-Allow-Origin': allowAll ? '*' : origin,
-    'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, X-Relay-Text-Preview'
-  }
-
-  if (!allowAll) {
-    headers.Vary = 'Origin'
-  }
-
-  return headers
-}
+/** 按当前来源计算 CORS 响应头；来源不在白名单时返回空对象，浏览器会自行拦截 */
+const corsHeaders = makeCorsHeaders(ALLOWED_ORIGINS)
 
 /** 未配置 RELAY_TOKEN 时放行所有请求；配置后要求 Bearer 头或 ?token= 查询参数（SSE 用） */
-function isAuthorized(req) {
-  if (!RELAY_TOKEN) return true
-
-  const header = String(req.headers.authorization ?? '')
-  if (header === `Bearer ${RELAY_TOKEN}` || header === RELAY_TOKEN) return true
-
-  // EventSource 无法自定义请求头，SSE 连接改由查询参数携带 token
-  try {
-    const url = new URL(req.url ?? '/', 'http://localhost')
-    if (url.searchParams.get('token') === RELAY_TOKEN) return true
-  } catch {
-    // 忽略非法 URL
-  }
-
-  return false
-}
+const isAuthorized = makeAuthorizer(RELAY_TOKEN)
 
 function nowIso() {
   return new Date().toISOString()
@@ -77,13 +52,7 @@ function baseUrl(req) {
   return `${protocol}://${host}`
 }
 
-function sanitizeRoomId(roomId) {
-  if (!roomId || typeof roomId !== 'string') return null
-  const normalized = roomId.trim()
-  return /^[a-zA-Z0-9_-]{4,64}$/u.test(normalized) ? normalized : null
-}
-
-function createRoom(roomId = randomUUID().slice(0, 8)) {
+function createRoom(roomId = randomUUID()) {
   const id = sanitizeRoomId(roomId)
   if (!id) {
     throw new Error('Invalid room id')
@@ -224,44 +193,6 @@ function dispatchEvent(room, eventName, data) {
 
   queueEvent(room, event)
   return event
-}
-
-function isTextMimeType(mimeType, fileName) {
-  if (mimeType.startsWith('text/')) return true
-  return /\.(txt|md|json|xml|csv|log|conf|ini|yaml|yml|env|toml|sql|js|ts|tsx|jsx|css|scss|html|htm)$/iu.test(fileName)
-}
-
-/**
- * Node 的 req.headers 按 latin1 解码，浏览器发来的 UTF-8 文件名会变成乱码。
- * 以 latin1 还原原始字节再按 UTF-8 解码；纯 ASCII 值经此转换保持不变。
- */
-function decodeHeaderValue(value) {
-  if (typeof value !== 'string') return value
-  return Buffer.from(value, 'latin1').toString('utf8')
-}
-
-/**
- * HTTP 头值只能是 latin1，中文文件名需按 RFC 6266 用 filename* 携带 UTF-8 百分号编码，
- * 并给一份 ASCII 回退的 filename 供旧客户端使用。
- */
-function contentDisposition(fileName) {
-  const name = String(fileName)
-  const fallback = name
-    .replace(/[^\x20-\x7e]+/gu, '_')
-    .replaceAll('"', '')
-
-  return `attachment; filename="${fallback || 'file'}"; filename*=UTF-8''${encodeURIComponent(name)}`
-}
-
-function sanitizeStorageFileName(fileName) {
-  const safeBaseName = basename(String(fileName))
-    // 有意匹配控制字符：清洗它们以阻断路径穿越与非法文件名
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f<>:"/\\|?*]+/gu, '_')
-    .replace(/^\.+$/u, 'file')
-    .trim()
-
-  return (safeBaseName || 'file').slice(0, 180)
 }
 
 async function persistUpload(upload) {
@@ -562,6 +493,12 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    // 速率限制：/api 请求按来源 IP 计数，超出上限返回 429
+    if (pathname.startsWith('/api/') && isRateLimited(req)) {
+      writeJson(res, 429, { error: 'Too many requests' }, cors)
+      return
+    }
+
     if (req.method === 'GET' && pathname === '/') {
       writeJson(res, 200, {
         name: 'Coolector Relay Server',
@@ -659,7 +596,65 @@ const server = createServer(async (req, res) => {
   }
 })
 
+// —— 速率限制（固定窗口，按 socket 来源 IP 计数；反向代理后为代理 IP，属尽力而为） ——
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60 * 1000)
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX ?? 120)
+const rateBuckets = new Map()
+
+function isRateLimited(req) {
+  const ip = req.socket.remoteAddress ?? 'unknown'
+  const now = Date.now()
+  let bucket = rateBuckets.get(ip)
+
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS }
+    rateBuckets.set(ip, bucket)
+  }
+
+  bucket.count += 1
+  return bucket.count > RATE_LIMIT_MAX
+}
+
+setInterval(() => {
+  const now = Date.now()
+  for (const [ip, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(ip)
+  }
+}, RATE_LIMIT_WINDOW_MS).unref()
+
+/** 启动时扫描 UPLOAD_DIR，用磁盘实际占用初始化配额计数，避免重启后配额归零被绕过 */
+async function initStoredBytes() {
+  try {
+    const entries = await readdir(UPLOAD_DIR, { withFileTypes: true })
+    let total = 0
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const files = await readdir(join(UPLOAD_DIR, entry.name), { withFileTypes: true })
+
+      for (const file of files) {
+        if (!file.isFile()) continue
+        const fileStat = await stat(join(UPLOAD_DIR, entry.name, file.name))
+        total += fileStat.size
+      }
+    }
+
+    totalStoredBytes = total
+  } catch {
+    totalStoredBytes = 0
+  }
+}
+
 setInterval(cleanupRooms, 30 * 60 * 1000).unref()
+
+// fail-closed：非回环监听且未配置 RELAY_TOKEN 时拒绝启动，防止公网裸奔
+if (!RELAY_TOKEN && !isLoopbackHost(HOST)) {
+  console.error('[relay] 拒绝启动：未设置 RELAY_TOKEN 时仅允许监听回环地址（127.0.0.1 / localhost / ::1）。')
+  console.error(`[relay] 当前 HOST=${HOST}。请在 .env 设置 RELAY_TOKEN，或将 HOST 改为回环地址用于本地调试。`)
+  process.exit(1)
+}
+
+await initStoredBytes()
 
 server.listen(PORT, HOST, () => {
   console.log(`Relay server listening on http://${HOST}:${PORT}`)

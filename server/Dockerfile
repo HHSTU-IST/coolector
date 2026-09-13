@@ -8,6 +8,7 @@ WORKDIR /app
 
 # 仅拷贝 Relay Server（无依赖，无需 node_modules）
 COPY server/relay-server.js ./relay-server.js
+COPY server/relay-utils.js ./relay-utils.js
 
 # 上传落盘目录，挂卷持久化
 ENV UPLOAD_DIR=/data/uploads

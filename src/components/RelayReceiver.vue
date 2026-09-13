@@ -122,8 +122,10 @@ interface RelayUploadSummary {
   lastModified: string
   hasTextPreview: boolean
   previewText: string | null
+  contentIncluded: boolean
   contentText: string | null
-  contentBase64: string
+  contentBase64: string | null
+  detailsUrl: string
   downloadUrl: string
 }
 
@@ -324,23 +326,45 @@ const decodeRelayContent = (upload: RelayUploadSummary) => {
   return upload.previewText ?? ''
 }
 
-const handleUploadCreated = (event: MessageEvent<string>) => {
+/**
+ * SSE 广播只带元信息（contentIncluded:false），正文需按 detailsUrl 按需拉取。
+ * 已包含正文（如 details 端点返回）则原样返回，避免重复请求。
+ */
+const fetchUploadDetails = async (upload: RelayUploadSummary): Promise<RelayUploadSummary> => {
+  if (upload.contentIncluded || upload.contentText !== null || upload.contentBase64) {
+    return upload
+  }
+
+  const headers: Record<string, string> = {}
+  if (RELAY_TOKEN) headers['Authorization'] = `Bearer ${RELAY_TOKEN}`
+
+  const response = await fetch(upload.detailsUrl, { headers })
+  if (!response.ok) {
+    throw new Error(`拉取文件正文失败（HTTP ${response.status}）`)
+  }
+
+  const payload = await response.json() as { upload: RelayUploadSummary }
+  return payload.upload
+}
+
+const handleUploadCreated = async (event: MessageEvent<string>) => {
   const payload = parseEvent<UploadCreatedData>(event)
   const upload = payload.data.upload
 
   try {
-    const content = decodeRelayContent(upload)
+    const full = await fetchUploadDetails(upload)
+    const content = decodeRelayContent(full)
     const file = fileStore.upsertRelayFile({
-      name: upload.name,
+      name: full.name,
       content,
-      contentBase64: upload.contentBase64,
-      hasTextContent: upload.contentText !== null || Boolean(upload.previewText),
-      size: upload.size,
-      type: upload.mimeType,
-      lastModified: upload.lastModified,
+      contentBase64: full.contentBase64 ?? undefined,
+      hasTextContent: full.contentText !== null || Boolean(full.previewText),
+      size: full.size,
+      type: full.mimeType,
+      lastModified: full.lastModified,
       roomId: payload.data.roomId,
-      uploadId: upload.id,
-      downloadUrl: upload.downloadUrl
+      uploadId: full.id,
+      downloadUrl: full.downloadUrl
     })
 
     const collectionItem = file.filenameValidation.isValid
@@ -354,15 +378,15 @@ const handleUploadCreated = (event: MessageEvent<string>) => {
       fileStore.selectFile(file)
     }
 
-    pushEventLog(payload.type, `已内存转发 ${upload.name}`, payload.createdAt)
-    statusMessage.value = `已内存转发文件：${upload.name}`
+    pushEventLog(payload.type, `已接收 ${full.name}`, payload.createdAt)
+    statusMessage.value = `已接收文件：${full.name}`
     void refreshRoomState()
   } catch (error) {
     const fallbackContent = upload.previewText ?? ''
     const file = fileStore.upsertRelayFile({
       name: upload.name,
       content: fallbackContent,
-      contentBase64: upload.contentBase64,
+      contentBase64: upload.contentBase64 ?? undefined,
       hasTextContent: Boolean(fallbackContent),
       size: upload.size,
       type: upload.mimeType,
@@ -383,8 +407,8 @@ const handleUploadCreated = (event: MessageEvent<string>) => {
       fileStore.selectFile(file)
     }
 
-    pushEventLog(payload.type, `接收成功，但内存内容不可用：${upload.name}`, payload.createdAt)
-    statusMessage.value = error instanceof Error ? error.message : '内存内容不可用'
+    pushEventLog(payload.type, `接收成功，但正文拉取失败：${upload.name}`, payload.createdAt)
+    statusMessage.value = error instanceof Error ? error.message : '正文不可用'
     void refreshRoomState()
   }
 }

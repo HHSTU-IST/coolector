@@ -30,7 +30,7 @@ Coolector 是一个现代化的文件收集器。
 
 - **前端框架**: Vue.js 3.5 (Composition API)
 - **编程语言**: TypeScript 6.0+
-- **状态管理**: Pinia 4.0+
+- **状态管理**: Pinia 3.0+
 - **构建工具**: Vite 8.0+
 - **样式框架**: Tailwind CSS 4.0+
 - **UI 组件**: 自定义组件 + Tailwind 工具类
@@ -102,11 +102,14 @@ src/
 ├── components/          # Vue 组件
 │   ├── FileUploader.vue    # 文件上传组件
 │   ├── CollectionStatus.vue # 收集状态组件
-│   └── FileViewer.vue      # 文件预览组件
+│   ├── FileViewer.vue      # 文件预览组件
+│   ├── RelayReceiver.vue   # 公网接收长连接（SSE）
+│   └── ToastHost.vue       # 全局提示宿主
 ├── stores/             # Pinia 状态管理
-│   ├── index.ts        # 状态管理入口
 │   ├── file.ts         # 文件相关状态
 │   └── collection.ts   # 收集列表状态
+├── utils/              # 工具函数（文件名解析、docx 解析、格式化）
+├── composables/        # 组合式函数（useToast）
 ├── App.vue            # 根组件
 ├── main.ts            # 应用入口
 └── style.css          # 全局样式
@@ -156,6 +159,7 @@ curl http://localhost:8787/api/rooms/demo-room
 > **公网部署**：Relay Server 是有状态服务，CI 只部署静态前端，**需自行托管才能公网可达**。
 > 完整部署清单（Docker / 反向代理 / 环境变量 / 安全）见 [RELAY_DEPLOY.md](./RELAY_DEPLOY.md)。
 > 部署到公网时务必设置 `RELAY_TOKEN` 与 `RELAY_ALLOWED_ORIGINS`，并强制 HTTPS。
+> 未设置 `RELAY_TOKEN` 且监听非回环地址时，Relay 会拒绝启动（fail-closed）。
 
 ## 使用说明
 

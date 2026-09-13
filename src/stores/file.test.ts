@@ -15,6 +15,17 @@ describe('validateFileName', () => {
     expect(result.message).toContain('回溯')
   })
 
+  it('拦截嵌套可选量词范式', () => {
+    const store = useFileStore()
+    const dangerous = ['(a?)*', '(a?)+', '(\\w+\\s?)*']
+    for (const pattern of dangerous) {
+      store.setFilenamePattern(pattern)
+      const result = store.validateFileName('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!')
+      expect(result.isValid, `应拦截 ${pattern}`).toBe(false)
+      expect(result.message).toContain('回溯')
+    }
+  })
+
   it('拦截超长范式', () => {
     const store = useFileStore()
     store.setFilenamePattern('a'.repeat(300))

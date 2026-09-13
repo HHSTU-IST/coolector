@@ -1,5 +1,11 @@
 # Coolector 工程风险与改进评审
 
+> **⚠️ 勘误（2026-09-13 上线前全检复核）**：本文档「修复执行记录」中关于版本降级的描述与实际磁盘状态不符，特此更正：
+>
+> - P0-3 / #16 声称 `engines.node` 24→22、`@types/node` 26→22.20.1、CI 补 22.x 矩阵——**均未落地**。磁盘实际为 `engines.node >=24.0.0`、`@types/node ^24.13.3`、CI 矩阵 `[24.x, 26.x]`。
+> - 当前代码在 **Node 24 口径下自洽**（engines / @types / CI / README 均 24），故本仓库统一以 Node 24 为 source of truth，不再追溯降级 22。
+> - 本轮全检（2026-09-13）的修复项详见 `deliverables/gstack/pre-launch-check-coolector-2026-09-13.md`。
+
 - 评审日期：2026-09-04
 - 评审范围：`src/`、`server/`、构建与 CI 配置、依赖与文档一致性
 - 实测环境：Node v24.x / TypeScript 6.0.3 / Vite 8.2.0 / Tailwind 4.3.3 / pnpm（本机 corepack 不可用）
@@ -78,7 +84,7 @@
 
 | 项         | package.json                   | README                                                 | CI                                       | 本机实际      | 结论         |
 | ---------- | ------------------------------ | ------------------------------------------------------ | ---------------------------------------- | ------------- | ------------ |
-| Node       | `engines.node >= 24.0.0`       | `>=22.0`                                               | ci: `[24.x, 26.x]`；deploy/release: `24` | v24.x      | 三方不一致   |
+| Node       | `engines.node >= 24.0.0`       | `>=22.0`                                               | ci: `[24.x, 26.x]`；deploy/release: `24` | v24.x         | 三方不一致   |
 | pnpm       | `packageManager: pnpm@11.21.0` | `>=11.0`                                               | ci: `11.0.7`；deploy/release: `11.21.0`  | corepack 损坏 | CI 自相矛盾  |
 | TypeScript | `~6.0.3`（实测 6.0.3）         | badge + 正文 + `App.vue` 页脚 + `release.yml` 均写 5.7 | —                                        | 6.0.3         | 文档全面过期 |
 

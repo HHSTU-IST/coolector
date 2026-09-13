@@ -33,26 +33,9 @@ jobs:
               run: pnpm build
 
             - name: Create Release
-              uses: actions/create-release@v1
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              uses: softprops/action-gh-release@v2
               with:
-                  tag_name: ${{ github.ref }}
-                  release_name: Release ${{ github.ref }}
-                  body: |
-                      ## Changes
-                      - 自动构建和部署到 GitHub Pages
-                      - 支持文件收集和管理功能
-
-                      ## 安装和使用
-                      1. 访问 https://[username].github.io/coolector/
-                      2. 上传文件和收集名单
-                      3. 管理收集进度
-
-                      ## 技术特性
-                      - Vue.js 3.5 + TypeScript 6.0
-                      - Vite 8.0 构建工具
-                      - Pinia 状态管理
-                      - Tailwind CSS 样式框架
+                  name: Release ${{ github.ref }}
+                  generate_release_notes: true
                   draft: false
                   prerelease: false

@@ -1,7 +1,8 @@
 # Coolector Relay Server —— 生产部署
 # 用法：
-#   cp .env.example .env   # 按需填写 RELAY_TOKEN / RELAY_ALLOWED_ORIGINS
+#   cp .env.example .env   # 必须填写 RELAY_TOKEN（fail-closed：未设置将拒绝启动）
 #   docker compose up -d --build
+# 注意：RELAY_TOKEN 未设置时，容器内 Relay 因监听 0.0.0.0（非回环）会拒绝启动。
 services:
   relay:
     build:
@@ -16,7 +17,7 @@ services:
       PORT: 8787
       HOST: 0.0.0.0
       RELAY_TOKEN: ${RELAY_TOKEN:-}
-      RELAY_ALLOWED_ORIGINS: ${RELAY_ALLOWED_ORIGINS:-}
+      RELAY_ALLOWED_ORIGINS: ${RELAY_ALLOWED_ORIGINS:-*}
       MAX_TOTAL_UPLOAD_BYTES: ${MAX_TOTAL_UPLOAD_BYTES:-1073741824}
       ROOM_TTL_MS: ${ROOM_TTL_MS:-21600000}
     volumes:
