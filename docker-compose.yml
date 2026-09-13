@@ -17,16 +17,23 @@ services:
       PORT: 8787
       HOST: 0.0.0.0
       RELAY_TOKEN: ${RELAY_TOKEN:-}
-      RELAY_ALLOWED_ORIGINS: ${RELAY_ALLOWED_ORIGINS:-*}
+      # 公网务必收窄为前端域名（如 https://app.example.com），不要留 `*`
+      RELAY_ALLOWED_ORIGINS: "${RELAY_ALLOWED_ORIGINS:-*}"
       # 处于可信反向代理（Nginx/Caddy 等）之后时必须设为 true，
       # 否则 Relay 生成的回调地址是 http://，浏览器会拦截混合内容，SSE 与按需拉正文同时失效
       RELAY_TRUST_PROXY: ${RELAY_TRUST_PROXY:-false}
       MAX_FILE_BYTES: ${MAX_FILE_BYTES:-10485760}
       MAX_TEXT_BYTES: ${MAX_TEXT_BYTES:-1048576}
+      # 请求体上限由 MAX_FILE_BYTES 派生（base64 膨胀 4/3 + MAX_TEXT_BYTES + 128KB 余量）。
+      # 默认留空 = 交给服务端推导：写死派生值后，改了上面的文件上限就会与它脱节。
+      # 只有在需要绕开派生式时才在 .env 里显式赋值。
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-}
       MAX_TOTAL_UPLOAD_BYTES: ${MAX_TOTAL_UPLOAD_BYTES:-1073741824}
       # 单房间配额：防止免凭据的发送方把全局配额吃光、导致其它班级一起 507
       MAX_ROOM_UPLOAD_BYTES: ${MAX_ROOM_UPLOAD_BYTES:-134217728}
       MAX_ROOM_UPLOADS: ${MAX_ROOM_UPLOADS:-500}
+      # 单房间离线事件队列上限：接收端短暂断线时靠它重放，超出丢弃最旧事件
+      MAX_QUEUE_EVENTS: ${MAX_QUEUE_EVENTS:-200}
       MAX_UPLOAD_NAME_BYTES: ${MAX_UPLOAD_NAME_BYTES:-255}
       ROOM_TTL_MS: ${ROOM_TTL_MS:-21600000}
       # 房间绝对存活上限：空闲 TTL 会被上传刷新，没有它就能靠「传 1 字节」永久占位
@@ -39,6 +46,8 @@ services:
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
       MAX_UPLOAD_BYTES_PER_WINDOW: ${MAX_UPLOAD_BYTES_PER_WINDOW:-268435456}
     volumes:
+      # 不要透传 `.env` 里的 UPLOAD_DIR=./server/uploads —— 那会让上传落到卷外（容器重建即丢），
+      # 而命名卷永远是空的。/data/uploads 由 Dockerfile 固定，与下面的卷一一对应。
       - relay-uploads:/data/uploads
 
 volumes:

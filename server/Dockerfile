@@ -14,6 +14,11 @@ COPY server/relay-utils.js ./relay-utils.js
 ENV UPLOAD_DIR=/data/uploads
 ENV PORT=8787
 ENV HOST=0.0.0.0
+
+# 必须显式建目录并改属主：容器以非 root 的 relay 用户运行，而 VOLUME 声明出的目录属 root，
+# 命名卷首次创建时会继承镜像内该目录的属主 —— 不 chown 则首次上传就 EACCES（建房间目录失败）。
+RUN mkdir -p /data/uploads && chown relay:relay /data/uploads
+
 VOLUME ["/data/uploads"]
 
 EXPOSE 8787
