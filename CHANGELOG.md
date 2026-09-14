@@ -4,7 +4,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.0.1] - 2026-09-14
 
 ### Security
 
@@ -31,6 +31,41 @@
   拒绝启动（fail-closed）。
 - `.dockerignore` 排除 `server/*.test.js`：测试脚本不再进入生产镜像。
 - 请求行解析改用固定基准，不再以 `Host` 头为基准拼 URL。
+
+### Fixed（发布门禁、可用性与合规，第七轮全检）
+
+- **密钥守卫 fail-open**（`guard:no-secret`）：① 体积 >20MB 的产物被静默跳过
+  （实测 21MiB 且含密钥仍 exit 0）；② CI 形状下（无 `.env`、无密钥环境变量）整条守卫空转后 exit 0，
+  对「真实密钥被内联进产物」**零判别力**。现改为滑动窗口分块扫描（跨块边界同样命中），
+  并在「无可核对密钥」时 **exit 1**；CI 与 deploy 的构建/守卫两步都注入同一个**公开 canary**
+  （`VITE_RELAY_TOKEN=coolector-canary-<run id>`）—— 一旦有人把构建期读取加回来，canary 就会出现在产物里被拦下
+- **CORS 默认放开**：`RELAY_ALLOWED_ORIGINS` 未配置时此前归一为 `*`，而发送方公开写路径本就免凭据，
+  等于允许任意站点向已知房间号灌文件。现默认**不发送任何 CORS 头**（拒绝跨源）；
+  本机 `pnpm start` 自动注入 localhost 白名单，端到端脚本自带白名单，都不依赖该默认值
+- **限流在反代下退化为「全站单桶」**：此前按 socket 地址计数，反代后恒为代理 IP，
+  单个滥用者即可让全班 429 且无缓解路径。新增 `RELAY_TRUSTED_PROXIES`（IP/CIDR）：
+  只有来自可信代理的请求才按 `X-Forwarded-For` 最左合法值分桶；未声明/直连时**忽略**该头，
+  防止伪造 XFF 无限换桶绕过限流。非法条目 fail-closed
+- **`VITE_RELAY_URL` 无任何校验**：`//evil.example`（协议相对）会把凭据送去攻击者域，
+  无 scheme 的裸域名会被当成页面相对路径而静默打错源。现于模块加载期校验（非法则回落默认值 + 报错），
+  手填地址在连接前复用同一套校验；`guard:no-secret` 也校验该变量
+- **`RELAY_PUBLIC_BASE_URL` 漏拒尾随 `?` / `#`**：`new URL('…?')` 的 `search` 是空串（falsy）从而绕过检查，
+  原样保留的 `…/relay?` 会拼出 `…/relay?/api/x`（路径被吞进 query → 404）。现按**原始输入**判定分隔符，
+  且返回值改用规范化后的 `href`（消除「校验的串 ≠ 输出的串」）
+- **客户端 256KB 正文截断静默发生**：服务端 `textTruncated` 只反映它自己那 1MB 的截断，
+  256KB–1MB 区间收发两端都不提示。信封新增 `textTruncatedByClient`，任一端的截断都会告知接收端
+- **`downloadUrl` 只写不读**：该字段全前端无读取点，却会被 `safeResolveRelayUrl` 以「失败保留原值」
+  的方式写入 —— 未来一旦给它加下载按钮就会绕过同源校验。现从 store 与落库路径移除
+- 收敛 `contentBase64` 的双路径覆盖（`uploadSummary` 原先读的是**从未被赋值**的字段，两个调用方都还得再覆盖一次），
+  清理 8 处零引用导出
+- **Web Interface Guidelines 合规**：图标按钮补 `aria-label`、表单控件补 `label/for`、
+  Toast/连接状态/上传结果补 `aria-live`、`transition-all` 改具体属性、新增 `prefers-reduced-motion` 降级、
+  拖放区由 `div` 改为真 `<button>`（可键盘触发）、补 skip link、焦点态改用 `focus-visible`、
+  破坏性「清空列表」加确认、标题与加载文案统一用 `…`
+- 生产 `sourcemap: false`：`dist/` 会原样发布到公开 Pages，带 `.map` 等于公开全部 TS 源码
+- `index.html` 补 `referrer` 策略（URL 里可能带 SSE 一次性票据）；`request_error` 审计日志只记 pathname
+- `README` 结构树、`/relay` 子路径说法、nginx `client_max_body_size` 说明（13.4MB → 15.16MB）、
+  `docker compose pull`（本服务无远端镜像可拉）等文档漂移一并修正
 
 ## [1.0.0] - 2026-09-13
 

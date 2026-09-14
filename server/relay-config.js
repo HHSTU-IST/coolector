@@ -2,7 +2,7 @@
 // 本模块**无副作用**（除校验失败时退出），可被单测直接 import。
 
 import { fileURLToPath } from 'node:url'
-import { normalizeAllowedOrigins, parsePositiveInt, parsePublicBaseUrl } from './relay-utils.js'
+import { normalizeAllowedOrigins, parsePositiveInt, parsePublicBaseUrl, parseTrustedProxies } from './relay-utils.js'
 
 /**
  * 读取正整数型环境变量，非法即拒绝启动。
@@ -114,8 +114,18 @@ const PUBLIC_BASE_URL = (() => {
 const STREAM_TICKET_TTL_MS = requirePositiveInt('STREAM_TICKET_TTL_MS', 60_000)
 
 
-// —— 速率限制（固定窗口，按 socket 来源 IP 计数；反向代理后为代理 IP，属尽力而为） ——
+// —— 速率限制（固定窗口，按客户端 IP 计数） ——
 const RATE_LIMIT_WINDOW_MS = requirePositiveInt('RATE_LIMIT_WINDOW_MS', 60 * 1000)
+
+// 可信反向代理网段（IP / CIDR，逗号分隔）。只有来自这些网段的请求才会按 `X-Forwarded-For`
+// 分桶 —— 反代后 socket 地址恒为代理 IP，不声明它就等于全站共用一个限流桶。
+// 非法条目 fail-closed：静默忽略会让运维以为「已按客户端分桶」，实际仍在共用一个桶。
+const TRUSTED_PROXIES_RESULT = parseTrustedProxies(process.env.RELAY_TRUSTED_PROXIES)
+if (TRUSTED_PROXIES_RESULT.invalid.length > 0) {
+  console.error(`[relay] 拒绝启动：RELAY_TRUSTED_PROXIES 的每一项都必须是不带端口/掩码以外的合法 IP 或 CIDR（如 10.0.0.0/8），非法值：${TRUSTED_PROXIES_RESULT.invalid.join(', ')}`)
+  process.exit(1)
+}
+const TRUSTED_PROXIES = TRUSTED_PROXIES_RESULT.list
 
 const RATE_LIMIT_MAX = requirePositiveInt('RATE_LIMIT_MAX', 120)
 
@@ -143,5 +153,6 @@ export {
   PUBLIC_BASE_URL,
   STREAM_TICKET_TTL_MS,
   RATE_LIMIT_WINDOW_MS,
-  RATE_LIMIT_MAX
+  RATE_LIMIT_MAX,
+  TRUSTED_PROXIES
 }

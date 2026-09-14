@@ -152,11 +152,18 @@ describe('uploadSummary', () => {
   })
 
   /**
-   * 这条断言守护的是**结构**：`uploadSummary` 一旦重新接受 `req`（哪怕只是签名上多一个参数），
-   * 就说明有人又把请求头接进了 URL 拼接 —— 那正是 F-001 的成因。
+   * 这条断言守护的是**结构**：`uploadSummary` 一旦重新接受 `req`，就说明有人又把请求头
+   * 接进了 URL 拼接 —— 那正是 F-001 的成因。
+   *
+   * 只断言 arity 是不够的：`(upload, req = null)` 这类带默认值的参数能穿过 `toHaveLength(1)`。
+   * 因此这里直接对**返回值**断言「不含任何主机信息」，两条一起才守得住。
    */
-  it('签名里不接受 req（结构上无法采信请求头）', () => {
+  it('不接受 req，且返回值里不含任何主机信息（结构上无法采信请求头）', () => {
     expect(state.uploadSummary).toHaveLength(1)
+
+    const summary = state.uploadSummary(makeUpload())
+    expect(JSON.stringify(summary)).not.toMatch(/https?:\/\//u)
+    expect(summary.detailsUrl).toMatch(/^\/api\/rooms\//u)
   })
 
   it('includeContent:false 时不带正文，但 URL 形态一致', () => {

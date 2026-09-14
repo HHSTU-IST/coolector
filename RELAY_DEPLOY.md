@@ -26,6 +26,7 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 | `HOST`                   | `0.0.0.0`            | 监听地址。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed）                                                                                                                                                                                                               |
 | `RELAY_ALLOWED_ORIGINS`  | 空（不发 CORS 头）   | CORS 白名单，逗号分隔。**留空 = 拒绝所有跨源前端**（同源部署无需配置）；前后端不同源时必须显式填前端域名，`*` 只适合本机/内网。本机 `pnpm start` 会自动放行 `localhost:5174`                                                                                                     |
 | `RELAY_PUBLIC_BASE_URL`  | 空（只输出相对路径） | 对外 URL 基址。**留空即可，反代 HTTPS 部署也一样**——接收端按它填写的 Relay 地址解析相对路径。服务端不会从 `Host` / `x-forwarded-*` 推断自身地址（那会让攻击者用伪造 `Host` 把接收端的管理密钥引向外部）。仅当有非浏览器客户端需要绝对 URL 时才设，如 `https://relay.example.com` |
+| `RELAY_TRUSTED_PROXIES`  | 空（忽略转发头）     | 可信反向代理网段（IP/CIDR，逗号分隔）。**反代部署必须声明**，否则所有请求的 socket 地址都是代理 IP、全站共用一个限流桶 —— 单个滥用者足以让全班 429。例：`127.0.0.1,10.0.0.0/8`。直连部署留空（留空 = 不采信 `X-Forwarded-For`，防伪造换桶绕过限流） |
 | `UPLOAD_DIR`             | `./server/uploads`   | 上传落盘目录，**生产务必挂持久卷**                                                                                                                                                                                                                                               |
 | `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB)   | 全局磁盘配额，超出返回 **507**                                                                                                                                                                                                                                                   |
 | `MAX_ROOM_UPLOAD_BYTES`  | 全局的 1/8（128MB）  | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明）                                                                                                                                                                                                   |
@@ -33,7 +34,8 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 配额、体积、限流、生命周期等调优项（`MAX_FILE_BYTES` / `MAX_TEXT_BYTES` / `MAX_BODY_BYTES` /
 `MAX_ROOM_UPLOADS` / `MAX_UPLOAD_NAME_BYTES` / `ROOM_TTL_MS` / `ROOM_MAX_LIFETIME_MS` /
 `ROOM_CLEANUP_INTERVAL_MS` / `RELAY_KEEP_ORPHAN_UPLOADS` / `MAX_QUEUE_EVENTS` /
-`RATE_LIMIT_*` / `MAX_UPLOAD_BYTES_PER_WINDOW` / `STREAM_TICKET_TTL_MS`）见 `.env.example`。
+`RATE_LIMIT_*` / `MAX_UPLOAD_BYTES_PER_WINDOW` / `STREAM_TICKET_TTL_MS` /
+`RELAY_TRUSTED_PROXIES`）见 `.env.example`。
 
 所有变量均可选；未设置时走默认值。
 
@@ -144,8 +146,9 @@ pnpm build
 构建产物 `dist/` 部署到任意静态托管（GitHub Pages、Nginx、对象存储等）。
 前端 `Receiver` 与 `Sender` 届时连接 `https://relay.example.com`，跨域由 relay 的 `RELAY_ALLOWED_ORIGINS=https://app.example.com` 放行。
 
-> 部署模式推荐「子域」：`relay.example.com` 独立反代 relay，`app.example.com` 托管前端。
-> 同域 `/relay` 前缀模式需 relay 支持路径前缀，本文档未覆盖，请用子域。
+> 推荐「子域」模式：`relay.example.com` 独立反代 relay，`app.example.com` 托管前端。
+> 同域挂子路径同样可行：前端填 `VITE_RELAY_URL=/relay`，反代把 `/relay/*` 重写到 relay 的根路径
+> （写法与 `vite.config.ts` 里 dev 代理的 `rewrite` 一致）。relay 自身不感知前缀，前缀由反代剥掉。
 
 ## 6. 安全清单（公网必做）
 
@@ -161,6 +164,10 @@ pnpm build
 - **房间状态**：存于内存，进程重启即清空（已落盘文件仍在 `UPLOAD_DIR`）。单实例足够；多实例不共享状态（无 Redis/DB），需扩展时请引入外部存储。
 - **日志**：stdout/stderr，compose 用 `docker compose logs`，裸跑看终端。
 - **升级**：`docker compose up -d --build`（本服务是本地 build + `image: coolector-relay:latest`，**没有远端仓库可 `pull`**，`docker compose pull` 会失败并阻断后续命令）；或重新 `docker build` 后重启。
+- **回滚（重要）**：**不要**用 `git revert` 回退 F-001 那一批修复 —— 它会原样复活 Critical（服务端重新输出
+  `http://evil.example/...`，接收端把管理密钥送进攻击者域）。且**部分回滚双向有害**：只回退前端 → 相对路径会打到静态站自己身上（功能崩）；
+  只回退服务端 → 前端第二道防线失去上游配合。正确处置是**前滚修复**；确实必须临时降级时，前后端必须**整批**回退到同一版本，
+  并**同时轮换 `RELAY_TOKEN`**（该窗口内密钥应视为可被劫持）。
 - **停服**：`docker compose down`（卷保留）；`docker compose down -v` 会删除上传卷。
 
 ## 8. 本地开发（不走公网）

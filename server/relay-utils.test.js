@@ -8,12 +8,14 @@ import {
   isWeakRoomId,
   limitUploadName,
   makeAuthorizer,
+  makeClientIpResolver,
   makeCorsHeaders,
   makeTicketStore,
   normalizeAllowedOrigins,
   normalizeIsoDate,
   parsePositiveInt,
   parsePublicBaseUrl,
+  parseTrustedProxies,
   sanitizeMimeType,
   sanitizeRoomId,
   sanitizeStorageFileName,
@@ -389,6 +391,44 @@ describe('makeCorsHeaders', () => {
     const cors = makeCorsHeaders([])
     expect(cors({ headers: { origin: 'https://x.com' } })).toEqual({})
     expect(cors({ headers: {} })).toEqual({})
+  })
+})
+
+/**
+ * 可信代理与限流分桶。
+ *
+ * 这里守的是一个真实可用性问题：反代后 socket 地址恒为代理 IP，若不按客户端分桶，
+ * 单个滥用者足以让全班 429；而直连时若采信 X-Forwarded-For，攻击者可以随便换桶绕过限流。
+ */
+describe('parseTrustedProxies / makeClientIpResolver', () => {
+  const req = (remoteAddress, forwardedFor) => ({
+    socket: { remoteAddress },
+    headers: forwardedFor === undefined ? {} : { 'x-forwarded-for': forwardedFor }
+  })
+
+  const resolverFor = (raw) => makeClientIpResolver(parseTrustedProxies(raw).list)
+
+  it('接受 IP 与 CIDR（含 IPv6），非法条目上报而非静默忽略', () => {
+    expect(parseTrustedProxies('127.0.0.1, 10.0.0.0/8, ::1').invalid).toEqual([])
+    expect(parseTrustedProxies('10.0.0.0/33, not-an-ip, 10.0.0.0/abc').invalid)
+      .toEqual(['10.0.0.0/33', 'not-an-ip', '10.0.0.0/abc'])
+  })
+
+  it('未配置可信代理时忽略 X-Forwarded-For（直连语义，防伪造换桶）', () => {
+    expect(resolverFor('')(req('203.0.113.7', '1.2.3.4'))).toBe('203.0.113.7')
+  })
+
+  it('socket 命中可信代理时取 XFF 最左的合法 IP（最左 = 最初的客户端）', () => {
+    const resolve = resolverFor('10.0.0.0/8')
+    expect(resolve(req('10.0.0.9', '203.0.113.7, 10.0.0.9'))).toBe('203.0.113.7')
+    expect(resolve(req('10.0.0.9', 'not-an-ip, 203.0.113.7'))).toBe('203.0.113.7')
+    // 没有合法 XFF 时回退 socket 地址，绝不把任意字符串当 IP 用
+    expect(resolve(req('10.0.0.9', 'garbage'))).toBe('10.0.0.9')
+    expect(resolve(req('10.0.0.9'))).toBe('10.0.0.9')
+  })
+
+  it('双栈监听下的 IPv4-mapped 地址也能命中 IPv4 网段', () => {
+    expect(resolverFor('127.0.0.0/8')(req('::ffff:127.0.0.1', '203.0.113.7'))).toBe('203.0.113.7')
   })
 })
 

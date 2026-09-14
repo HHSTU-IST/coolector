@@ -1,11 +1,14 @@
 // 与业务无关的 HTTP 传输原语与「请求准入」：错误类型、审计日志、CORS、鉴权、限流、读写。
 // 本模块不持有房间状态，可被单测直接 import。
 
-import { makeAuthorizer, makeCorsHeaders, makeTicketStore, sanitizeRoomId } from './relay-utils.js'
+import { makeAuthorizer, makeClientIpResolver, makeCorsHeaders, makeTicketStore, sanitizeRoomId } from './relay-utils.js'
 import {
   ALLOWED_ORIGINS, MAX_BODY_BYTES, MAX_UPLOAD_BYTES_PER_WINDOW, PUBLIC_BASE_URL,
-  RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, RELAY_TOKEN, STREAM_TICKET_TTL_MS
+  RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, RELAY_TOKEN, STREAM_TICKET_TTL_MS, TRUSTED_PROXIES
 } from './relay-config.js'
+
+/** 限流分桶用的客户端 IP：只有可信代理后的请求才采信 X-Forwarded-For（见 relay-utils） */
+const resolveClientIp = makeClientIpResolver(TRUSTED_PROXIES)
 
 /** 按当前来源计算 CORS 响应头；来源不在白名单时返回空对象，浏览器会自行拦截 */
 const corsHeaders = makeCorsHeaders(ALLOWED_ORIGINS)
@@ -176,7 +179,7 @@ const uploadByteBuckets = new Map()
  * 两个限流器共用这一种桶形状，避免各写一遍「取桶 → 判过期 → 新建」。
  */
 function takeBucket(store, req) {
-  const key = req.socket.remoteAddress ?? 'unknown'
+  const key = resolveClientIp(req)
   const now = Date.now()
   let bucket = store.get(key)
 

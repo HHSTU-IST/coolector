@@ -3,6 +3,7 @@
 
 import { basename } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { BlockList, isIP } from 'node:net'
 import { StringDecoder } from 'node:string_decoder'
 
 /**
@@ -249,6 +250,65 @@ export function makeCorsHeaders(allowedOrigins) {
     }
 
     return headers
+  }
+}
+
+/**
+ * 解析可信代理网段（`RELAY_TRUSTED_PROXIES`，逗号分隔的 IP 或 CIDR）。
+ *
+ * 为什么需要它：反代之后所有请求的 socket 地址都是**代理自己的 IP**，限流会退化成
+ * 「全站共用一个桶」—— 单个滥用者（或一个班的同一出口）足以让所有人 429，
+ * 而且没有任何「正确配置即可缓解」的路径。显式声明可信代理后，才按 `X-Forwarded-For` 分桶。
+ *
+ * 默认留空 = 不采信任何转发头（直连部署行为不变）。非法条目**不静默忽略**，
+ * 由调用方 fail-closed 退出（与 `parsePositiveInt` 同一约定）。
+ */
+export function parseTrustedProxies(raw) {
+  const entries = typeof raw === 'string' ? raw.split(',').map((entry) => entry.trim()).filter(Boolean) : []
+  const list = new BlockList()
+  const invalid = []
+
+  for (const entry of entries) {
+    const [address, prefixRaw] = entry.split('/')
+    const family = isIP(address)
+    const maxPrefix = family === 4 ? 32 : 128
+    const prefix = prefixRaw === undefined || prefixRaw === '' ? maxPrefix : Number(prefixRaw)
+
+    if (family === 0 || !Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
+      invalid.push(entry)
+      continue
+    }
+
+    list.addSubnet(address, prefix, family === 4 ? 'ipv4' : 'ipv6')
+  }
+
+  return { list, invalid }
+}
+
+/**
+ * 生成限流分桶用的「客户端 IP 解析器」。
+ *
+ * - socket 地址**不在**可信代理网段内（默认情况）→ 用 socket 地址并忽略 `X-Forwarded-For`：
+ *   该头由调用方任意伪造，直连时采信它等于把限流桶的分配权交给攻击者（可无限换桶绕过）。
+ * - socket 地址命中可信代理 → 取 `X-Forwarded-For` 里**最左**的合法 IP（最左 = 最初的客户端），
+ *   非法/缺失时回退到 socket 地址，绝不把任意字符串当 IP 用。
+ */
+export function makeClientIpResolver(trustedProxies) {
+  return (req) => {
+    const socketAddress = req.socket?.remoteAddress ?? 'unknown'
+    const family = isIP(socketAddress)
+    if (family === 0) return socketAddress
+
+    if (!trustedProxies.check(socketAddress, family === 4 ? 'ipv4' : 'ipv6')) {
+      return socketAddress
+    }
+
+    const forwarded = String(req.headers?.['x-forwarded-for'] ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .find((part) => isIP(part) !== 0)
+
+    return forwarded ?? socketAddress
   }
 }
 

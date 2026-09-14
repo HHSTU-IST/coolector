@@ -117,9 +117,11 @@ if (existsSync('.env')) {
 
 // 本机开发默认放行 localhost 前端：relay 的 CORS 默认「未配置 = 不给任何来源」，
 // 而 `pnpm start` 起的 vite 在另一个端口（跨源），不显式放行就会被浏览器拦掉。
-// 用户在自己的 .env 里配置了 RELAY_ALLOWED_ORIGINS 时以用户配置为准。
-const devAllowedOrigins = process.env.RELAY_ALLOWED_ORIGINS
-  ?? `http://localhost:${config.appPort},http://127.0.0.1:${config.appPort}`
+// 用户在自己的 .env 里配置了 RELAY_ALLOWED_ORIGINS 时以用户配置为准 ——
+// 注意用 `?.trim() ||`（而非 `??`）：.env 里 `RELAY_ALLOWED_ORIGINS=` 这种「设为空」很常见，
+// `??` 会把空串当成「已配置」，于是 dev 又被自己拦掉。
+const devAllowedOrigins = process.env.RELAY_ALLOWED_ORIGINS?.trim()
+  || `http://localhost:${config.appPort},http://127.0.0.1:${config.appPort}`
 
 startProcess('relay server', 'node', relayArgs, {
   HOST: config.relayHost,

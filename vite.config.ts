@@ -20,7 +20,10 @@ export default defineConfig({
     build: {
         outDir: 'dist',
         assetsDir: 'assets',
-        sourcemap: true
+        // 生产不发 sourcemap：dist/ 会原样发布到公开的 GitHub Pages，
+        // 带上 .map 等于公开全部 TS 源码（也降低了从产物里翻出敏感串的门槛）。
+        // 需要线上排障时改成 'hidden' 并只把 .map 上传到私有错误监控。
+        sourcemap: false
     },
     css: {
         devSourcemap: true

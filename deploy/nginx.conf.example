@@ -24,6 +24,8 @@ server {
     proxy_set_header Connection "";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
+    # relay 只在请求来自 RELAY_TRUSTED_PROXIES 命中的地址时才采信这个头（用于限流分桶），
+    # 因此反代部署请在 relay 侧设 RELAY_TRUSTED_PROXIES=127.0.0.1/32（或你的代理网段）
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
 
@@ -31,5 +33,5 @@ server {
     proxy_cache off;
     proxy_buffering off;          # 关键：SSE 不缓冲，事件实时下发
     chunked_transfer_encoding on;
-    client_max_body_size 20m;     # 需 >= Relay 派生的 MAX_BODY_BYTES（默认约 13.4MB = MAX_FILE_BYTES 10MB × 4/3 + 余量）
+    client_max_body_size 20m;     # 需 >= Relay 派生的 MAX_BODY_BYTES（默认 15,160,662 B ≈ 15.16 MB）
 }

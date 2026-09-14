@@ -457,6 +457,12 @@ describe('配置校验 fail-closed', () => {
     expect(code).toBe(1)
     expect(output).toMatch(/拒绝启动/u)
   }, 20000)
+
+  it('非法的 RELAY_TRUSTED_PROXIES 让进程拒绝启动（避免「以为已按客户端分桶」）', async () => {
+    const { code, output } = await spawnWithEnv({ RELAY_TRUSTED_PROXIES: '10.0.0.0/33' })
+    expect(code).toBe(1)
+    expect(output).toMatch(/RELAY_TRUSTED_PROXIES/u)
+  }, 20000)
 }, 60000)
 
 describe('元数据上限与配额计量', () => {
@@ -641,6 +647,47 @@ describe('上传字节限流', () => {
     expect((await fetch(`${relay.baseUrl}/`)).status).toBe(200)
   })
 }, 60000)
+
+describe('限流分桶与可信代理', () => {
+  const BUDGET = 5
+
+  const createWithXff = (baseUrl, forwardedFor) => fetch(`${baseUrl}/api/rooms`, {
+    method: 'POST',
+    headers: { ...authHeaders, 'Content-Type': 'application/json', 'X-Forwarded-For': forwardedFor },
+    body: '{}'
+  })
+
+  it('未声明可信代理时忽略 X-Forwarded-For：换 XFF 也换不掉桶', async () => {
+    const relay = await startRelay({ RATE_LIMIT_MAX: String(BUDGET) })
+
+    try {
+      const statuses = []
+      for (let i = 0; i < BUDGET + 1; i += 1) {
+        statuses.push((await createWithXff(relay.baseUrl, `203.0.113.${i}`)).status)
+      }
+
+      expect(statuses.at(-1)).toBe(429)
+    } finally {
+      await relay.stop()
+    }
+  }, 30000)
+
+  it('声明可信代理后按 X-Forwarded-For 分桶：一个客户端打满不影响别人', async () => {
+    const relay = await startRelay({ RATE_LIMIT_MAX: String(BUDGET), RELAY_TRUSTED_PROXIES: '127.0.0.0/8' })
+
+    try {
+      for (let i = 0; i < BUDGET; i += 1) {
+        expect((await createWithXff(relay.baseUrl, '203.0.113.1')).status).toBe(201)
+      }
+
+      expect((await createWithXff(relay.baseUrl, '203.0.113.1')).status).toBe(429)
+      // 这正是声明可信代理的目的：另一个客户端不该被牵连
+      expect((await createWithXff(relay.baseUrl, '203.0.113.2')).status).toBe(201)
+    } finally {
+      await relay.stop()
+    }
+  }, 30000)
+}, 90000)
 
 describe('房间生命周期', () => {
   let relay
@@ -982,10 +1029,11 @@ describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
     expect(payload.data.upload.detailsUrl).toMatch(/^\/api\/rooms\//u)
   })
 
-  it('x-forwarded-* 同样不能影响对外 URL', async () => {
-    const { text } = await requestWithHost(port, '/api/rooms', {
+  it('仅伪造 X-Forwarded-*（Host 保持真实）也不能影响对外 URL', async () => {
+    // 刻意**不**覆盖 Host：这条用例要独立证明 X-Forwarded-* 不被采信。
+    // 若同时伪造 Host，失败会由 Host 触发，这条断言就证明不了 XFF 那一条（弱断言）。
+    const { status, text } = await requestWithHost(port, '/api/rooms', {
       method: 'POST',
-      host: 'evil.example',
       headers: {
         ...authHeaders,
         'Content-Type': 'application/json',
@@ -995,8 +1043,12 @@ describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
       body: '{}'
     })
 
+    // 先证明请求真的成功了：否则「不含 attacker.example」可能只是错误响应，断言等于空转
+    expect(status).toBe(201)
+    const payload = JSON.parse(text)
+    expect(payload.stateUrl).toMatch(/^\/api\/rooms\//u)
+    expect(payload.streamUrl).toMatch(/^\/api\/rooms\//u)
     expect(text).not.toContain('attacker.example')
-    expect(text).not.toContain('evil.example')
   })
 }, 60000)
 

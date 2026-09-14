@@ -51,6 +51,9 @@ services:
       STREAM_TICKET_TTL_MS: ${STREAM_TICKET_TTL_MS:-60000}
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+      # 可信反向代理网段：留空 = 不采信 X-Forwarded-For（直连部署）。
+      # 处于反代之后必须声明，否则限流退化成全站共用一个桶。
+      RELAY_TRUSTED_PROXIES: "${RELAY_TRUSTED_PROXIES:-}"
       MAX_UPLOAD_BYTES_PER_WINDOW: ${MAX_UPLOAD_BYTES_PER_WINDOW:-268435456}
     volumes:
       # 不要透传 `.env` 里的 UPLOAD_DIR=./server/uploads —— 那会让上传落到卷外（容器重建即丢），

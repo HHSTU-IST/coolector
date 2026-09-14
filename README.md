@@ -117,13 +117,99 @@ pnpm run relay
 
 默认监听 `http://localhost:8787`
 
+## 软件架构
+
+> 下图由 Mermaid 渲染，GitHub 与 VS Code 均原生支持；需要导出图片时可用 `mermaid-cli`。
+
+### 组件与信任边界
+
+```mermaid
+flowchart TB
+  subgraph client["浏览器 · 纯静态前端（GitHub Pages / 任意静态托管，产物不含任何密钥）"]
+    direction TB
+    sender["发送方页面<br/>FileUploader · FileViewer"]
+    receiver["接收端页面<br/>RelayReceiver（SSE 长连接）"]
+    core["Pinia stores + utils/relay<br/>file · collection · 地址校验 · 同源解析<br/>RELAY_TOKEN 只存 localStorage"]
+    sender --> core
+    receiver --> core
+  end
+
+  subgraph edge["反向代理（可选）· Caddy / Nginx"]
+    tls["HTTPS 终结<br/>反代头既不需要、也无法左右对外 URL"]
+  end
+
+  subgraph srv["Relay Server · 自托管 Node 进程 · 零第三方运行时依赖"]
+    direction TB
+    app["relay-server.js<br/>路由分发 + 各 handler（唯一编排层）"]
+    roomState["relay-state.js<br/>房间 · 配额原子预占 · 生命周期"]
+    http["relay-http.js<br/>CORS · 鉴权 · 限流 · SSE 原语"]
+    conf["relay-config.js<br/>环境变量解析（非法即拒绝启动）"]
+    utils["relay-utils.js<br/>纯函数（可单测）"]
+    app --> roomState
+    app --> http
+    roomState --> http
+    http --> conf
+    conf --> utils
+  end
+
+  disk["UPLOAD_DIR · server/uploads/房间号/<br/>每目录带 .coolector-room 归属标记"]
+
+  sender -->|"POST /api/rooms/:roomId/uploads（免凭据）"| tls
+  receiver -->|"Bearer 密钥：建房 · 换 SSE 票据 · 按需拉正文"| tls
+  tls --> app
+  roomState -->|"落盘 / 回收"| disk
+```
+
+三条结构性事实（也是全部安全设计的来源）：
+
+1. **前端是纯静态站**：`dist/` 可直接公开托管，接收端密钥由用户在界面上填写、只存本机 `localStorage`，
+   因此产物永远是公开安全的（`pnpm guard:no-secret` 会断言这一点）。
+2. **Relay Server 是唯一有状态方**：房间只在内存、正文只落磁盘；无 Redis / 无数据库 / 无第三方运行时依赖，
+   单实例即可服务多个班级，但也**不支持多实例共享 `UPLOAD_DIR`**。
+3. **服务端只输出相对路径**：`Host` / `X-Forwarded-*` 完全不参与 URL 拼接，由客户端按自己填写的 Relay 地址解析 ——
+   否则无凭据的发送方伪造 `Host` 就能把接收端的管理密钥引向攻击者域。
+
+### 两条主链路
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant S as 发送方浏览器
+  participant R as 接收端浏览器
+  participant Relay as Relay Server
+
+  Note over R,Relay: ① 接收端建房并挂上长连接（需 Bearer 密钥）
+  R->>Relay: POST /api/rooms（房间号可留空，由服务端生成 UUID）
+  Relay-->>R: roomId · stateUrl · streamUrl（全是相对路径）
+  R->>Relay: POST /api/rooms/:roomId/stream-ticket
+  Relay-->>R: 一次性票据（默认 60s · 用后即焚）
+  R->>Relay: GET /api/rooms/:roomId/events?ticket=…
+  Relay-->>R: 打开即补发 receiver.ready，并重放离线队列
+
+  Note over S,Relay: ② 发送方上传（不需要任何密钥，房间号即能力凭据）
+  S->>Relay: POST /api/rooms/:roomId/uploads（JSON 信封：name + contentBase64 + text）
+  Relay->>Relay: 体积校验 → 原子预占房间配额与条数上限
+  Relay->>Relay: 落盘到 UPLOAD_DIR/房间号/ 并写归属标记
+  Relay-->>S: 201（带完整正文，发送方自检用）
+  Relay-->>R: SSE upload.created（只带元信息，不含正文）
+
+  Note over R,Relay: ③ 接收端按需把正文拉回来（Bearer）
+  R->>Relay: GET detailsUrl
+  Relay-->>R: 文本类回文本，二进制回 base64（含 textTruncated 标记）
+```
+
+> 为什么 SSE 只推元信息：单文件上限 10 MB，正文广播会按接收端数量成倍放大内存与流量；
+> 正文一律走 `detailsUrl` 按需拉取，`download` 端点则直接从磁盘读回。
+
 ## 项目结构
 
 ```text
 server/
-├── relay-server.js     # Relay 主服务（Node 原生 http，零第三方运行时依赖）
-├── relay-utils.js      # 抽出的纯函数（可单测）
-├── relay-utils.test.js # 纯函数单测
+├── relay-server.js     # Relay 主服务：路由分发与各 handler（Node 原生 http）
+├── relay-config.js     # 环境变量解析（非法值 fail-closed 退出）
+├── relay-http.js       # HTTP 原语与准入（CORS / 鉴权 / 限流 / 读写）
+├── relay-state.js      # 房间状态、配额记账与生命周期
+├── *.test.js           # 纯函数单测 + 真实进程 HTTP 集成测试
 └── start.js            # web + relay 双进程编排
 scripts/
 ├── e2e-upload.mjs      # 真实浏览器端到端回归（G3 门禁）
@@ -136,11 +222,9 @@ src/
 │   ├── FileViewer.vue      # 文件预览 / 发送方上传
 │   ├── RelayReceiver.vue   # 公网接收长连接（SSE）
 │   └── ToastHost.vue       # 全局提示宿主
-├── stores/             # Pinia 状态管理
-│   ├── file.ts         # 文件相关状态
-│   └── collection.ts   # 收集列表状态
-├── utils/              # 工具函数（文件名解析、docx 解析、格式化、relay 凭据）
-├── composables/        # 组合式函数（useToast）
+├── composables/        # 组合式函数（useToast / useRelayReceiver）
+├── stores/             # Pinia 状态管理（file / collection）
+├── utils/              # 文件名解析、docx 解析、格式化、relay 凭据与契约类型
 ├── App.vue            # 根组件
 ├── main.ts            # 应用入口
 └── style.css          # 全局样式
