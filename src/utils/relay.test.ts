@@ -35,9 +35,47 @@ describe('resolveRelayUrl', () => {
     expect(() => resolveRelayUrl('http://127.0.0.1:9999/api', BASE)).toThrow(UntrustedRelayUrlError)
   })
 
-  it('协议相对地址（//host）不会被当作出站请求', () => {
-    const resolved = resolveRelayUrl('//evil.example/x', BASE)
-    expect(new URL(resolved).origin).toBe('http://127.0.0.1:8787')
+  it('协议相对地址（//host）走同源检查：跨源直接拒绝，同源则按基址协议正确解析', () => {
+    expect(() => resolveRelayUrl('//evil.example/x', BASE)).toThrow(UntrustedRelayUrlError)
+    // 同源时补上基址协议解析，而不是拼成 `base//host/...` 这种垃圾路径
+    expect(resolveRelayUrl('//127.0.0.1:8787/api/rooms/r1', BASE))
+      .toBe('http://127.0.0.1:8787/api/rooms/r1')
+  })
+
+  it('反斜杠形态不能绕过源判定（浏览器把 `\\` 当 `/`）', () => {
+    expect(() => resolveRelayUrl('/\\evil.example/x', BASE)).toThrow(UntrustedRelayUrlError)
+    expect(() => resolveRelayUrl('\\\\evil.example\\x', BASE)).toThrow(UntrustedRelayUrlError)
+  })
+
+  it('userinfo 伪装不能混淆源；同源 userinfo 会被剥离（fetch 不接受含凭据的 URL）', () => {
+    expect(() => resolveRelayUrl('http://relay.example.com@evil.example/x', BASE))
+      .toThrow(UntrustedRelayUrlError)
+    expect(resolveRelayUrl('http://user:pass@127.0.0.1:8787/api/x', BASE))
+      .toBe('http://127.0.0.1:8787/api/x')
+  })
+
+  it('制表符 / 换行 / 空白包裹不能绕过源判定', () => {
+    expect(() => resolveRelayUrl('http://evil.example\t/api', BASE)).toThrow(UntrustedRelayUrlError)
+    expect(() => resolveRelayUrl('  //evil.example/x  ', BASE)).toThrow(UntrustedRelayUrlError)
+  })
+
+  it('大小写不改变源判定', () => {
+    expect(resolveRelayUrl('HTTP://127.0.0.1:8787/api/x', BASE)).toBe('http://127.0.0.1:8787/api/x')
+    expect(() => resolveRelayUrl('HTTP://EVIL.EXAMPLE/api', BASE)).toThrow(UntrustedRelayUrlError)
+  })
+
+  it('非 http(s) 协议一律拒绝', () => {
+    expect(() => resolveRelayUrl('ftp://127.0.0.1:8787/x', BASE)).toThrow(UntrustedRelayUrlError)
+    expect(() => resolveRelayUrl('javascript:alert(1)', BASE)).toThrow(UntrustedRelayUrlError)
+    expect(() => resolveRelayUrl('data:text/html,<p>x</p>', BASE)).toThrow(UntrustedRelayUrlError)
+  })
+
+  it('基址不可解析时拒绝（绝不回退到页面自身 origin）', () => {
+    expect(() => resolveRelayUrl('http://127.0.0.1:8787/api', 'not a url')).toThrow(UntrustedRelayUrlError)
+  })
+
+  it('同源相对基址（dev 代理的 `/relay`）也能正确拼接', () => {
+    expect(resolveRelayUrl('/api/rooms/r1', '/relay')).toBe('/relay/api/rooms/r1')
   })
 
   it('空地址与畸形地址被拒绝', () => {

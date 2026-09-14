@@ -4,6 +4,7 @@ import { readFile, rm } from 'node:fs/promises'
 import {
   contentDisposition,
   decodeHeaderValue,
+  digestName,
   isLoopbackHost,
   isTextMimeType,
   isWeakRoomId,
@@ -14,20 +15,20 @@ import {
   truncateUtf8
 } from './relay-utils.js'
 import {
-  ALLOWED_ORIGINS, HOST, MAX_FILE_BYTES, MAX_TEXT_BYTES, MAX_TOTAL_UPLOAD_BYTES,
+  ALLOWED_ORIGINS, HOST, MAX_FILE_BYTES, MAX_ROOMS, MAX_ROOM_BYTES_PER_WINDOW, MAX_TEXT_BYTES,
   MAX_UPLOAD_BYTES_PER_WINDOW, MAX_UPLOAD_NAME_BYTES, PORT, RELAY_TOKEN,
   ROOM_CLEANUP_INTERVAL_MS, RATE_LIMIT_WINDOW_MS, STREAM_TICKET_TTL_MS
 } from './relay-config.js'
 import {
   HttpError, auditLog, corsHeaders, isAuthorized, isPublicUpload,
   isRateLimited, isStreamTicketAuthorized, isUploadBytesExceeded, nowIso, relayUrl,
-  rateBuckets, readBody, sendSseHeaders, streamTickets, uploadByteBuckets,
-  writeJson, writeSseFrame
+  rateBuckets, readBody, roomByteBuckets, sendSseHeaders, streamTickets,
+  uploadByteBuckets, writeJson, writeSseFrame
 } from './relay-http.js'
 import {
   cleanupRooms, closeReceiver, createRoom, destroyRoom, dispatchEvent, getRoom,
   initStoredBytes, persistUpload, reserveStorageQuota, reserveUploadSlot,
-  roomSnapshot, rooms, totalStoredBytes, uploadSummary
+  roomSnapshot, rooms, uploadSummary
 } from './relay-state.js'
 
 // Relay 主服务：只做**编排** —— 路由分发 + 各 handler + 定时器 + 监听。
@@ -119,6 +120,13 @@ async function handleCreateRoom(req, res) {
     }
   }
 
+  // 建房上限：房间只在内存里，而建房是持凭据方唯一能持续新增内存对象的入口。
+  // 已存在的房间不算新增 —— 重进自己那个房间不该被上限拦住。
+  if (!(requestedId && getRoom(requestedId)) && rooms.size >= MAX_ROOMS) {
+    auditLog('room_limit_reached', { rooms: rooms.size, limit: MAX_ROOMS, ip: req.socket.remoteAddress })
+    throw new HttpError(429, `Room count limit reached (limit ${MAX_ROOMS})`)
+  }
+
   const room = createRoom(requestedId ?? undefined)
   if (room.created) {
     dispatchEvent(room.room, 'room.created', {
@@ -156,8 +164,8 @@ async function handleUpload(req, res, room, query) {
     throw new HttpError(413, `File exceeds size limit (${MAX_FILE_BYTES} bytes)`)
   }
 
-  if (isUploadBytesExceeded(req, body.length)) {
-    throw new HttpError(429, `Upload rate exceeded (limit ${MAX_UPLOAD_BYTES_PER_WINDOW} bytes per window)`)
+  if (isUploadBytesExceeded(req, room.id, body.length)) {
+    throw new HttpError(429, `Upload rate exceeded (limit ${MAX_UPLOAD_BYTES_PER_WINDOW} bytes per IP / ${MAX_ROOM_BYTES_PER_WINDOW} bytes per room per window)`)
   }
 
   // 正文只用于预览/展示，按 UTF-8 边界截断，避免第三方客户端塞入超大正文撑爆内存
@@ -233,8 +241,14 @@ async function handleUpload(req, res, room, query) {
   room.stats.uploads += 1
   room.updatedAt = upload.uploadedAt
   room.lastActivity = Date.now()
-  // 只记录截断后的名字与长度，避免超长文件名把审计日志放大到 MB 级
-  auditLog('upload_created', { roomId: room.id, name: upload.name.slice(0, 120), nameLength: upload.name.length, size })
+  // 不记原始文件名：作业名普遍是「学号+姓名」，那是 PII；摘要 + 长度既够归并排查，又不落个人信息。
+  // （同时也避免了超长文件名把审计日志放大到 MB 级）
+  auditLog('upload_created', {
+    roomId: room.id,
+    nameLength: upload.name.length,
+    nameDigest: digestName(upload.name),
+    size
+  })
 
   // 201 响应里带上完整正文（发送方原本就能拿到），广播事件里只带元信息
   const uploadPayload = uploadSummary(upload)
@@ -380,19 +394,17 @@ const server = createServer(async (req, res) => {
           deleteRoom: 'DELETE /api/rooms/:roomId',
           healthz: 'GET /healthz'
         },
-        authRequired: Boolean(RELAY_TOKEN),
-        storageUsedBytes: totalStoredBytes,
-        storageLimitBytes: MAX_TOTAL_UPLOAD_BYTES
+        authRequired: Boolean(RELAY_TOKEN)
+        // 刻意不再暴露用量与上限：这两个数字对匿名访问者没有价值，
+        // 却能帮他判断「服务有多少存量、离打满还有多远」。房间维度的用量在
+        // 需鉴权的房间快照里照常可见（接收端面板的「存储用量」不受影响）。
       }, cors)
       return
     }
 
     if (req.method === 'GET' && pathname === '/healthz') {
-      writeJson(res, 200, {
-        status: 'ok',
-        rooms: rooms.size,
-        uptimeSeconds: Math.floor(process.uptime())
-      }, cors)
+      // 只回存活状态：健康检查只需要一个 200；房间数/uptime 属可被匿名收集的运营信息
+      writeJson(res, 200, { status: 'ok' }, cors)
       return
     }
 
@@ -483,11 +495,11 @@ const server = createServer(async (req, res) => {
 
 setInterval(() => {
   const now = Date.now()
-  for (const [ip, bucket] of rateBuckets) {
-    if (bucket.resetAt <= now) rateBuckets.delete(ip)
-  }
-  for (const [ip, bucket] of uploadByteBuckets) {
-    if (bucket.resetAt <= now) uploadByteBuckets.delete(ip)
+  // 三个限流桶：按来源 IP 的请求计数、按来源 IP 的字节、按房间的字节
+  for (const store of [rateBuckets, uploadByteBuckets, roomByteBuckets]) {
+    for (const [key, bucket] of store) {
+      if (bucket.resetAt <= now) store.delete(key)
+    }
   }
 }, RATE_LIMIT_WINDOW_MS).unref()
 

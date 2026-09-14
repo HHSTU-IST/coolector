@@ -39,6 +39,8 @@ services:
       # 单房间配额：防止免凭据的发送方把全局配额吃光、导致其它班级一起 507
       MAX_ROOM_UPLOAD_BYTES: ${MAX_ROOM_UPLOAD_BYTES:-134217728}
       MAX_ROOM_UPLOADS: ${MAX_ROOM_UPLOADS:-500}
+      # 同时存在的房间数上限（软上限：房间随 TTL 回收后自动缓解）
+      MAX_ROOMS: ${MAX_ROOMS:-200}
       # 单房间离线事件队列上限：接收端短暂断线时靠它重放，超出丢弃最旧事件
       MAX_QUEUE_EVENTS: ${MAX_QUEUE_EVENTS:-200}
       MAX_UPLOAD_NAME_BYTES: ${MAX_UPLOAD_NAME_BYTES:-255}
@@ -55,6 +57,8 @@ services:
       # 处于反代之后必须声明，否则限流退化成全站共用一个桶。
       RELAY_TRUSTED_PROXIES: "${RELAY_TRUSTED_PROXIES:-}"
       MAX_UPLOAD_BYTES_PER_WINDOW: ${MAX_UPLOAD_BYTES_PER_WINDOW:-268435456}
+      # 单房间的窗口字节额度：挡住「多来源一起灌同一个房间」
+      MAX_ROOM_BYTES_PER_WINDOW: ${MAX_ROOM_BYTES_PER_WINDOW:-268435456}
     volumes:
       # 不要透传 `.env` 里的 UPLOAD_DIR=./server/uploads —— 那会让上传落到卷外（容器重建即丢），
       # 而命名卷永远是空的。/data/uploads 由 Dockerfile 固定，与下面的卷一一对应。

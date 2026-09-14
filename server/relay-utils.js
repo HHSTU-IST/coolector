@@ -2,7 +2,7 @@
 // relay-server.js 导入本模块复用；本模块不含副作用，可安全被 Vitest 加载。
 
 import { basename } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { BlockList, isIP } from 'node:net'
 import { StringDecoder } from 'node:string_decoder'
 
@@ -324,8 +324,32 @@ export function makeAuthorizer(relayToken) {
     if (!relayToken) return true
 
     const header = String(req.headers.authorization ?? '')
-    return header === `Bearer ${relayToken}`
+    return safeEqual(header, `Bearer ${relayToken}`)
   }
+}
+
+/**
+ * 恒定时间字符串比较（用于密钥/票据比对）。
+ *
+ * `===` 会短路于首个不同字符，理论上是可测量侧信道；网络噪声远大于这个差异，
+ * 但既然比较的是长期密钥，就没有理由不用恒定时间实现。
+ * 长度不同直接返回 false：`timingSafeEqual` 对长度不等会抛错，且长度本身不是秘密。
+ */
+function safeEqual(a, b) {
+  const left = Buffer.from(a, 'utf8')
+  const right = Buffer.from(b, 'utf8')
+  if (left.length !== right.length) return false
+  return timingSafeEqual(left, right)
+}
+
+/**
+ * 文件名的不可逆摘要（默认 12 位十六进制）。
+ *
+ * 审计日志里原本记的是**原始文件名**，而学生作业名普遍含「学号+姓名」——那就是 PII。
+ * 换成摘要后：既不能反推姓名，又能让运维对「同一个文件被反复上传」做归并排查。
+ */
+export function digestName(name, { length = 12 } = {}) {
+  return createHash('sha256').update(String(name ?? ''), 'utf8').digest('hex').slice(0, length)
 }
 
 /**
@@ -351,12 +375,25 @@ export function makeTicketStore({ ttlMs = 60_000, now = () => Date.now() } = {})
       tickets.set(ticket, { roomId, expiresAt: now() + ttlMs })
       return ticket
     },
-    /** 校验并消费票据；房间不匹配 / 过期 / 已用一律 false */
+    /**
+     * 校验并消费票据。**先校验、后删除**：房间不匹配 / 过期时不烧票。
+     *
+     * 原先「先删后校验」会造成误烧：拿 A 房间的票去打 B 房间（哪怕是攻击者随手试探），
+     * 就会把 A 的票作废，接收端随后的合法连接被 401 —— 一张有效票据被一次无关请求销毁。
+     */
     consume(ticket, roomId) {
       if (!ticket) return false
+
       const entry = tickets.get(ticket)
+      if (!entry) return false
+      if (entry.expiresAt <= now()) {
+        tickets.delete(ticket)
+        return false
+      }
+      if (entry.roomId !== roomId) return false
+
       tickets.delete(ticket)
-      return Boolean(entry) && entry.expiresAt > now() && entry.roomId === roomId
+      return true
     },
     get size() {
       return tickets.size

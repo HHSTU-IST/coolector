@@ -73,6 +73,15 @@ const MAX_ROOM_UPLOAD_BYTES = requirePositiveInt(
 // 单个来源 IP 在限流窗口内可写入的字节数（0 = 关闭）。与请求计数限流互补，直接限制配额消耗速率。
 const MAX_UPLOAD_BYTES_PER_WINDOW = requirePositiveInt('MAX_UPLOAD_BYTES_PER_WINDOW', 256 * 1024 * 1024, { min: 0 })
 
+// 单个**房间**在限流窗口内可写入的字节数（0 = 关闭）。
+// 只按 IP 记字节挡不住「多来源一起灌同一个房间」（出口 IP 多变的滥用者）：
+// 房间维度让单房间被灌爆既不牵连其它房间，也不至于瞬间吃掉该房间的整份配额。
+const MAX_ROOM_BYTES_PER_WINDOW = requirePositiveInt('MAX_ROOM_BYTES_PER_WINDOW', 256 * 1024 * 1024, { min: 0 })
+
+// 同时存在的房间数上限。房间只在内存里，而**建房是持凭据方唯一能持续新增内存对象**的入口
+// （公开上传受房间存在性与配额约束）—— 不封顶时，一个脚本可以一路建房直到进程 OOM。
+const MAX_ROOMS = requirePositiveInt('MAX_ROOMS', 200)
+
 // 单个房间的上传条数上限：即使每个文件都是 0 字节，也不能让 room.uploads 无限增长
 const MAX_ROOM_UPLOADS = requirePositiveInt('MAX_ROOM_UPLOADS', 500)
 
@@ -146,6 +155,8 @@ export {
   MAX_TOTAL_UPLOAD_BYTES,
   MAX_ROOM_UPLOAD_BYTES,
   MAX_UPLOAD_BYTES_PER_WINDOW,
+  MAX_ROOM_BYTES_PER_WINDOW,
+  MAX_ROOMS,
   MAX_ROOM_UPLOADS,
   MAX_UPLOAD_NAME_BYTES,
   ROOM_CLEANUP_INTERVAL_MS,

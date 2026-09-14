@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# 最小权限：CI 只读仓库（默认 GITHUB_TOKEN 权限过宽）
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

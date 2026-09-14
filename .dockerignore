@@ -1,14 +1,5 @@
 # Docker 构建上下文忽略清单。
-#
-# ⚠️ 必须放在**仓库根目录**：compose 的 context 是 `.`（docker-compose.yml），
-# 手工构建也是 `docker build -f server/Dockerfile .`（RELAY_DEPLOY.md §3.2）。
-# 仓库里原有的 `server/.dockerignore` 在根上下文下**根本不会被读取**，等于不存在。
-#
-# 不做忽略的实际后果：整个仓库（含 `.env` 里的真实 `RELAY_TOKEN`、`node_modules`、`dist`）
-# 都会被送进构建上下文。当前 Dockerfile 用 `COPY server/*.js ./`，加上本文件的排除项后
-# 只会拷贝服务端脚本，所以密钥不会进入镜像层；但它仍会随上下文传给 daemon 并可能进入
-# 构建缓存 —— 一旦将来有人写成 `COPY . .` 就会真实泄露。
-# 顺手也让构建上下文从数百 MB 降到几乎为空。
+
 node_modules
 dist
 dist-ssr
@@ -19,7 +10,9 @@ deliverables
 .env
 .env.*
 server/uploads
+
 # 测试文件不必进生产镜像：运行环境不需要它们，也没有理由随镜像分发。
+
 server/*.test.js
 scripts/.receiver-runtime.json
 *.log

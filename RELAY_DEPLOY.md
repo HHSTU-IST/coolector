@@ -26,7 +26,7 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 | `HOST`                   | `0.0.0.0`            | 监听地址。未设 `RELAY_TOKEN` 且非回环时**拒绝启动**（fail-closed）                                                                                                                                                                                                               |
 | `RELAY_ALLOWED_ORIGINS`  | 空（不发 CORS 头）   | CORS 白名单，逗号分隔。**留空 = 拒绝所有跨源前端**（同源部署无需配置）；前后端不同源时必须显式填前端域名，`*` 只适合本机/内网。本机 `pnpm start` 会自动放行 `localhost:5174`                                                                                                     |
 | `RELAY_PUBLIC_BASE_URL`  | 空（只输出相对路径） | 对外 URL 基址。**留空即可，反代 HTTPS 部署也一样**——接收端按它填写的 Relay 地址解析相对路径。服务端不会从 `Host` / `x-forwarded-*` 推断自身地址（那会让攻击者用伪造 `Host` 把接收端的管理密钥引向外部）。仅当有非浏览器客户端需要绝对 URL 时才设，如 `https://relay.example.com` |
-| `RELAY_TRUSTED_PROXIES`  | 空（忽略转发头）     | 可信反向代理网段（IP/CIDR，逗号分隔）。**反代部署必须声明**，否则所有请求的 socket 地址都是代理 IP、全站共用一个限流桶 —— 单个滥用者足以让全班 429。例：`127.0.0.1,10.0.0.0/8`。直连部署留空（留空 = 不采信 `X-Forwarded-For`，防伪造换桶绕过限流） |
+| `RELAY_TRUSTED_PROXIES`  | 空（忽略转发头）     | 可信反向代理网段（IP/CIDR，逗号分隔）。**反代部署必须声明**，否则所有请求的 socket 地址都是代理 IP、全站共用一个限流桶 —— 单个滥用者足以让全班 429。例：`127.0.0.1,10.0.0.0/8`。直连部署留空（留空 = 不采信 `X-Forwarded-For`，防伪造换桶绕过限流）                              |
 | `UPLOAD_DIR`             | `./server/uploads`   | 上传落盘目录，**生产务必挂持久卷**                                                                                                                                                                                                                                               |
 | `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB)   | 全局磁盘配额，超出返回 **507**                                                                                                                                                                                                                                                   |
 | `MAX_ROOM_UPLOAD_BYTES`  | 全局的 1/8（128MB）  | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明）                                                                                                                                                                                                   |
@@ -41,7 +41,6 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 
 > **数值型变量现在会 fail-closed 校验**：写成 `MAX_FILE_BYTES=10mb` 这类非整数会让进程**拒绝启动**，
 > 而不是把 `NaN` 带进体积判断（那会让所有校验静默失效）。
-
 > **重启会丢弃房间与上传文件**：房间只存在于内存，重启后旧房间一律 404（接收端需要重新建房并分享新的房间号）。
 > 磁盘上残留的目录因此成为「无主目录」，服务默认在启动时回收它们并记入审计日志，
 > 避免它们被永久计入配额、把磁盘占住却无法回收。若需要人工抢救，设
@@ -54,7 +53,6 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 >
 > ⚠️ **多实例禁令**：两个 relay 实例**不能**共享同一个 `UPLOAD_DIR`。新实例启动时会回收
 > 它看到的所有「带标记目录」（含在跑实例的在线房间），把它们当作无主目录删掉。
-
 > **房间创建**：`POST /api/rooms/:roomId/uploads` 是唯一的免凭据写入口（发送方用），
 > 且**不会**自动创建房间 —— 房间必须由持有 `RELAY_TOKEN` 的接收端先创建。
 > 房间 ID 默认是服务端生成的完整 UUID，长度下限 8 位；`demo-room` 这类弱房间名会记一条
@@ -129,6 +127,22 @@ Caddy 自动向 Let's Encrypt 申请并续期证书，SSE 默认不缓冲，开�
 - `proxy_buffering off` 保证 SSE 事件实时下发
 - 样例里的 `X-Forwarded-*` / `Host` **仅供代理自身的日志与访问控制**：relay 不读取它们（见上一节），生成绝对 URL 是客户端的事
 - `client_max_body_size 20m` 需 >= `MAX_BODY_BYTES`（默认派生 15,160,662 B ≈ 15.16 MB）
+
+### 4.3 建议的响应头（托管侧）
+
+GitHub Pages **无法自定义响应头**，因此前端产物里的 CSP 是以 `<meta>` 形式在构建期注入的
+（见 `vite.config.ts` 的 `coolector:inject-csp`）。若你自托管前端（Nginx / 对象存储 / CDN），
+请把这些头放到**响应头**里 —— 响应头比 meta 更强，且能覆盖 meta 做不到的项：
+
+| 头                          | 值                                    | 说明                                                                         |
+| --------------------------- | ------------------------------------- | ---------------------------------------------------------------------------- |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | 强制 HTTPS（前后端域名都加）                                                 |
+| `X-Frame-Options`           | `DENY`                                | 防点击劫持；CSP 的 `frame-ancestors` 在 meta 里**不生效**，只能用响应头      |
+| `X-Content-Type-Options`    | `nosniff`                             | Relay 的下载响应已自带，静态站建议一并加                                     |
+| `Referrer-Policy`           | `strict-origin-when-cross-origin`     | URL 里可能带 SSE 一次性票据，别随 Referer 外泄（`index.html` 已有同名 meta） |
+| `Content-Security-Policy`   | 同 `vite.config.ts` 里的值            | 自托管时应迁到这里，并从 meta 移除，避免两处漂移                             |
+
+> CSP 的 `connect-src` **必须**放行任意 http(s)：接收端填写的 Relay 地址是用户决定的，跨源是设计的一部分。
 
 ## 5. 前端生产构建
 

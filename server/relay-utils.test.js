@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   contentDisposition,
   decodeHeaderValue,
+  digestName,
   isLoopbackHost,
   isTextMimeType,
   isWeakRoomId,
@@ -366,6 +367,26 @@ describe('makeAuthorizer', () => {
     const auth = makeAuthorizer('secret')
     expect(auth({ headers: { authorization: 'Bearer wrong' }, url: '/' })).toBe(false)
   })
+
+  it('长度不同的凭据直接拒绝且不抛异常（恒定时间比较的前置条件）', () => {
+    const auth = makeAuthorizer('secret')
+    expect(auth({ headers: { authorization: 'Bearer s' }, url: '/' })).toBe(false)
+    expect(auth({ headers: { authorization: '' }, url: '/' })).toBe(false)
+  })
+})
+
+describe('digestName', () => {
+  it('同一文件名得同一摘要，不同文件名不同，长度固定', () => {
+    expect(digestName('张三-20230101.md')).toBe(digestName('张三-20230101.md'))
+    expect(digestName('张三-20230101.md')).not.toBe(digestName('李四-20230102.md'))
+    expect(digestName('张三-20230101.md')).toHaveLength(12)
+  })
+
+  it('摘要里不含原始姓名（审计日志不落 PII）', () => {
+    const digest = digestName('张三-20230101.md')
+    expect(digest).not.toContain('张三')
+    expect(digest).toMatch(/^[0-9a-f]{12}$/u)
+  })
 })
 
 describe('makeCorsHeaders', () => {
@@ -457,6 +478,27 @@ describe('makeTicketStore', () => {
     const store = makeTicketStore()
     const ticket = store.issue('room-a')
     expect(store.consume(ticket, 'room-b')).toBe(false)
+  })
+
+  it('房间不匹配时**不烧票**（先校验后删，避免无关请求把有效票据销毁）', () => {
+    const store = makeTicketStore()
+    const ticket = store.issue('room-a')
+
+    expect(store.consume(ticket, 'room-b')).toBe(false)
+    // 拿 A 的票去打 B 之后，A 的票必须还能用
+    expect(store.consume(ticket, 'room-a')).toBe(true)
+    // 但用掉之后就真的没了（一次性语义不变）
+    expect(store.consume(ticket, 'room-a')).toBe(false)
+  })
+
+  it('过期票据被清出存储且不可用', () => {
+    let current = 0
+    const store = makeTicketStore({ ttlMs: 100, now: () => current })
+    const ticket = store.issue('room-a')
+
+    current = 200
+    expect(store.consume(ticket, 'room-a')).toBe(false)
+    expect(store.size).toBe(0)
   })
 
   it('过期票据拒绝', () => {

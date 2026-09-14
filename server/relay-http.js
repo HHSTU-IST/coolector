@@ -3,8 +3,9 @@
 
 import { makeAuthorizer, makeClientIpResolver, makeCorsHeaders, makeTicketStore, sanitizeRoomId } from './relay-utils.js'
 import {
-  ALLOWED_ORIGINS, MAX_BODY_BYTES, MAX_UPLOAD_BYTES_PER_WINDOW, PUBLIC_BASE_URL,
-  RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, RELAY_TOKEN, STREAM_TICKET_TTL_MS, TRUSTED_PROXIES
+  ALLOWED_ORIGINS, MAX_BODY_BYTES, MAX_ROOM_BYTES_PER_WINDOW, MAX_UPLOAD_BYTES_PER_WINDOW,
+  PUBLIC_BASE_URL, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, RELAY_TOKEN, STREAM_TICKET_TTL_MS,
+  TRUSTED_PROXIES
 } from './relay-config.js'
 
 /** 限流分桶用的客户端 IP：只有可信代理后的请求才采信 X-Forwarded-For（见 relay-utils） */
@@ -156,30 +157,41 @@ function sendSseHeaders(res, headers = {}) {
 /**
  * 公开写路径的「按字节」限流：与请求计数限流互补。
  * 请求计数限流挡不住「120 次 × 10MB」这种量级的配额消耗，字节限流才能直接约束它。
+ *
+ * **两个维度都要**：按来源 IP 挡单点滥用；按房间挡「多来源一起灌同一个房间」
+ * （出口 IP 多变的滥用者），并保证单房间被灌爆不会牵连其它房间。
  */
-function isUploadBytesExceeded(req, size) {
-  if (MAX_UPLOAD_BYTES_PER_WINDOW <= 0) return false
+function isUploadBytesExceeded(req, roomId, size) {
+  if (MAX_UPLOAD_BYTES_PER_WINDOW > 0) {
+    const ipBucket = takeBucket(uploadByteBuckets, resolveClientIp(req))
+    if (ipBucket.bytes + size > MAX_UPLOAD_BYTES_PER_WINDOW) return true
+    ipBucket.bytes += size
+  }
 
-  const bucket = takeBucket(uploadByteBuckets, req)
-  if (bucket.bytes + size > MAX_UPLOAD_BYTES_PER_WINDOW) return true
+  if (MAX_ROOM_BYTES_PER_WINDOW > 0) {
+    const roomBucket = takeBucket(roomByteBuckets, roomId)
+    if (roomBucket.bytes + size > MAX_ROOM_BYTES_PER_WINDOW) return true
+    roomBucket.bytes += size
+  }
 
-  bucket.bytes += size
   return false
 }
 
 
 const rateBuckets = new Map()
 
-/** 上传字节限流的窗口桶（见 isUploadBytesExceeded） */
+/** 上传字节限流的窗口桶 · 按来源 IP（见 isUploadBytesExceeded） */
 const uploadByteBuckets = new Map()
+
+/** 上传字节限流的窗口桶 · 按房间（见 isUploadBytesExceeded） */
+const roomByteBuckets = new Map()
 
 
 /**
- * 取出（必要时新建）某个来源在当前限流窗口内的计数桶。
- * 两个限流器共用这一种桶形状，避免各写一遍「取桶 → 判过期 → 新建」。
+ * 取出（必要时新建）某个键在当前限流窗口内的计数桶。
+ * 三个限流器共用这一种桶形状，避免各写一遍「取桶 → 判过期 → 新建」。
  */
-function takeBucket(store, req) {
-  const key = resolveClientIp(req)
+function takeBucket(store, key) {
   const now = Date.now()
   let bucket = store.get(key)
 
@@ -194,7 +206,7 @@ function takeBucket(store, req) {
 
 function isRateLimited(req) {
   // 注意：限流一旦启用就一定计数，即使随后请求因其他原因被拒（fail-closed 方向）
-  const bucket = takeBucket(rateBuckets, req)
+  const bucket = takeBucket(rateBuckets, resolveClientIp(req))
   bucket.count += 1
   return bucket.count > RATE_LIMIT_MAX
 }
@@ -218,5 +230,6 @@ export {
   isUploadBytesExceeded,
   rateBuckets,
   uploadByteBuckets,
+  roomByteBuckets,
   isRateLimited
 }

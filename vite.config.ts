@@ -1,9 +1,43 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+/**
+ * 生产构建期注入的 CSP（纵深防御，非现存漏洞的修补）。
+ *
+ * 只在 build 时注入，dev 不注入：HMR / 调试需要更宽松的环境（Vite dev 会注入内联脚本）。
+ * 用 meta 而非响应头，是因为 GitHub Pages 无法自定义响应头；自托管时应改用响应头
+ * （见 RELAY_DEPLOY.md「建议的响应头」）。
+ *
+ * `connect-src` 必须放行任意 http(s)：接收端在界面上填的 Relay 地址由用户决定，
+ * 跨源调用是设计的一部分 —— 收紧成固定源会直接打死主功能。
+ * `style-src` 保留 'unsafe-inline'：Vue 的 `:style` 绑定会写入 style 属性。
+ */
+const CONTENT_SECURITY_POLICY = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self' http: https: ws: wss:",
+    "object-src 'none'",
+    "base-uri 'none'"
+].join('; ')
+
+const injectContentSecurityPolicy = () => ({
+    name: 'coolector:inject-csp',
+    apply: 'build' as const,
+    transformIndexHtml: (html: string) => ({
+        html,
+        tags: [{
+            tag: 'meta',
+            attrs: { 'http-equiv': 'Content-Security-Policy', content: CONTENT_SECURITY_POLICY },
+            injectTo: 'head-prepend' as const
+        }]
+    })
+})
+
 // https://vitejs.dev/config/
 export default defineConfig({
-    plugins: [vue()],
+    plugins: [vue(), injectContentSecurityPolicy()],
     base: './',
     server: {
         // 放行 cloudflared quick tunnel 的 Host（否则隧道访问被 Vite 403 拦截）

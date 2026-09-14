@@ -86,25 +86,37 @@ export const resolveRelayUrl = (target: string, baseUrl: string): string => {
   const base = normalizeRelayUrl(baseUrl)
   if (!base) throw new Error('未配置 Relay 地址')
 
-  const value = target.trim()
+  // 反斜杠先归一为正斜杠：浏览器对 http(s) 会把 `\` 当 `/`，
+  // 不归一的话 `/\evil.example` 这类写法可以绕过下面的「协议相对」判定。
+  const value = target.trim().replace(/\\/gu, '/')
   if (!value) throw new UntrustedRelayUrlError('Relay 返回了空地址')
 
-  // 相对路径（服务端默认形态）：拼到配置的 Relay 地址上。
+  // 相对路径（服务端默认形态）：拼到配置的 Relay 地址上，保留基址的路径前缀。
   // 注意不能依赖页面自身的 origin —— 纯静态前端常与 Relay 不同源。
-  if (value.startsWith('/')) return `${base}${value}`
+  // `//host` 不算相对路径（那是协议相对地址），必须走下面的同源检查。
+  if (value.startsWith('/') && !value.startsWith('//')) return `${base}${value}`
 
   let parsedTarget: URL
   let parsedBase: URL
   try {
-    parsedTarget = new URL(value)
     parsedBase = new URL(base)
+    // 协议相对地址：补上基址的协议再解析，随后**照常做同源检查**。
+    // 既不能当相对路径拼（会变成同源但语义错误的 `base//host/...`），
+    // 更不能直接采信 —— 那正是把凭据送往攻击者域的路径。
+    parsedTarget = value.startsWith('//')
+      ? new URL(`${parsedBase.protocol}${value}`)
+      : new URL(value)
   } catch {
-    throw new UntrustedRelayUrlError(`无法解析 Relay 返回的地址：${value}`)
+    throw new UntrustedRelayUrlError(`无法解析 Relay 返回的地址：${target}`)
   }
 
   if (parsedTarget.origin !== parsedBase.origin) {
     throw new UntrustedRelayUrlError(`拒绝向非配置的 Relay 源发起带凭据的请求：${parsedTarget.origin}`)
   }
+
+  // 同源但带 userinfo 的地址会被 fetch 直接拒绝（规范禁止含凭据的 URL），且它没有任何用途
+  parsedTarget.username = ''
+  parsedTarget.password = ''
 
   return parsedTarget.toString()
 }

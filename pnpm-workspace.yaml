@@ -1,3 +1,6 @@
+# 供应链：新发布的版本先「冷静」1 天（单位：分钟）才允许被解析，
+# 压低「上游包账号被盗后立刻发恶意版本」的时间窗。排除项是确实需要立刻可用的版本。
+minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - "@vitest/mocker@5.0.0"
   - "@vitest/spy@5.0.0"

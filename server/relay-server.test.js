@@ -183,7 +183,7 @@ async function readSseEvent(streamUrl, eventName, timeoutMs = 10000) {
       buffer = frames.pop() ?? ''
       for (const frame of frames) {
         if (frame.includes(`event: ${eventName}\n`)) {
-          await reader.cancel().catch(() => {})
+          await reader.cancel().catch(() => { })
           return frame
         }
       }
@@ -689,6 +689,80 @@ describe('限流分桶与可信代理', () => {
   }, 30000)
 }, 90000)
 
+describe('建房上限与按房间字节限流', () => {
+  it('房间数达 MAX_ROOMS 后拒绝新建，重进已有房间与删除后重建不受影响', async () => {
+    const relay = await startRelay({ MAX_ROOMS: '3' })
+
+    try {
+      const created = []
+      for (let index = 0; index < 3; index += 1) {
+        created.push(await createRoom(relay.baseUrl, `cap-room-${index}`))
+      }
+
+      const blocked = await fetch(`${relay.baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId: 'cap-room-overflow' })
+      })
+      expect(blocked.status).toBe(429)
+      expect((await blocked.json()).error).toMatch(/room count limit/iu)
+
+      // 上限只约束「新增」：重进自己那个房间仍然 201
+      const reenter = await fetch(`${relay.baseUrl}/api/rooms`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId: created[0].roomId })
+      })
+      expect(reenter.status).toBe(201)
+
+      // 回收一个房间后又能建新的（上限是软上限，随 TTL 回收自动缓解）
+      await fetch(`${relay.baseUrl}/api/rooms/${created[0].roomId}`, { method: 'DELETE', headers: authHeaders })
+      const afterDelete = await createRoom(relay.baseUrl, 'cap-room-after-delete')
+      expect(afterDelete.roomId).toBe('cap-room-after-delete')
+    } finally {
+      await relay.stop()
+    }
+  }, 30000)
+
+  it('单房间字节窗口额度用尽返回 429，且不牵连其它房间', async () => {
+    const relay = await startRelay({
+      MAX_FILE_BYTES: String(1024 * 1024),
+      MAX_ROOM_UPLOAD_BYTES: String(64 * 1024 * 1024),
+      MAX_TOTAL_UPLOAD_BYTES: String(128 * 1024 * 1024),
+      // IP 维度给足额度，确保 429 只可能来自「房间维度」
+      MAX_UPLOAD_BYTES_PER_WINDOW: String(64 * 1024 * 1024),
+      MAX_ROOM_BYTES_PER_WINDOW: String(2 * 1024 * 1024)
+    })
+
+    try {
+      const roomA = await createRoom(relay.baseUrl, 'room-window-a')
+      const roomB = await createRoom(relay.baseUrl, 'room-window-b')
+      const payload = envelopeBody({
+        name: 'w.bin',
+        mimeType: 'application/octet-stream',
+        content: Buffer.alloc(1024 * 1024, 0x45)
+      })
+      const send = (roomId) => fetch(`${relay.baseUrl}/api/rooms/${roomId}/uploads`, {
+        method: 'POST',
+        headers: ENVELOPE_HEADERS,
+        body: payload
+      })
+
+      expect((await send(roomA.roomId)).status).toBe(201)
+
+      // 第二次就越过 2MB 的房间窗口额度（单次请求体约 1.4MB）
+      const limited = await send(roomA.roomId)
+      expect(limited.status).toBe(429)
+      expect((await limited.json()).error).toMatch(/per room per window/iu)
+
+      // 另一个房间完全不受影响 —— 这正是房间维度的意义
+      expect((await send(roomB.roomId)).status).toBe(201)
+    } finally {
+      await relay.stop()
+    }
+  }, 30000)
+}, 90000)
+
 describe('房间生命周期', () => {
   let relay
 
@@ -744,10 +818,10 @@ describe('启动回收的归属门控', () => {
     uploadDir = await mkdtemp(join(tmpdir(), 'coolector-sentinel-'))
     // 这些目录不属于本程序（没有归属标记），启动回收必须放过它们
     await mkdir(join(uploadDir, 'notes.backup'), { recursive: true })
-    await writeFile(join(uploadDir, 'notes.backup', 'db-dump.sql'), 'precious data')
+    await writeFile(join(uploadDir, 'notes.backup', 'db-dump.sql'), 'precious data'.repeat(512))
     await mkdir(join(uploadDir, 'my notes'), { recursive: true })
-    await writeFile(join(uploadDir, 'my notes', 'a.txt'), 'x')
-    await writeFile(join(uploadDir, 'loose.txt'), 'x')
+    await writeFile(join(uploadDir, 'my notes', 'a.txt'), 'x'.repeat(4096))
+    await writeFile(join(uploadDir, 'loose.txt'), 'x'.repeat(4096))
   }, 30000)
 
   afterAll(async () => {
@@ -755,7 +829,11 @@ describe('启动回收的归属门控', () => {
   })
 
   it('无归属标记的目录与散落文件既不被删除，也不计入配额', async () => {
-    const relay = await startRelay({}, { uploadDir })
+    // 配额刻意设得比这些「外来文件」的总字节还小：若它们被计入配额，下面那次上传必然 507
+    const relay = await startRelay({
+      MAX_TOTAL_UPLOAD_BYTES: '2048',
+      MAX_ROOM_UPLOAD_BYTES: '2048'
+    }, { uploadDir })
 
     try {
       // 关键回归：过去是无差别递归删除，这些文件会全部消失
@@ -763,8 +841,19 @@ describe('启动回收的归属门控', () => {
       expect(existsSync(join(uploadDir, 'my notes', 'a.txt'))).toBe(true)
       expect(existsSync(join(uploadDir, 'loose.txt'))).toBe(true)
 
+      // 匿名根路由不再暴露用量与上限（信息暴露收敛）
       const root = await (await fetch(`${relay.baseUrl}/`)).json()
-      expect(root.storageUsedBytes).toBe(0)
+      expect(root.storageUsedBytes).toBeUndefined()
+      expect(root.storageLimitBytes).toBeUndefined()
+
+      // 行为断言（取代原先读数字）：外来字节没有占用全局配额 —— 新房间照常能上传
+      const room = await createRoom(relay.baseUrl, 'sentinel-quota-room')
+      const upload = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: ENVELOPE_HEADERS,
+        body: envelopeBody({ name: 'small.md', content: 'y'.repeat(64) })
+      })
+      expect(upload.status).toBe(201)
     } finally {
       await relay.stop()
     }
@@ -896,9 +985,12 @@ describe('启动时回收无主上传目录', () => {
 
     const second = await startRelay({ MAX_FILE_BYTES: String(1024 * 1024) }, { uploadDir })
     try {
+      // 关键回归：无主目录被真正回收（磁盘上不再存在）
+      expect(existsSync(join(uploadDir, room.roomId))).toBe(false)
+
       const root = await (await fetch(`${second.baseUrl}/`)).json()
-      // 关键回归：不再把无主字节计入配额（否则新房间会被 507 挡住且无法回收）
-      expect(root.storageUsedBytes).toBe(0)
+      // 匿名根路由不再暴露用量（信息暴露收敛；配额是否被占由下面的上传行为证明）
+      expect(root.storageUsedBytes).toBeUndefined()
 
       const fresh = await createRoom(second.baseUrl, 'orphan-room-2')
       const upload = await fetch(`${second.baseUrl}/api/rooms/${fresh.roomId}/uploads`, {

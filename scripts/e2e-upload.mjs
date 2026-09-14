@@ -279,6 +279,21 @@ async function main() {
     const receiver = await receiverContext.newPage()
     const sender = await senderContext.newPage()
 
+    /**
+     * 记录每一笔 `/api` 请求的**目标源**。
+     *
+     * 为什么必须显式断言源：静态站与 relay 是两个不同的源，一旦地址解析退化，请求会打到
+     * 静态站自己身上 —— 而静态站的 SPA 回退会返回 200，界面上看起来只像「网络抖动」。
+     * 只断言「页面没报错」是抓不住这类回归的。
+     */
+    const apiRequests = []
+    for (const [who, page] of [['发送方', sender], ['接收端', receiver]]) {
+      page.on('request', (request) => {
+        const url = new URL(request.url())
+        if (url.pathname.startsWith('/api/')) apiRequests.push({ who, origin: url.origin, url: request.url() })
+      })
+    }
+
     const senderPageErrors = []
     const senderConsoleErrors = []
     sender.on('pageerror', (error) => senderPageErrors.push(String(error)))
@@ -464,6 +479,34 @@ async function main() {
     // ── 10. 发送方全程未持有密钥 ──────────────────────────────────────────
     const senderHasSecret = senderConsoleErrors.some((line) => line.includes(RELAY_TOKEN))
     check('发送方上下文从未持有管理密钥', !senderHasSecret)
+
+    // ── 11. 所有 /api 请求都必须打到 Relay 源，且四条解析路径都被覆盖 ──────
+    const relayOrigin = new URL(relayBaseUrl).origin
+    const staticOrigin = new URL(webUrl).origin
+    const strayed = apiRequests.filter((item) => item.origin !== relayOrigin)
+
+    check(
+      `/api 请求全部指向 Relay 源（共 ${apiRequests.length} 笔，其中打到静态站的 0 笔）`,
+      apiRequests.length > 0 && strayed.length === 0,
+      `静态站源=${staticOrigin}；越界请求：${strayed.map((item) => `${item.who}→${item.url}`).join(' | ')}`
+    )
+
+    // 覆盖四条解析路径：建房响应里的 stateUrl / streamTicketUrl / streamUrl（SSE）与按需拉正文的 detailsUrl
+    const apiPaths = apiRequests.map((item) => new URL(item.url).pathname)
+    const resolvedPaths = {
+      '建房（POST /api/rooms）': apiPaths.some((path) => path === '/api/rooms'),
+      '房间状态（stateUrl）': apiPaths.some((path) => /^\/api\/rooms\/[^/]+$/u.test(path)),
+      '票据（streamTicketUrl）': apiPaths.some((path) => path.endsWith('/stream-ticket')),
+      'SSE（streamUrl）': apiPaths.some((path) => path.endsWith('/events')),
+      '正文（detailsUrl）': apiPaths.some((path) => path.includes('/uploads/'))
+    }
+    const uncovered = Object.entries(resolvedPaths).filter(([, hit]) => !hit).map(([name]) => name)
+
+    check(
+      `四条地址解析路径全部在真实跨源下走通（${Object.keys(resolvedPaths).length - uncovered.length}/${Object.keys(resolvedPaths).length}）`,
+      uncovered.length === 0,
+      `未覆盖：${uncovered.join(', ')}`
+    )
 
     await receiverContext.close()
     await senderContext.close()
