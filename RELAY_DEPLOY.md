@@ -160,6 +160,50 @@ pnpm build
 构建产物 `dist/` 部署到任意静态托管（GitHub Pages、Nginx、对象存储等）。
 前端 `Receiver` 与 `Sender` 届时连接 `https://relay.example.com`，跨域由 relay 的 `RELAY_ALLOWED_ORIGINS=https://app.example.com` 放行。
 
+### 5.1 GitHub Pages + 独立 Relay（本项目默认形态）
+
+前端在 `https://<org>.github.io/<repo>/`，Relay 在另一台机器/域名上。
+**两边都要配，缺一边就是「站点能打开但连不上」**，而它的表现只是界面上一句连接失败。
+
+**① 配构建期变量**（仓库 → Settings → Secrets and variables → Actions → Variables → New repository variable）
+
+```bash
+gh variable set VITE_RELAY_URL --repo <org>/<repo> --body 'https://relay.example.com'
+gh variable list  --repo <org>/<repo>          # 确认
+
+# 它是构建期注入的：改完必须重新构建部署才生效
+gh workflow run deploy.yml --repo <org>/<repo>  # 或随便 push 一次
+```
+
+> `deploy.yml` 现在会**在变量缺失时直接失败**（`Require VITE_RELAY_URL` 步骤），
+> 因为静默回落到 `http://127.0.0.1:8787` 的产物看起来「部署成功」，实际谁都连不上。
+
+**② 让 Relay 放行 Pages 的源**
+
+```bash
+# .env（docker compose 则写进 compose 的 environment）
+RELAY_TOKEN=<强随机值>
+RELAY_ALLOWED_ORIGINS=https://<org>.github.io
+```
+
+三条最容易踩的：
+
+- 填的是**源**（scheme + host + port），**不带路径、不带结尾斜杠**。Pages 站点虽然挂在 `/coolector/` 子路径下，
+  但浏览器发的 `Origin` 头永远是 `https://<org>.github.io`；写成 `https://<org>.github.io/` 或带路径都匹配不上。
+- Pages 是 HTTPS，Relay **也必须是 HTTPS**：`https://` 页面请求 `http://` Relay 会被浏览器按混合内容拦掉。
+- **同源部署**（静态产物与 Relay 挂在同一个域名下）**不需要**配 `RELAY_ALLOWED_ORIGINS` —— 同源请求不涉及 CORS。
+
+**③ 验证（两步都过才算通）**
+
+```bash
+# 产物里内联的地址是生产地址，而不是 127.0.0.1
+grep -o 'https://relay.example.com' dist/assets/index-*.js | head -1
+
+# Relay 确实放行了该源（应回显这个源；回显 * 说明你还没收窄，什么都不回说明没匹配上）
+curl -s -D- -o /dev/null -H 'Origin: https://<org>.github.io' https://relay.example.com/healthz \
+  | grep -i 'access-control-allow-origin'
+```
+
 > 推荐「子域」模式：`relay.example.com` 独立反代 relay，`app.example.com` 托管前端。
 > 同域挂子路径同样可行：前端填 `VITE_RELAY_URL=/relay`，反代把 `/relay/*` 重写到 relay 的根路径
 > （写法与 `vite.config.ts` 里 dev 代理的 `rewrite` 一致）。relay 自身不感知前缀，前缀由反代剥掉。

@@ -21,6 +21,32 @@ jobs:
             - name: Checkout
               uses: actions/checkout@v7
 
+            # 变量缺失时**故意失败**：没有它，产物会静默回落到 http://127.0.0.1:8787（访问者自己的机器），
+            # 于是「部署成功」的公开站点其实连不上任何 Relay —— 这是最贵的静默失败形态。
+            - name: Require VITE_RELAY_URL
+              env:
+                  VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}
+              run: |
+                  if [ -z "$VITE_RELAY_URL" ]; then
+                      echo "::error::仓库变量 VITE_RELAY_URL 未配置 —— 产物会回落到 http://127.0.0.1:8787，线上连不上任何 Relay。"
+                      echo "::error::修复：gh variable set VITE_RELAY_URL --repo ${{ github.repository }} --body 'https://relay.example.com'"
+                      exit 1
+                  fi
+
+                  case "$VITE_RELAY_URL" in
+                      https://*) ;;
+                      http://127.0.0.1*|http://localhost*) ;;
+                      http://*)
+                          echo "::warning::本站是 HTTPS，而 Relay 填的是 HTTP —— 浏览器会按混合内容拦截，请为 Relay 配 TLS。"
+                          ;;
+                      *)
+                          echo "::error::VITE_RELAY_URL 必须是 http(s) 绝对地址，当前值为 '$VITE_RELAY_URL'（运行期也会拒绝这种值并回落到本机）。"
+                          exit 1
+                          ;;
+                  esac
+
+                  echo "前端将连接 Relay：$VITE_RELAY_URL"
+
             - name: Setup pnpm
               uses: pnpm/action-setup@v6
               with:
