@@ -143,6 +143,16 @@ describe('validateRelayUrl', () => {
     expect(validateRelayUrl('   ')).not.toBe('')
   })
 
+  /**
+   * 回归用例：共享判据把「未设置」定义为**合法**状态（服务端语义：不配置基址 = 对外只输出
+   * 相对路径），界面侧若照搬 `ok` 就会放行空输入 —— 用户清空地址框后一路走下去，
+   * 最终拿空基址去拼请求 URL。两者的「合法」含义不同，这里把它钉住。
+   */
+  it('空值必须报错 —— 不能照搬共享判据的 ok（那是服务端的「未配置」语义）', () => {
+    expect(validateRelayUrl('')).toBeTruthy()
+    expect(validateRelayUrl('   ')).toBeTruthy()
+  })
+
   it('拒绝带查询串 / hash / 凭据的地址（判定与服务端一致）', () => {
     // 查询串会把后续拼接的路径吞进 query；基址里的凭据则会让同源判定失去意义
     expect(validateRelayUrl('https://a.example/?x=1')).not.toBe('')

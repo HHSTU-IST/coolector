@@ -54,6 +54,11 @@ jobs:
             #
             # 口径：只接受 http(s) 绝对地址（同域子路径写成 https://app.example.com/relay 仍可，
             # 裸相对路径 /relay 一律拒绝）。
+            #
+            # ⚠️ 已知差异：下面是 `case` 前缀匹配，比共享判据**略宽** —— 形如
+            # `https://r.example.com?x=1`、`https://r.example.com#a` 或 `https://user:pass@r.example.com`
+            # 的值能过这道门禁，却会被运行期的共享判据拒绝并回落到 127.0.0.1，
+            # 结果是「发布成功但连不上」。收紧需在 shell 里补字符检查，属发布链路改动。
             - name: Validate VITE_RELAY_URL
               env:
                   VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}

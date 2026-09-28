@@ -32,9 +32,16 @@ const RELAY_URL_REASON_MESSAGES: Record<RelayBaseUrlReason, string> = {
  */
 export const normalizeRelayUrl = (value: string): string => parseRelayBaseUrl(value).value ?? ''
 
-/** 校验 Relay 地址形态。合法返回空串，否则返回可直接展示的错误文案。 */
+/**
+ * 校验 Relay 地址形态。合法返回空串，否则返回可直接展示的错误文案。
+ *
+ * ⚠️ 不能用共享判据的 `ok` 直接下结论：在服务端语义里「未设置」是**合法**状态
+ * （不配置基址 = 对外只输出相对路径），但对界面输入框而言「空」就是**没填**，必须报错。
+ * 若照搬 `ok`，用户清空地址框会被静默放行，随后拿空基址去拼请求 URL。
+ */
 export const validateRelayUrl = (value: string): string => {
   const result = parseRelayBaseUrl(value)
+  if (result.reason === RELAY_BASE_URL_REASON.EMPTY) return RELAY_URL_REASON_MESSAGES.empty
   if (result.ok || !result.reason) return ''
   return RELAY_URL_REASON_MESSAGES[result.reason]
 }
