@@ -158,6 +158,9 @@ cloudflared tunnel --url http://localhost:5174
 3. **推送触发部署**：`git push`（或手动触发 Actions 的 `Deploy to GitHub Pages`）。
    部署完成后前端固定地址为 `https://<用户名>.github.io/<仓库名>/`。
 
+   > 第 2 步没配变量时，工作流会**跳过发布**（线上保持上一版）并在运行摘要里写明原因 ——
+   > 既不报错，也不会发布一版连不上 Relay 的产物。
+
 ### 7.2 每次收文件时（日常流程）
 
 4. **起 Relay 固定隧道**（一条即可）：

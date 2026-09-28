@@ -15,24 +15,41 @@ concurrency:
     cancel-in-progress: true
 
 jobs:
+    # 变量缺失时**不部署**，但也不把流水线打红。
+    # 原因：没有 VITE_RELAY_URL，产物会静默内联回落地址 http://127.0.0.1:8787 —— 那是
+    # **访问者自己的机器**，页面能打开、却谁也连不上，属于「部署成功但功能全废」的静默失败。
+    # 但本项目的 Relay 是「本机 + 隧道」形态（见 RECEIVER_SETUP.md），长期取不到稳定域名时
+    # 让它持续飘红只会训练人忽略红色。折中：不发版，并把原因显式打在运行摘要与警告注解里。
+    notice:
+        if: vars.VITE_RELAY_URL == ''
+        runs-on: ubuntu-latest
+        steps:
+            - name: 未配置 VITE_RELAY_URL —— 跳过 Pages 部署
+              run: |
+                  echo "::warning::未配置仓库变量 VITE_RELAY_URL —— 本次跳过 Pages 部署（线上保持上一版），这不是失败。"
+                  {
+                      echo "## 已跳过 Pages 部署"
+                      echo ""
+                      echo "仓库变量 VITE_RELAY_URL 为空。此时产物会内联回落地址 http://127.0.0.1:8787"
+                      echo "（那是访问者自己的机器），发布出去等于一个谁也连不上的站点，因此本次不发布。"
+                      echo ""
+                      echo "恢复自动部署：仓库 Settings → Secrets and variables → Actions → Variables，"
+                      echo "新建 VITE_RELAY_URL = 你的 Relay 稳定地址（如 https://relay.example.com，不含尾斜杠、不带路径），"
+                      echo "然后重跑本工作流。"
+                  } >> "$GITHUB_STEP_SUMMARY"
+
     build:
+        if: vars.VITE_RELAY_URL != ''
         runs-on: ubuntu-latest
         steps:
             - name: Checkout
               uses: actions/checkout@v7
 
-            # 变量缺失时**故意失败**：没有它，产物会静默回落到 http://127.0.0.1:8787（访问者自己的机器），
-            # 于是「部署成功」的公开站点其实连不上任何 Relay —— 这是最贵的静默失败形态。
-            - name: Require VITE_RELAY_URL
+            # 变量存在时仍校验形态：非法值会在运行期被前端拒绝并回落，等于白发一版。
+            - name: Validate VITE_RELAY_URL
               env:
                   VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}
               run: |
-                  if [ -z "$VITE_RELAY_URL" ]; then
-                      echo "::error::仓库变量 VITE_RELAY_URL 未配置 —— 产物会回落到 http://127.0.0.1:8787，线上连不上任何 Relay。"
-                      echo "::error::修复：gh variable set VITE_RELAY_URL --repo ${{ github.repository }} --body 'https://relay.example.com'"
-                      exit 1
-                  fi
-
                   case "$VITE_RELAY_URL" in
                       https://*) ;;
                       http://127.0.0.1*|http://localhost*) ;;
@@ -89,6 +106,8 @@ jobs:
               with:
                   path: "./dist"
 
+    # build 被跳过时本 job 也会被跳过（needs 依赖被 skip ⇒ 依赖方 skip），
+    # 因此「未配置变量」这一情况下不会有任何产物被发布。
     deploy:
         environment:
             name: github-pages
