@@ -1,5 +1,24 @@
 // Relay 的运行期配置：集中解析全部环境变量，非法即 fail-closed 退出。
 // 本模块**无副作用**（除校验失败时退出），可被单测直接 import。
+//
+// ── 两类配置，界线是「运维是否真的需要调它」 ─────────────────────────────────
+//
+// ① **运维变量（9 项）**：部署形态因环境而异，无法用一套默认值覆盖 ——
+//    PORT / HOST / UPLOAD_DIR / RELAY_TOKEN / RELAY_ALLOWED_ORIGINS /
+//    RELAY_PUBLIC_BASE_URL / RELAY_TRUSTED_PROXIES / MAX_FILE_BYTES / MAX_TOTAL_UPLOAD_BYTES
+//
+// ② **内部调参（15 项，模块常量）**：旋钮之间**互相耦合** —— `MAX_BODY_BYTES` 由
+//    `MAX_FILE_BYTES` + `MAX_TEXT_BYTES` 派生、`MAX_ROOM_UPLOAD_BYTES` 默认取全局配额的 1/8。
+//    逐个暴露到 env 只会制造「改了一个、另一个没跟上」的错配（实测过一次：只调大
+//    `MAX_FILE_BYTES` 而没重算 `MAX_BODY_BYTES`，带提取正文的 docx 有效上限掉到约 8.55MB）。
+//    因此它们**只能改代码**，不能改 `.env`。
+//
+//    确有需要时（测试、或确知自己在做什么的高级用户）走**唯一一个显式通道**：
+//    `RELAY_TUNING` —— 一个 JSON 对象，如 `RELAY_TUNING={"MAX_ROOMS":10,"RATE_LIMIT_MAX":9999}`。
+//    未知键与非法值一律拒绝启动：静默忽略未知键最危险，运维会以为改动生效了、实际跑的还是默认值。
+//
+// 数值型变量一律 fail-closed 校验：写成 `MAX_FILE_BYTES=10mb` 这类非整数会让进程**拒绝启动**，
+// 而不是把 `NaN` 带进体积判断（那会让所有校验静默失效）。
 
 import { fileURLToPath } from 'node:url'
 import { normalizeAllowedOrigins, parsePositiveInt, parsePublicBaseUrl, parseTrustedProxies } from './relay-utils.js'
@@ -25,6 +44,10 @@ function requirePositiveInt(name, fallback, { min = 1, max = Number.MAX_SAFE_INT
 }
 
 
+// ══════════════════════════════════════════════════════════════════════════
+// ① 运维变量
+// ══════════════════════════════════════════════════════════════════════════
+
 const PORT = requirePositiveInt('PORT', 8787, { max: 65535 })
 
 const HOST = process.env.HOST ?? '0.0.0.0'
@@ -32,30 +55,7 @@ const HOST = process.env.HOST ?? '0.0.0.0'
 // 单个文件「解码后」的体积上限，与前端 src/stores/file.ts 的 MAX_FILE_SIZE 保持一致
 const MAX_FILE_BYTES = requirePositiveInt('MAX_FILE_BYTES', 10 * 1024 * 1024)
 
-// 信封里 text 字段的上限。前端只发前 256KB，这里再兜一层防止第三方客户端塞入超大正文
-const MAX_TEXT_BYTES = Math.max(
-  requirePositiveInt('MAX_TEXT_BYTES', 1024 * 1024),
-  // 不得低于客户端的正文上限，否则「10MB 文件 + 正文」会被自己的派生上限误判 413
-  256 * 1024
-)
-
-// 请求体上限：contentBase64 相比原始字节膨胀约 4/3，**再加上信封里同时携带的 text**，
-// 最后留 JSON 字段与头部开销余量。
-// 过去只算 base64 膨胀，导致带提取正文的 docx 有效上限掉到约 8.55MB（名义 10MB）。
-const MAX_BODY_BYTES = requirePositiveInt(
-  'MAX_BODY_BYTES',
-  Math.ceil((MAX_FILE_BYTES * 4) / 3) + MAX_TEXT_BYTES + 128 * 1024
-)
-
-const MAX_QUEUE_EVENTS = requirePositiveInt('MAX_QUEUE_EVENTS', 200)
-
-const ROOM_TTL_MS = requirePositiveInt('ROOM_TTL_MS', 6 * 60 * 60 * 1000)
-
-// 房间绝对存活上限：空闲 TTL 会被上传刷新，没有这一层则「每 <TTL 传 1 字节」即可永久占住配额
-const ROOM_MAX_LIFETIME_MS = requirePositiveInt('ROOM_MAX_LIFETIME_MS', 24 * 60 * 60 * 1000)
-
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? fileURLToPath(new URL('./uploads', import.meta.url))
-
 
 // 设为非空后，除「发送方公开写」与 SSE 一次性票据外的 /api 请求必须携带 `Authorization: Bearer <token>`。
 const RELAY_TOKEN = process.env.RELAY_TOKEN ?? ''
@@ -65,43 +65,8 @@ const RELAY_TOKEN = process.env.RELAY_TOKEN ?? ''
 // 公开写路径本来就免凭据，若再默认放开跨源，任意站点都能向已知房间号灌文件。
 const ALLOWED_ORIGINS = normalizeAllowedOrigins(process.env.RELAY_ALLOWED_ORIGINS)
 
-// 整个上传目录的磁盘配额硬上限。
+// 整个上传目录的磁盘配额硬上限。它决定「这台机器最多收多少作业」，必须由运维按磁盘容量定。
 const MAX_TOTAL_UPLOAD_BYTES = requirePositiveInt('MAX_TOTAL_UPLOAD_BYTES', 1024 * 1024 * 1024)
-
-// 单个房间的配额上限。默认取全局的 1/8 —— 免凭据的发送方只能填满「自己那个房间」，
-// 而不是把全站配额吃光导致所有班级都上传失败。
-const MAX_ROOM_UPLOAD_BYTES = requirePositiveInt(
-  'MAX_ROOM_UPLOAD_BYTES',
-  Math.max(Math.floor(MAX_TOTAL_UPLOAD_BYTES / 8), 8 * 1024 * 1024)
-)
-
-// 单个来源 IP 在限流窗口内可写入的字节数（0 = 关闭）。与请求计数限流互补，直接限制配额消耗速率。
-const MAX_UPLOAD_BYTES_PER_WINDOW = requirePositiveInt('MAX_UPLOAD_BYTES_PER_WINDOW', 256 * 1024 * 1024, { min: 0 })
-
-// 单个**房间**在限流窗口内可写入的字节数（0 = 关闭）。
-// 只按 IP 记字节挡不住「多来源一起灌同一个房间」（出口 IP 多变的滥用者）：
-// 房间维度让单房间被灌爆既不牵连其它房间，也不至于瞬间吃掉该房间的整份配额。
-const MAX_ROOM_BYTES_PER_WINDOW = requirePositiveInt('MAX_ROOM_BYTES_PER_WINDOW', 256 * 1024 * 1024, { min: 0 })
-
-// 同时存在的房间数上限。房间只在内存里，而**建房是持凭据方唯一能持续新增内存对象**的入口
-// （公开上传受房间存在性与配额约束）—— 不封顶时，一个脚本可以一路建房直到进程 OOM。
-const MAX_ROOMS = requirePositiveInt('MAX_ROOMS', 200)
-
-// 单个房间的上传条数上限：即使每个文件都是 0 字节，也不能让 room.uploads 无限增长
-const MAX_ROOM_UPLOADS = requirePositiveInt('MAX_ROOM_UPLOADS', 500)
-
-// 上传文件名上限（字节）。文件名会进入内存、房间快照、SSE 帧与审计日志，必须有界
-const MAX_UPLOAD_NAME_BYTES = requirePositiveInt('MAX_UPLOAD_NAME_BYTES', 255)
-
-// 房间清理扫描周期（毫秒）
-const ROOM_CLEANUP_INTERVAL_MS = requirePositiveInt('ROOM_CLEANUP_INTERVAL_MS', 30 * 60 * 1000)
-
-// 房间快照 / SSE 帧里展示的正文预览长度（**字符**数）。
-// 纯模块常量而非运维旋钮：改它没有运维意义，但两端必须一致 ——
-// server 侧截 previewText 用它，relay-state 恢复元数据时也用它兜住 previewText 的上限，
-// 否则一份被改过的元数据就能塞进任意长度的预览串。
-const PREVIEW_TEXT_CHARS = 4096
-
 
 // 对外基址。**这是服务端唯一允许产生绝对 URL 的来源。**
 //
@@ -124,14 +89,6 @@ const PUBLIC_BASE_URL = (() => {
   return result.value
 })()
 
-
-// SSE 票据有效期（毫秒），短时效一次性，替代 URL 中的长期 token。
-const STREAM_TICKET_TTL_MS = requirePositiveInt('STREAM_TICKET_TTL_MS', 60_000)
-
-
-// —— 速率限制（固定窗口，按客户端 IP 计数） ——
-const RATE_LIMIT_WINDOW_MS = requirePositiveInt('RATE_LIMIT_WINDOW_MS', 60 * 1000)
-
 // 可信反向代理网段（IP / CIDR，逗号分隔）。只有来自这些网段的请求才会按 `X-Forwarded-For`
 // 分桶 —— 反代后 socket 地址恒为代理 IP，不声明它就等于全站共用一个限流桶。
 // 非法条目 fail-closed：静默忽略会让运维以为「已按客户端分桶」，实际仍在共用一个桶。
@@ -142,7 +99,171 @@ if (TRUSTED_PROXIES_RESULT.invalid.length > 0) {
 }
 const TRUSTED_PROXIES = TRUSTED_PROXIES_RESULT.list
 
-const RATE_LIMIT_MAX = requirePositiveInt('RATE_LIMIT_MAX', 120)
+
+// ══════════════════════════════════════════════════════════════════════════
+// ② 内部调参（模块常量；覆盖通道见文件头）
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 可调项的默认值。**每一项都经实测标定，改动前请读 INVARIANTS.md 的对应依据。**
+ *
+ * 注意这里**不含**两个派生项 `MAX_BODY_BYTES` / `MAX_ROOM_UPLOAD_BYTES` —— 它们的默认值
+ * 必须由「覆盖之后」的其它配置算出（见下方 `pick`），否则会出现「只调大了 MAX_TEXT_BYTES，
+ * 而 MAX_BODY_BYTES 还按旧值算」的错配。
+ */
+const TUNING_DEFAULTS = {
+  /** 信封 / 提取正文的上限。前端只发前 256KB，这里再兜一层防止第三方客户端塞入超大正文 */
+  MAX_TEXT_BYTES: 1024 * 1024,
+  /** 房间的离线事件队列上限：接收端短暂断线时靠它重放事件 */
+  MAX_QUEUE_EVENTS: 200,
+  /** 单个房间的上传条数上限：即使每个文件都是 0 字节，也不能让 room.uploads 无限增长 */
+  MAX_ROOM_UPLOADS: 500,
+  /** 上传文件名上限（字节）。文件名会进入内存、房间快照、SSE 帧与审计日志，必须有界 */
+  MAX_UPLOAD_NAME_BYTES: 255,
+  /** 同时存在的房间数上限：建房是持凭据方唯一能持续新增内存对象的入口 */
+  MAX_ROOMS: 200,
+  /** 单个来源 IP 在限流窗口内可写入的字节数（0 = 关闭） */
+  MAX_UPLOAD_BYTES_PER_WINDOW: 256 * 1024 * 1024,
+  /** 单个**房间**在限流窗口内可写入的字节数（0 = 关闭）。挡住「多来源一起灌同一个房间」 */
+  MAX_ROOM_BYTES_PER_WINDOW: 256 * 1024 * 1024,
+  /** 房间空闲存活时间。上传会刷新这个计时（活跃的收集不应被回收） */
+  ROOM_TTL_MS: 6 * 60 * 60 * 1000,
+  /** 房间绝对存活上限：没有这一层，「每 <TTL 传 1 字节」就能永久占住配额与磁盘 */
+  ROOM_MAX_LIFETIME_MS: 24 * 60 * 60 * 1000,
+  /** 房间清理扫描周期 */
+  ROOM_CLEANUP_INTERVAL_MS: 30 * 60 * 1000,
+  /** SSE 票据有效期：短时效一次性，替代 URL 中的长期 token */
+  STREAM_TICKET_TTL_MS: 60_000,
+  /** 限流固定窗口长度（按客户端 IP 计数） */
+  RATE_LIMIT_WINDOW_MS: 60 * 1000,
+  /** 每个来源 IP 在窗口内的 /api 请求上限 */
+  RATE_LIMIT_MAX: 120
+}
+
+/** 允许取 `0` 表示「关闭」的项（其余项要求 ≥1 —— 0 会让校验恒真或让定时器空转） */
+const TUNING_ZERO_ALLOWED = new Set(['MAX_UPLOAD_BYTES_PER_WINDOW', 'MAX_ROOM_BYTES_PER_WINDOW'])
+
+/** 由其它配置算出默认值、但仍允许显式覆盖的项 */
+const TUNING_DERIVED_KEYS = ['MAX_BODY_BYTES', 'MAX_ROOM_UPLOAD_BYTES']
+
+const TUNING_KEYS = new Set([...Object.keys(TUNING_DEFAULTS), ...TUNING_DERIVED_KEYS])
+
+/**
+ * 解析 `RELAY_TUNING` 覆盖通道（JSON 对象）。未设置时返回空对象。
+ *
+ * 拒绝启动的三种情形：无法解析为 JSON、不是普通对象、**含未知键或非法值**。
+ * 未知键与非法值都必须 fail-closed —— 它们都意味着「配置没生效」，而静默失效会让运维
+ * 在错误的前提下排查问题（这与「数值型 env 必须校验」是同一个理由，见铁律 10）。
+ *
+ * @param {string | undefined} raw
+ * @returns {Record<string, number>}
+ */
+function parseTuning(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return {}
+
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    console.error(`[relay] 拒绝启动：RELAY_TUNING 必须是 JSON 对象，当前值无法解析：${text.slice(0, 200)}`)
+    process.exit(1)
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error(`[relay] 拒绝启动：RELAY_TUNING 必须是 JSON 对象（如 {"MAX_ROOMS":10}），当前值为 ${text.slice(0, 200)}`)
+    process.exit(1)
+  }
+
+  const unknown = Object.keys(parsed).filter((key) => !TUNING_KEYS.has(key))
+  if (unknown.length > 0) {
+    console.error(`[relay] 拒绝启动：RELAY_TUNING 含未知键 ${unknown.join(', ')}（可能是拼写错误或已废弃的旋钮）。`)
+    console.error(`[relay] 可调项共 ${TUNING_KEYS.size} 个：${[...TUNING_KEYS].join(', ')}`)
+    process.exit(1)
+  }
+
+  /** @type {Record<string, number>} */
+  const overrides = {}
+  for (const [key, value] of Object.entries(parsed)) {
+    const min = TUNING_ZERO_ALLOWED.has(key) ? 0 : 1
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < min) {
+      console.error(`[relay] 拒绝启动：RELAY_TUNING.${key} 必须是 ≥${min} 的整数，当前值为 ${JSON.stringify(value)}。`)
+      process.exit(1)
+    }
+    overrides[key] = value
+  }
+
+  return overrides
+}
+
+const TUNING = parseTuning(process.env.RELAY_TUNING)
+
+/**
+ * 取「有默认值」的可调项：`RELAY_TUNING` 覆盖优先，否则用 `TUNING_DEFAULTS` 里的默认值。
+ *
+ * 参数被限定为 `TUNING_DEFAULTS` 的键，因此返回值**一定是 `number`**（不是 `number | undefined`）。
+ * 这一点在服务端受类型检查（`tsconfig.server.json` 的 `checkJs` + `strict`）后是硬要求：
+ * 只要签名里带上 `undefined`，它就会顺着下面十几个配置常量一路传染成一片 TS18048。
+ *
+ * @param {keyof typeof TUNING_DEFAULTS} key
+ * @returns {number}
+ */
+function pick(key) {
+  const override = TUNING[key]
+  return typeof override === 'number' ? override : TUNING_DEFAULTS[key]
+}
+
+/**
+ * 取「派生项」的显式覆盖值。
+ *
+ * 派生项刻意**不在 `TUNING_DEFAULTS` 里** —— 它们的默认值必须由「覆盖之后」的其它配置算出
+ * （见下方 `??` 右侧的推导式），写进默认值表就会出现「只调大了 MAX_TEXT_BYTES，而
+ * MAX_BODY_BYTES 还按旧值算」的错配。因此这里返回 `undefined` 是正常语义，由调用方兜住。
+ *
+ * @param {'MAX_BODY_BYTES' | 'MAX_ROOM_UPLOAD_BYTES'} key
+ * @returns {number | undefined}
+ */
+function pickDerived(key) {
+  const override = TUNING[key]
+  return typeof override === 'number' ? override : undefined
+}
+
+const MAX_TEXT_BYTES = Math.max(
+  pick('MAX_TEXT_BYTES'),
+  // 不得低于客户端的正文上限，否则「10MB 文件 + 正文」会被自己的派生上限误判 413
+  256 * 1024
+)
+
+// 请求体上限：contentBase64 相比原始字节膨胀约 4/3，**再加上信封里同时携带的 text**，
+// 最后留 JSON 字段与头部开销余量。
+// 过去只算 base64 膨胀，导致带提取正文的 docx 有效上限掉到约 8.55MB（名义 10MB）。
+const MAX_BODY_BYTES = pickDerived('MAX_BODY_BYTES')
+  ?? (Math.ceil((MAX_FILE_BYTES * 4) / 3) + MAX_TEXT_BYTES + 128 * 1024)
+
+// 单个房间的配额上限。默认取全局的 1/8 —— 免凭据的发送方只能填满「自己那个房间」，
+// 而不是把全站配额吃光导致所有班级都上传失败。
+const MAX_ROOM_UPLOAD_BYTES = pickDerived('MAX_ROOM_UPLOAD_BYTES')
+  ?? Math.max(Math.floor(MAX_TOTAL_UPLOAD_BYTES / 8), 8 * 1024 * 1024)
+
+const MAX_QUEUE_EVENTS = pick('MAX_QUEUE_EVENTS')
+const MAX_ROOM_UPLOADS = pick('MAX_ROOM_UPLOADS')
+const MAX_UPLOAD_NAME_BYTES = pick('MAX_UPLOAD_NAME_BYTES')
+const MAX_ROOMS = pick('MAX_ROOMS')
+const MAX_UPLOAD_BYTES_PER_WINDOW = pick('MAX_UPLOAD_BYTES_PER_WINDOW')
+const MAX_ROOM_BYTES_PER_WINDOW = pick('MAX_ROOM_BYTES_PER_WINDOW')
+const ROOM_TTL_MS = pick('ROOM_TTL_MS')
+const ROOM_MAX_LIFETIME_MS = pick('ROOM_MAX_LIFETIME_MS')
+const ROOM_CLEANUP_INTERVAL_MS = pick('ROOM_CLEANUP_INTERVAL_MS')
+const STREAM_TICKET_TTL_MS = pick('STREAM_TICKET_TTL_MS')
+const RATE_LIMIT_WINDOW_MS = pick('RATE_LIMIT_WINDOW_MS')
+const RATE_LIMIT_MAX = pick('RATE_LIMIT_MAX')
+
+
+// 房间快照 / SSE 帧里展示的正文预览长度（**字符**数）。
+// 纯模块常量（连 RELAY_TUNING 都不开放）：改它没有运维意义，但两端必须一致 ——
+// server 侧截 previewText 用它，relay-state 恢复元数据时也用它兜住 previewText 的上限，
+// 否则一份被改过的元数据就能塞进任意长度的预览串。
+const PREVIEW_TEXT_CHARS = 4096
 
 
 export {

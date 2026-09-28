@@ -115,23 +115,27 @@ cloudflared tunnel --url http://localhost:5174
 - [ ] 公网暴露期间 `RELAY_ALLOWED_ORIGINS` 建议收窄为前端实际来源（见 `.env` 注释），而非 `*`。
 - [ ] 用完即停：关闭两个 `cloudflared` 终端与 `pnpm start`，隧道随即失效，避免长期暴露。
 - [ ] 磁盘配额 `MAX_TOTAL_UPLOAD_BYTES`（默认 1GB）限制本机被写满；按需调整。
-- [ ] 房间 `ROOM_TTL_MS`（默认 6h）到期自动清理；长期任务调大或手动删房间。
+- [ ] 房间 `ROOM_TTL_MS`（代码常量，默认 6h）到期自动清理；长期任务需改代码调大，或手动删房间。
+
+> **env 只配运维形态**：能写进 `.env` 的只有 9 项（见 `.env.example`）；房间 TTL、条数上限、
+> 限流额度等 15 项内部调参是 `server/relay-config.js` 的模块常量 —— 写进 `.env` 不生效，
+> 临时覆盖请用 `RELAY_TUNING`（JSON）。
 
 ## 6. 排错
 
-| 现象                        | 原因 / 处理                                                                                                   |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| 接收端显示「连接失败」      | `VITE_RELAY_URL` 未填或填错；Relay 隧道未起；检查 `.env` 后重启 `pnpm start`                                  |
-| 接收端提示「鉴权失败」      | 面板里填的接收端密钥与 Relay 的 `RELAY_TOKEN` 不一致                                                          |
-| 发送方上传 404              | 房间不存在或已过期：必须**先由接收端建房**再把房间号发出去；房间 6h 无活动会被回收                            |
-| 发送方上传 401              | 该请求命中了受保护路由。发送方只应调用 `POST /api/rooms/:roomId/uploads`，不应带管理类请求                    |
-| 发送方上传「房间号至少 8 位」| 房间 ID 下限已从 4 位提到 8 位（过短易被猜到）                                                               |
-| 发送方上传被 CORS 拦截      | `RELAY_ALLOWED_ORIGINS` 未包含发送方前端来源                                                                  |
-| 上传大文件报 413            | 超过 `MAX_FILE_BYTES`（默认 10MB）；请求体上限由它自动派生，无需手动改 `MAX_BODY_BYTES`                        |
-| 隧道 URL 每次都变           | quick tunnel 特性；需要固定域名请用 ngrok / cloudflared 命名隧道 / 自有域名                                   |
-| Web 隧道访问返回 403        | Vite 默认拦截非 localhost 的 Host 头；已在 `vite.config.ts` 设 `allowedHosts: ['.trycloudflare.com']`，换用其他隧道域名需同步加 |
-| 回调地址是 `http://` 导致混合内容被拦 | 接收端界面里填的 Relay 地址应是 `https://…`。服务端只返回相对路径、由前端按该地址解析，因此无需 `RELAY_TRUST_PROXY` 之类的开关 |
-| SSE 收不到事件              | 穿透层缓冲了流；cloudflared 默认不缓冲，若套 Nginx 需关闭 `proxy_buffering`（见 `RELAY_DEPLOY.md` §4） |
+| 现象                                  | 原因 / 处理                                                                                                                     |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 接收端显示「连接失败」                | `VITE_RELAY_URL` 未填或填错；Relay 隧道未起；检查 `.env` 后重启 `pnpm start`                                                    |
+| 接收端提示「鉴权失败」                | 面板里填的接收端密钥与 Relay 的 `RELAY_TOKEN` 不一致                                                                            |
+| 发送方上传 404                        | 房间不存在或已过期：必须**先由接收端建房**再把房间号发出去；房间 6h 无活动会被回收                                              |
+| 发送方上传 401                        | 该请求命中了受保护路由。发送方只应调用 `POST /api/rooms/:roomId/uploads`，不应带管理类请求                                      |
+| 发送方上传「房间号至少 8 位」         | 房间 ID 下限已从 4 位提到 8 位（过短易被猜到）                                                                                  |
+| 发送方上传被 CORS 拦截                | `RELAY_ALLOWED_ORIGINS` 未包含发送方前端来源                                                                                    |
+| 上传大文件报 413                      | 超过 `MAX_FILE_BYTES`（默认 10MB）；请求体上限由它自动派生（不再有 `MAX_BODY_BYTES` 这个 env）                                  |
+| 隧道 URL 每次都变                     | quick tunnel 特性；需要固定域名请用 ngrok / cloudflared 命名隧道 / 自有域名                                                     |
+| Web 隧道访问返回 403                  | Vite 默认拦截非 localhost 的 Host 头；已在 `vite.config.ts` 设 `allowedHosts: ['.trycloudflare.com']`，换用其他隧道域名需同步加 |
+| 回调地址是 `http://` 导致混合内容被拦 | 接收端界面里填的 Relay 地址应是 `https://…`。服务端只返回相对路径、由前端按该地址解析，因此无需 `RELAY_TRUST_PROXY` 之类的开关  |
+| SSE 收不到事件                        | 穿透层缓冲了流；cloudflared 默认不缓冲，若套 Nginx 需关闭 `proxy_buffering`（见 `RELAY_DEPLOY.md` §4）                          |
 
 ## 7. 更稳妥的替代：前端部署到 GitHub Pages（只穿透 Relay 一条隧道）
 

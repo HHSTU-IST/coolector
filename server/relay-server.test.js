@@ -52,10 +52,50 @@ async function waitForHealth(baseUrl, timeoutMs = 15000) {
   throw new Error('relay 启动超时')
 }
 
+/**
+ * 仍是**运维变量**的键；其余键由 `splitEnv` 归入 `RELAY_TUNING` 覆盖通道。
+ * 与 `server/relay-config.js` 的「① 运维变量」一节一一对应。
+ *
+ * 漏项是 **fail-closed** 的：若这里把某个仍属运维的键当成调参项，relay 会因「RELAY_TUNING 含
+ * 未知键」**拒绝启动** ⇒ 测试以「启动超时」立刻失败，不会静默走默认值蒙混过关。
+ */
+const OP_ENV_KEYS = new Set([
+  'PORT', 'HOST', 'UPLOAD_DIR', 'RELAY_TOKEN', 'RELAY_ALLOWED_ORIGINS',
+  'RELAY_PUBLIC_BASE_URL', 'RELAY_TRUSTED_PROXIES', 'MAX_FILE_BYTES', 'MAX_TOTAL_UPLOAD_BYTES'
+])
+
+/**
+ * 把调用方给的扁平 env 拆成「运维变量」与 `RELAY_TUNING`。
+ *
+ * 内部调参从 env 降级为模块常量后（`relay-config.js`），覆盖只能走 `RELAY_TUNING`。
+ * 这里做一次拆分，让用例继续写成 `startRelay({ MAX_ROOMS: '3' })` 这种一眼可读的形式，
+ * 而不必在每个用例里手写 JSON —— 拆分的权威名单就是上面的 `OP_ENV_KEYS`。
+ *
+ * @param {Record<string, string | undefined>} env
+ * @returns {{ opEnv: Record<string, string | undefined>, tuning: Record<string, number> }}
+ */
+function splitEnv(env) {
+  /** @type {Record<string, string | undefined>} */
+  const opEnv = {}
+  /** @type {Record<string, number>} */
+  const tuning = {}
+
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined || OP_ENV_KEYS.has(key)) {
+      opEnv[key] = value
+      continue
+    }
+    tuning[key] = Number(value)
+  }
+
+  return { opEnv, tuning }
+}
+
 /** 起一个真实 relay 进程；返回停止函数 */
 async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
   const port = await getFreePort()
   const uploadDir = fixedUploadDir ?? (await mkdtemp(join(tmpdir(), 'coolector-it-')))
+  const { opEnv, tuning } = splitEnv(env)
 
   const child = spawn(process.execPath, ['server/relay-server.js'], {
     cwd: ROOT,
@@ -67,9 +107,12 @@ async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
       UPLOAD_DIR: uploadDir,
       // 限流保持"开启但足够宽松"——注意**不要**设为 0 把它关掉，
       // 否则等于把刚新增的限流逻辑从测试里删掉（专门用例见「上传字节限流」一节）
-      RATE_LIMIT_MAX: '10000',
-      MAX_UPLOAD_BYTES_PER_WINDOW: '104857600',
-      ...env
+      RELAY_TUNING: JSON.stringify({
+        RATE_LIMIT_MAX: 10000,
+        MAX_UPLOAD_BYTES_PER_WINDOW: 104857600,
+        ...tuning
+      }),
+      ...opEnv
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -468,15 +511,15 @@ describe('relay HTTP 层', () => {
         form === 'raw'
           ? { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes }
           : {
-              method: 'POST',
-              headers: ENVELOPE_HEADERS,
-              body: JSON.stringify({
-                name: 'fidelity.bin',
-                mimeType: 'application/octet-stream',
-                lastModified: new Date(0).toISOString(),
-                contentBase64: bytes.toString('base64')
-              })
-            }
+            method: 'POST',
+            headers: ENVELOPE_HEADERS,
+            body: JSON.stringify({
+              name: 'fidelity.bin',
+              mimeType: 'application/octet-stream',
+              lastModified: new Date(0).toISOString(),
+              contentBase64: bytes.toString('base64')
+            })
+          }
       )
 
       expect(response.status).toBe(201)
@@ -724,10 +767,24 @@ describe('配置校验 fail-closed', () => {
     expect(output).toMatch(/MAX_FILE_BYTES/u)
   }, 20000)
 
-  it('非正数的 RATE_LIMIT_MAX 让进程拒绝启动', async () => {
-    const { code, output } = await spawnWithEnv({ RATE_LIMIT_MAX: '-1' })
+  it('RELAY_TUNING 含未知键时拒绝启动（静默忽略会让运维以为改动生效了）', async () => {
+    // MAX_ROOM 是 MAX_ROOMS 的笔误 —— 正是「写错名字」这一类最需要被拦下的情况
+    const { code, output } = await spawnWithEnv({ RELAY_TUNING: JSON.stringify({ MAX_ROOM: 5 }) })
     expect(code).toBe(1)
-    expect(output).toMatch(/RATE_LIMIT_MAX/u)
+    expect(output).toMatch(/未知键/u)
+    expect(output).toMatch(/MAX_ROOM/u)
+  }, 20000)
+
+  it('RELAY_TUNING 的值不是正整数时拒绝启动', async () => {
+    const { code, output } = await spawnWithEnv({ RELAY_TUNING: JSON.stringify({ RATE_LIMIT_MAX: -1 }) })
+    expect(code).toBe(1)
+    expect(output).toMatch(/RELAY_TUNING\.RATE_LIMIT_MAX/u)
+  }, 20000)
+
+  it('RELAY_TUNING 不是合法 JSON 时拒绝启动', async () => {
+    const { code, output } = await spawnWithEnv({ RELAY_TUNING: '{nope}' })
+    expect(code).toBe(1)
+    expect(output).toMatch(/RELAY_TUNING/u)
   }, 20000)
 
   it('未设置令牌且监听非回环地址时拒绝启动（fail-closed 保持）', async () => {

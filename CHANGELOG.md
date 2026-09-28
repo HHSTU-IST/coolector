@@ -100,16 +100,47 @@
 
 ### Changed
 
+- ⚠️ **破坏性配置变更：15 项内部调参不再读环境变量，env 只剩 9 项运维变量**。可配置项收敛为
+  `PORT` / `HOST` / `UPLOAD_DIR` / `RELAY_TOKEN` / `RELAY_ALLOWED_ORIGINS` /
+  `RELAY_PUBLIC_BASE_URL` / `RELAY_TRUSTED_PROXIES` / `MAX_FILE_BYTES` / `MAX_TOTAL_UPLOAD_BYTES`
+  —— 每一项都对应「因部署环境而异的形态」。其余 15 项（房间 TTL / 绝对存活上限 / 清理周期 /
+  条数上限 / 事件队列 / 房间数上限 / 文件名长度 / 正文上限 / 请求体上限 / 单房间配额 /
+  限流窗口与额度 / SSE 票据有效期）在 `relay-config.js` 里落为 `TUNING_DEFAULTS` 模块常量。
+  - 划分依据是**旋钮之间的耦合**，不是「重要程度」：`MAX_BODY_BYTES` 由 `MAX_FILE_BYTES` +
+    `MAX_TEXT_BYTES` 派生、`MAX_ROOM_UPLOAD_BYTES` 默认取全局配额的 1/8、`ROOM_TTL_MS` 与
+    `ROOM_CLEANUP_INTERVAL_MS` 必须协调。逐个暴露只会制造「改了一个、另一个没跟上」的错配 ——
+    实测过一次：只调大 `MAX_FILE_BYTES` 而没重算派生上限，带提取正文的 docx 有效上限掉到约 8.55 MB。
+  - **升级须知**：`.env` 里若还留着旧旋钮（`ROOM_TTL_MS=` / `MAX_ROOMS=` / `RATE_LIMIT_MAX=` …），
+    它们会被**静默忽略**，不会报错、也不会生效。需要这些值就必须改代码，或走下面的覆盖通道。
+  - 新增 `RELAY_TUNING`（JSON 对象）作为**唯一**的显式覆盖通道（测试用，也留给确知自己在做什么的
+    高级用户）：`RELAY_TUNING={"MAX_ROOMS":10,"RATE_LIMIT_MAX":9999}`。**未知键与非法值一律拒绝
+    启动** —— 静默忽略未知键最危险：运维会以为改动生效了，实际跑的还是默认值，然后照着错误的旋钮
+    排查问题。错误信息会列出全部可用键。两个窗口额度（`MAX_UPLOAD_BYTES_PER_WINDOW` /
+    `MAX_ROOM_BYTES_PER_WINDOW`）允许取 `0`（= 关闭），其余要求 ≥ 1。
+  - 派生关系成为一等公民：`MAX_BODY_BYTES = ceil(MAX_FILE_BYTES × 4/3) + MAX_TEXT_BYTES + 128 KB`、
+    `MAX_ROOM_UPLOAD_BYTES = max(floor(MAX_TOTAL_UPLOAD_BYTES / 8), 8 MB)`；覆盖派生项等于绕开推导。
+  - 顺带把 `MAX_TEXT_BYTES` 的 256 KB 下限从注释变成代码（`Math.max`）：低于它时「10 MB 文件 +
+    每次必发的 256 KB 正文」会被自己派生的请求体上限误判 413。
+  - 新增 `server/relay-config.test.js`（9 条）直测分层契约：运维变量仍读同名 env、**降级键写成普通
+    env 完全不生效**、`RELAY_TUNING` 里的同名键才生效、派生的耦合（调大 `MAX_TEXT_BYTES` 时
+    `MAX_BODY_BYTES` 增量精确等于 3 MB；256 KB 下限；单房间配额随全局取 1/8 但有覆盖口子）。
+    集成夹具 `startRelay` 改为把扁平 env 自动拆成「运维变量 + `RELAY_TUNING`」，故既有用例写法不变；
+    拆分名单漏项是 fail-closed 的（会因「RELAY_TUNING 含未知键」拒绝启动，测试立刻超时而非静默通过）。
+  - 门禁有效性已实测（定点突变，每次精确命中）：① 把 `MAX_ROOMS` 改回读 env → 恰好 2 条变红；
+    ② 未知名单由 fail-closed 降级为静默忽略 → 恰好 1 条变红（子进程不再退出，用例超时）；
+    ③ 派生式退回「只算 base64 膨胀」的历史缺陷 → 恰好 2 条变红（13,981,014 vs 15,160,662）。
+  - `.env.example` 从 152 行收到 129 行：只列 9 项运维变量 + `RELAY_TUNING` + 前端构建期变量，
+    文件头说明两层划分与「为什么不把这些暴露成 env」。
 - **201 响应不再回吐正文，与 SSE 广播的口径统一为「只回元信息」**。此前上传成功后，201 里带着
   整个文件的 base64（原注释写的是「发送方自检用」），而发送方**刚把这些字节发上来** ——
   回显只是让它再下载一遍。实测一次 10 MB 上传：
 
-  | | 改前 | 改后 |
-  |---|---|---|
-  | 201 响应体 | 13.98 MB | **706 字节** |
-  | 往返合计 | 24.47 MB | **10.49 MB** |
-  | 耗时中位数（5 次） | 191.8 ms | **62.0 ms** |
-  | 服务端单次上传峰值内存 | 43.4 MB | **10.1 MB** |
+  |                        | 改前     | 改后         |
+  | ---------------------- | -------- | ------------ |
+  | 201 响应体             | 13.98 MB | **706 字节** |
+  | 往返合计               | 24.47 MB | **10.49 MB** |
+  | 耗时中位数（5 次）     | 191.8 ms | **62.0 ms**  |
+  | 服务端单次上传峰值内存 | 43.4 MB  | **10.1 MB**  |
 
   峰值内存那一栏的构成是三份与文件等大的缓冲：`readBody` 的 Buffer 被 `toString('base64')` 编成
   13.33 MB 字符串 → 调用方为读一个 `.length` 解回 Buffer → `persistUpload` 再解一遍。
@@ -170,6 +201,12 @@
 
 ### Removed
 
+- **15 个环境变量形态的调参旋钮**（改为 `relay-config.js` 的模块常量，见上方 Changed 节）：
+  `MAX_TEXT_BYTES` / `MAX_BODY_BYTES` / `MAX_QUEUE_EVENTS` / `MAX_ROOM_UPLOADS` /
+  `MAX_UPLOAD_NAME_BYTES` / `MAX_ROOMS` / `MAX_UPLOAD_BYTES_PER_WINDOW` /
+  `MAX_ROOM_BYTES_PER_WINDOW` / `MAX_ROOM_UPLOAD_BYTES` / `ROOM_TTL_MS` / `ROOM_MAX_LIFETIME_MS` /
+  `ROOM_CLEANUP_INTERVAL_MS` / `STREAM_TICKET_TTL_MS` / `RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX`。
+  在 `.env` 里保留它们不会有任何效果（也不报错）；等价能力见 `RELAY_TUNING`。
 - **房间目录归属标记 `.coolector-room` 与「无主目录回收」整体移除**（约 92 行补偿逻辑）：
   它们是「房间只在内存」这一前提下的产物 —— 既然磁盘上的目录无法证明归属，就只能在
   启动时按标记判断「能否删」。`room.json` 取代了这两件事：它**既是**归属证明（含

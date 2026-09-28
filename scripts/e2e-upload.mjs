@@ -200,7 +200,8 @@ async function startRelay({ port, uploadDir }) {
       RELAY_ALLOWED_ORIGINS: '*',
       UPLOAD_DIR: uploadDir,
       MAX_FILE_BYTES: String(10 * 1024 * 1024),
-      RATE_LIMIT_MAX: '1000'
+      // 内部调参只能走 RELAY_TUNING（见 server/relay-config.js 的文件头说明）
+      RELAY_TUNING: JSON.stringify({ RATE_LIMIT_MAX: 1000 })
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })

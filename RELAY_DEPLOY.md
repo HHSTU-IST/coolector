@@ -26,17 +26,28 @@ Coolector 的「在线收集」能力由两部分组成：
 | `RELAY_PUBLIC_BASE_URL`  | 空（只输出相对路径） | 对外 URL 基址。**留空即可，反代 HTTPS 部署也一样**——接收端按它填写的 Relay 地址解析相对路径。服务端不会从 `Host` / `x-forwarded-*` 推断自身地址（那会让攻击者用伪造 `Host` 把接收端的管理密钥引向外部）。仅当有非浏览器客户端需要绝对 URL 时才设，如 `https://relay.example.com` |
 | `RELAY_TRUSTED_PROXIES`  | 空（忽略转发头）     | 可信反向代理网段（IP/CIDR，逗号分隔）。**反代部署必须声明**，否则所有请求的 socket 地址都是代理 IP、全站共用一个限流桶 —— 单个滥用者足以让全班 429。例：`127.0.0.1,10.0.0.0/8`。直连部署留空（留空 = 不采信 `X-Forwarded-For`，防伪造换桶绕过限流）                              |
 | `UPLOAD_DIR`             | `./server/uploads`   | 上传落盘目录，**生产务必指向持久磁盘上的专用目录**（见 §5 与 §6）                                                                                                                                                                                                                |
-| `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB)   | 全局磁盘配额，超出返回 **507**                                                                                                                                                                                                                                                   |
-| `MAX_ROOM_UPLOAD_BYTES`  | 全局的 1/8（128MB）  | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明）                                                                                                                                                                                                   |
+| `PORT`                   | `8787`               | 监听端口                                                                                                                                                                                                                                                                         |
+| `MAX_FILE_BYTES`         | `10485760` (10MB)    | 单文件上限（解码后字节）。请求体上限由它**自动派生**（约 15.16MB），调大本项无需手工同步其它项                                                                                                                                                                                   |
+| `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB)   | 全局磁盘配额，超出返回 **507**。单房间配额默认取本值的 1/8（128MB），文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明）                                                                                                                                              |
 
-配额、体积、限流、生命周期等调优项（`MAX_FILE_BYTES` / `MAX_TEXT_BYTES` / `MAX_BODY_BYTES` /
-`MAX_ROOM_UPLOADS` / `MAX_UPLOAD_NAME_BYTES` / `ROOM_TTL_MS` / `ROOM_MAX_LIFETIME_MS` /
-`ROOM_CLEANUP_INTERVAL_MS` / `MAX_QUEUE_EVENTS` /
-`RATE_LIMIT_*` / `MAX_UPLOAD_BYTES_PER_WINDOW` / `STREAM_TICKET_TTL_MS` /
-`RELAY_TRUSTED_PROXIES`）见 `.env.example`。
+**以上 9 项就是全部可配置项**（外加前端构建期的 `VITE_RELAY_URL`）；未设置时走默认值。
 
-所有变量均可选；未设置时走默认值。
-
+> **其余 15 项是内部调参，已改为模块常量（不再读 env）**：房间存活 `ROOM_TTL_MS`
+> （6h）/ `ROOM_MAX_LIFETIME_MS`（24h）/ `ROOM_CLEANUP_INTERVAL_MS`（30min）、
+> `MAX_ROOM_UPLOADS`（500 条）/ `MAX_QUEUE_EVENTS`（200）/ `MAX_ROOMS`（200）、
+> `MAX_UPLOAD_NAME_BYTES`（255）/ `MAX_TEXT_BYTES`（1MB）/ `MAX_BODY_BYTES`（派生）/
+> `MAX_ROOM_UPLOAD_BYTES`（派生）、限流 `RATE_LIMIT_WINDOW_MS`（60s）/ `RATE_LIMIT_MAX`（120）/
+> `MAX_UPLOAD_BYTES_PER_WINDOW`（256MB）/ `MAX_ROOM_BYTES_PER_WINDOW`（256MB）、
+> `STREAM_TICKET_TTL_MS`（60s）。
+>
+> 原因：这些旋钮**互相耦合**（请求体上限由 `MAX_FILE_BYTES` + 正文上限派生、房间配额取全局的
+> 1/8、TTL 与清理周期必须协调），逐项暴露到 env 只会制造「改了一个、另一个没跟上」的错配 ——
+> 实测过一次：只调大 `MAX_FILE_BYTES` 而没重算派生上限，带提取正文的 docx 有效上限掉到约 8.55MB。
+>
+> 要改就改 `server/relay-config.js` 的 `TUNING_DEFAULTS`（每项都带「为什么是这个值」的注释）。
+> 临时覆盖走唯一的显式通道 `RELAY_TUNING`（JSON 对象），**未知键与非法值一律拒绝启动** ——
+> 静默忽略未知键最危险：运维会以为改动生效了，实际跑的还是默认值。详见 `.env.example`。
+>
 > **数值型变量现在会 fail-closed 校验**：写成 `MAX_FILE_BYTES=10mb` 这类非整数会让进程**拒绝启动**，
 > 而不是把 `NaN` 带进体积判断（那会让所有校验静默失效）。
 >
@@ -88,12 +99,12 @@ Relay Server 本身不处理 TLS。生产应通过反向代理暴露 HTTPS。
 
 反向代理只需满足四件事，本文不提供现成配置文件（各家代理语法差异大，照抄易漂移）：
 
-| 要求 | 原因 |
-| --- | --- |
-| 终结 TLS（Caddy 可自动申请证书；Nginx 可配 certbot 或等价方案） | 前端与 Relay 都必须是 HTTPS，否则浏览器按混合内容拦掉 |
-| **关闭响应缓冲**（Nginx 关 `proxy_buffering`；Caddy 默认即不缓冲） | 否则 SSE 事件被攒在代理里，接收端看起来「没有反应」 |
+| 要求                                                                                               | 原因                                                                       |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 终结 TLS（Caddy 可自动申请证书；Nginx 可配 certbot 或等价方案）                                    | 前端与 Relay 都必须是 HTTPS，否则浏览器按混合内容拦掉                      |
+| **关闭响应缓冲**（Nginx 关 `proxy_buffering`；Caddy 默认即不缓冲）                                 | 否则 SSE 事件被攒在代理里，接收端看起来「没有反应」                        |
 | 请求体上限 ≥ `MAX_BODY_BYTES`（默认派生 15,160,662 B ≈ 15.16 MB；Nginx 为 `client_max_body_size`） | 小于它时大文件会在到达 Relay 之前被代理截断，且报错来自代理、与 Relay 无关 |
-| 代理会改写来源地址时，同时设置 `RELAY_TRUSTED_PROXIES` | 否则限流按代理 IP 计数，退化为全站单桶（见 §2 与 `.env.example`） |
+| 代理会改写来源地址时，同时设置 `RELAY_TRUSTED_PROXIES`                                             | 否则限流按代理 IP 计数，退化为全站单桶（见 §2 与 `.env.example`）          |
 
 `X-Forwarded-*` / `Host` 只对**代理自身的日志与访问控制**有意义：relay 不读取它们，生成绝对 URL 是客户端的事。
 
@@ -194,7 +205,7 @@ curl -s -D- -o /dev/null -H 'Origin: https://<org>.github.io' https://relay.exam
 
 ## 7. 持久化与运维
 
-- **上传文件**：存于 `UPLOAD_DIR`，生产应指向持久磁盘；房间 `ROOM_TTL_MS` 过期后自动删除并回收配额。
+- **上传文件**：存于 `UPLOAD_DIR`，生产应指向持久磁盘；房间 `ROOM_TTL_MS`（代码常量，默认 6h）过期后自动删除并回收配额。
 - **房间元数据**：同样是 `UPLOAD_DIR` 下每个房间目录内的 `room.json`（原子写：先写 `.tmp` 再 `rename`）。
   启动时据此重建房间与上传并复原配额 —— 因此**重启不再是「丢作业」**。单实例足够；多实例不共享状态
   （无 Redis/DB），且**不可共享 `UPLOAD_DIR`**（见 §2 的多实例禁令）。
