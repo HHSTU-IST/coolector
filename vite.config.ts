@@ -41,15 +41,13 @@ export default defineConfig({
     base: './',
     server: {
         // 放行 cloudflared quick tunnel 的 Host（否则隧道访问被 Vite 403 拦截）
-        allowedHosts: ['.trycloudflare.com'],
-        proxy: {
-            // dev 时把 /relay 转发到本机 Relay，配合 VITE_RELAY_URL=/relay 走同源；生产用绝对地址
-            '/relay': {
-                target: 'http://127.0.0.1:8787',
-                changeOrigin: true,
-                rewrite: (path) => path.replace(/^\/relay/, '')
-            }
-        }
+        allowedHosts: ['.trycloudflare.com']
+        // 这里原有一个 `/relay` → 127.0.0.1:8787 的同源 dev 代理，随「VITE_RELAY_URL
+        // 只认 http(s) 绝对地址」一并移除：它服务的那个值（`/relay`）已被三处判据一致拒绝。
+        // 本机开发因此改为直连（前端填 http://127.0.0.1:8787，属跨源调用）：
+        // `pnpm start` 会自动放行 http://localhost:5174 与 http://127.0.0.1:5174
+        // （见 server/start.js 的 devAllowedOrigins）；只跑 `pnpm dev` + `pnpm relay` 时
+        // 需在 .env 里自行设 RELAY_ALLOWED_ORIGINS=http://localhost:5174。
     },
     build: {
         outDir: 'dist',

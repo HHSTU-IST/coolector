@@ -4,13 +4,21 @@ import { ref, watch } from 'vue'
 const FALLBACK_RELAY_URL = 'http://127.0.0.1:8787'
 
 /**
- * Relay 地址的合法形态：绝对 http(s) 地址，或**同源绝对路径**（如 dev 代理用的 `/relay`）。
+ * Relay 地址的合法形态：**http(s) 绝对地址**，唯一。
+ *
+ * 原先还放行「同源绝对路径」（`/relay`，配 Vite dev 代理用），已于 2026-09-29 移除。
+ * 理由：同一个值有三个判据 —— CI 门禁（`.github/workflows/deploy.yml` 的 `case` 块）、
+ * 构建守卫（`scripts/check-no-secrets.mjs`）与本函数，只有这里认相对路径，于是出现
+ * 「本地构建得过、CI 拒绝发布」的漂移。**改任一处须同时改另两处。**
+ *
+ * 同域挂子路径的**部署形态仍然可行**，只是要写成绝对形式（`https://app.example.com/relay`）——
+ * 下面的 `[^\s]+` 允许路径前缀，`resolveRelayUrl` 也按前缀拼接。
  *
  * 刻意拒绝两类会让「凭据打错地方」的值：
  * - `//evil.example` —— 协议相对地址，浏览器会把它解析成**外部主机**；
  * - `relay.example.com`（无 scheme）—— 会被当成页面相对路径，请求静默打到静态站自己身上。
  */
-const RELAY_URL_PATTERN = /^(https?:\/\/[^\s]+|\/(?!\/)[^\s]*)$/iu
+const RELAY_URL_PATTERN = /^https?:\/\/[^\s]+$/iu
 
 /** 归一 Relay 地址：去首尾空白、查询串 / hash 与尾部斜杠（查询串会把后续拼接的路径吞进 query） */
 export const normalizeRelayUrl = (value: string) =>
@@ -21,7 +29,7 @@ export const validateRelayUrl = (value: string): string => {
   const normalized = normalizeRelayUrl(value)
   if (!normalized) return 'Relay 地址不能为空'
   if (!RELAY_URL_PATTERN.test(normalized)) {
-    return 'Relay 地址必须是 http(s) 绝对地址（如 https://relay.example.com），或同源路径（如 /relay）'
+    return 'Relay 地址必须是 http(s) 绝对地址（如 https://relay.example.com；同域子路径写成 https://app.example.com/relay）'
   }
   return ''
 }

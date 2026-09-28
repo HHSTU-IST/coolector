@@ -4,6 +4,22 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+
+- **`VITE_RELAY_URL` 的判据收敛为「http(s) 绝对地址」唯一形态**。同一个值此前有三个判据：
+  CI 门禁（`deploy.yml` 的 `Validate VITE_RELAY_URL`）与构建守卫（`check-no-secrets.mjs`）只认
+  绝对地址，而前端 `validateRelayUrl` 还放行同源相对路径 `/relay` —— 于是同一个值「本地构建得过、
+  CI 拒绝发布」。现三处口径一致（改任一处须同时改另两处）：
+  - 前端不再接受 `/relay`：`DEFAULT_RELAY_URL` 遇到该值报错并回落到 `http://127.0.0.1:8787`，
+    修正文案后重新构建即可；接收端界面的地址输入框本就是 `type="url"`，浏览器原生也拒绝相对路径。
+  - 移除 `vite.config.ts` 里为它配套的 `/relay` dev 代理。本机开发不需要它 —— `pnpm start`
+    会自动放行 `http://localhost:5174` 与 `http://127.0.0.1:5174`（见 `server/start.js`），
+    前端直填 `http://127.0.0.1:8787` 即可，不必靠代理绕 CORS。
+  - **同域挂子路径的部署形态不受影响**，只是地址要写成绝对形式
+    （`VITE_RELAY_URL=https://app.example.com/relay`，反代把 `/relay/*` 重写到 relay 根路径）。
+
 ## [1.0.1] - 2026-09-14
 
 ### Security

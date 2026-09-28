@@ -36,6 +36,11 @@ const SCAN_CHUNK_BYTES = 64 * 1024
  * 它不是密钥，所以不在密钥扫描范围内；但接收端**只会把凭据发往这一个源**，
  * 一个畸形的值（`//evil.example` 会指向外部主机、`relay.example.com` 会被浏览器
  * 当成页面自身路径）在构建期没有任何运行期校验能拦住 —— 只能在门禁里挡。
+ *
+ * 判据须与另两处**逐条一致**（改一处须同时改另两处）：
+ * - CI 门禁：`.github/workflows/deploy.yml` 的 `Validate VITE_RELAY_URL` 步骤；
+ * - 前端运行期：`src/utils/relay.ts` 的 `RELAY_URL_PATTERN`。
+ * 三者都只接受 http(s) 绝对地址（同域子路径写成 `https://app.example.com/relay` 仍可）。
  */
 const RELAY_URL_PATTERN = /^https?:\/\/[^\s/]+/iu
 

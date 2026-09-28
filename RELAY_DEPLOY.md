@@ -169,8 +169,11 @@ curl -s -D- -o /dev/null -H 'Origin: https://<org>.github.io' https://relay.exam
 ```
 
 > 推荐「子域」模式：`relay.example.com` 独立反代 relay，`app.example.com` 托管前端。
-> 同域挂子路径同样可行：前端填 `VITE_RELAY_URL=/relay`，反代把 `/relay/*` 重写到 relay 的根路径
-> （写法与 `vite.config.ts` 里 dev 代理的 `rewrite` 一致）。relay 自身不感知前缀，前缀由反代剥掉。
+> 同域挂子路径同样可行，但地址**必须写成绝对形式**：`VITE_RELAY_URL=https://app.example.com/relay`，
+> 反代把 `/relay/*` 重写到 relay 的根路径。relay 自身不感知前缀，前缀由反代剥掉。
+> **不能**写成裸相对路径 `/relay` —— CI 门禁（`deploy.yml` 的 `Validate VITE_RELAY_URL`）、
+> `pnpm guard:no-secret` 与前端运行期校验三处判据一致，都只接受 http(s) 绝对地址，
+> 相对写法会在发布链路上被直接拒绝。
 
 ## 6. 安全清单（公网必做）
 

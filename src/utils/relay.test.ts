@@ -74,10 +74,6 @@ describe('resolveRelayUrl', () => {
     expect(() => resolveRelayUrl('http://127.0.0.1:8787/api', 'not a url')).toThrow(UntrustedRelayUrlError)
   })
 
-  it('同源相对基址（dev 代理的 `/relay`）也能正确拼接', () => {
-    expect(resolveRelayUrl('/api/rooms/r1', '/relay')).toBe('/relay/api/rooms/r1')
-  })
-
   it('空地址与畸形地址被拒绝', () => {
     expect(() => resolveRelayUrl('   ', BASE)).toThrow(UntrustedRelayUrlError)
     expect(() => resolveRelayUrl('not a url', BASE)).toThrow(UntrustedRelayUrlError)
@@ -103,12 +99,22 @@ describe('normalizeRelayUrl', () => {
  * 构建期注入的 `VITE_RELAY_URL` 没有任何运行期输入校验兜底，因此这里锁死它的合法形态。
  * 两类「凭据打错地方」的值必须被拒绝：协议相对地址（外部主机）、无 scheme 的裸域名
  * （会被当成页面相对路径，静默打到静态站自己身上）。
+ *
+ * 判据必须与 CI 门禁（`.github/workflows/deploy.yml`）和构建守卫
+ * （`scripts/check-no-secrets.mjs`）**逐条一致**：三者都只接受 http(s) 绝对地址。
+ * 曾经放行的同源相对路径 `/relay` 已移除，且**必须保持被拒绝** —— 若有人把它加回来，
+ * 这里先失败，而不是等 CI 拒发版本时才发现。
  */
 describe('validateRelayUrl', () => {
-  it('接受绝对 http(s) 地址与同源路径', () => {
+  it('接受绝对 http(s) 地址（含带路径前缀的同域子路径）', () => {
     expect(validateRelayUrl('https://relay.example.com')).toBe('')
     expect(validateRelayUrl('http://127.0.0.1:8787')).toBe('')
-    expect(validateRelayUrl('/relay')).toBe('')
+    expect(validateRelayUrl('https://app.example.com/relay')).toBe('')
+  })
+
+  it('拒绝同源相对路径（判据与 CI 门禁一致）', () => {
+    expect(validateRelayUrl('/relay')).not.toBe('')
+    expect(validateRelayUrl('/')).not.toBe('')
   })
 
   it('拒绝协议相对地址、裸域名、非 http(s) 协议与空值', () => {
