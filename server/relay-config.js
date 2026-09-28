@@ -7,6 +7,11 @@ import { normalizeAllowedOrigins, parsePositiveInt, parsePublicBaseUrl, parseTru
 /**
  * 读取正整数型环境变量，非法即拒绝启动。
  * 不能让 `Number('10mb')` 这类笔误静默变成 `NaN` —— 那会让体积校验全部失效（fail-open）。
+ *
+ * @param {string} name 环境变量名（仅用于报错）
+ * @param {number} fallback 未设置时的默认值
+ * @param {{ min?: number, max?: number }} [bounds] 允许区间
+ * @returns {number}
  */
 function requirePositiveInt(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const result = parsePositiveInt(process.env[name], { fallback, min, max })

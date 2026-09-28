@@ -94,11 +94,15 @@ pnpm run preview
 ```bash
 pnpm test                # 单元测试（vitest）
 pnpm lint                # oxlint，要求 0 warning / 0 error
-pnpm exec vue-tsc -b     # 类型检查（pnpm build 已包含）
+pnpm exec vue-tsc -b     # 类型检查：src/ + vite.config.ts + server/ + shared/（pnpm build 已包含）
 pnpm build               # 生产构建
 pnpm guard:no-secret     # 断言构建产物中不含任何密钥（需先 build）
 pnpm e2e                 # 真实浏览器端到端回归（会先 build）
 ```
+
+`server/` 与 `shared/` 是原生 JavaScript，由 `tsconfig.server.json` 的 `checkJs` + `strict` 纳入
+类型检查（生产代码全量受检；测试文件暂未纳入，理由见该配置内的注释）。因此给服务端函数补
+JSDoc `@param` / `@returns` 是这条门禁的要求，而不是可选修饰。
 
 `pnpm e2e` 需要本机有 Chromium：`pnpm exec playwright install chromium`，
 或用 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定已有的浏览器路径。

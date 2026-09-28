@@ -55,6 +55,7 @@ export function parseRelayBaseUrl(raw) {
   const value = raw === undefined || raw === null ? '' : String(raw).trim()
   if (value === '') return { ok: true, value: null, reason: RELAY_BASE_URL_REASON.EMPTY, raw: value }
 
+  /** @type {(reason: string) => { ok: false, value: null, reason: string, raw: string }} */
   const invalid = (reason) => ({ ok: false, value: null, reason, raw: value })
 
   let parsed

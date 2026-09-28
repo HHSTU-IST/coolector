@@ -21,6 +21,20 @@
     配额逐房间约束，再加一道会在接收热路径上引入「可被中断的失败」。重复 upsert 同一 `uploadId`
     按差值调整，不重复累加。
   - 文件列表标题处显示「N 个文件 · 合计 X / 上限 Y」，达到 90% 时数字转琥珀色。
+- **`server/` 与 `shared/` 纳入类型检查**（新增 `tsconfig.server.json`：`allowJs` + `checkJs` + `strict`）。
+  此前 `vue-tsc -b` 只覆盖 `src/` 与 `vite.config.ts` —— 约 **1 995 行服务端生产代码零编译期保障**，
+  只能靠 oxlint（不做类型分析）与测试兜底。
+  - 做法由**实测的错误分布**决定，而非预设严格档：`strict` 全开时报 **467** 条，其中 **92%** 是
+    `noImplicitAny` / `strictNullChecks` / catch 变量 `unknown` 三个开关的产物，且 **61% 落在测试文件**；
+    生产代码只有 136 条，其中 **106 条是「函数参数没写 JSDoc」**。因此本轮把生产代码修到 0 错误，
+    测试文件暂缓（理由见该配置内的 `exclude` 注释）。
+  - 过程中暴露出 **两处真实缺陷**，而非单纯的标注缺失：① `parsePositiveInt` 的返回类型没写成判别联合，
+    使 `value` 被推断为 `number | null` 并一路传染出 **17 条** `possibly null`（全部配置常量受影响）；
+    ② `makeCorsHeaders` 的返回值被字面量类型收窄，`Vary` 头的赋值实际处于**未受检**状态。
+  - 新增 `requireStoragePath()`：`Upload.storagePath` 在类型上可选，但能走到下载与销毁清理的上传
+    必然来自落盘成功 —— 把这层契约显式化，而不是用类型断言掩盖。
+  - **门禁有效性已实测**：注入一处类型错误后 `vue-tsc -b` 以退出码 2 失败并精确指向该行。
+  - CI 无需改动：`ci.yml` 本就在跑 `pnpm exec vue-tsc -b`，项目引用生效后自动覆盖服务端。
 
 ### Fixed
 

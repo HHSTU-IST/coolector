@@ -33,6 +33,10 @@ function nowIso() {
  * 未包装的异常一律脱敏为 400 Bad request 并只落审计日志。
  */
 class HttpError extends Error {
+  /**
+   * @param {number} statusCode HTTP 状态码
+   * @param {string} message 可安全回传给客户端的说明
+   */
   constructor(statusCode, message) {
     super(message)
     this.name = 'HttpError'
@@ -41,7 +45,12 @@ class HttpError extends Error {
 }
 
 
-/** 结构化安全审计日志（房间/上传/鉴权失败/限流等关键事件） */
+/**
+ * 结构化安全审计日志（房间/上传/鉴权失败/限流等关键事件）
+ *
+ * @param {string} event 事件名
+ * @param {Record<string, unknown>} [details] 附加上下文（**不得含原始文件名**，见 digestName）
+ */
 function auditLog(event, details = {}) {
   console.log(`[relay][audit] ${JSON.stringify({ ts: nowIso(), event, ...details })}`)
 }
@@ -58,13 +67,22 @@ function auditLog(event, details = {}) {
  *
  * 需要绝对 URL 的部署（例如给 curl / 自定义集成消费）请显式配置 `RELAY_PUBLIC_BASE_URL`；
  * 那是唯一能产生绝对 URL 的来源，而它是运维配置而非请求输入，因此不可被外部左右。
+ *
+ * @param {string} path 以 `/` 开头的相对路径
+ * @returns {string}
  */
 function relayUrl(path) {
   return PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}${path}` : path
 }
 
 
-/** /events 允许携带一次性票据代替长期 token；票据与房间绑定、用后即焚 */
+/**
+ * /events 允许携带一次性票据代替长期 token；票据与房间绑定、用后即焚
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {string} pathname
+ * @returns {boolean}
+ */
 function isStreamTicketAuthorized(req, pathname) {
   const match = pathname.match(/^\/api\/rooms\/([^/]+)\/events$/u)
   if (!match) return false
@@ -81,12 +99,25 @@ function isStreamTicketAuthorized(req, pathname) {
 }
 
 
-/** 发送方公开写路径：仅 POST /api/rooms/:roomId/uploads 免凭据（房间 ID 即能力凭据） */
+/**
+ * 发送方公开写路径：仅 POST /api/rooms/:roomId/uploads 免凭据（房间 ID 即能力凭据）
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {string} pathname
+ * @returns {boolean}
+ */
 function isPublicUpload(req, pathname) {
   return req.method === 'POST' && /^\/api\/rooms\/[^/]+\/uploads$/u.test(pathname)
 }
 
 
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} statusCode
+ * @param {unknown} payload
+ * @param {Record<string, string>} [headers]
+ * @returns {void}
+ */
 function writeJson(res, statusCode, payload, headers = {}) {
   const body = JSON.stringify(payload, null, 2)
   res.writeHead(statusCode, {
@@ -98,6 +129,12 @@ function writeJson(res, statusCode, payload, headers = {}) {
 }
 
 
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @param {string} eventName
+ * @param {Record<string, unknown> & { id: string }} payload
+ * @returns {void}
+ */
 function writeSseFrame(res, eventName, payload) {
   res.write(`event: ${eventName}\n`)
   res.write(`id: ${payload.id}\n`)
@@ -112,8 +149,14 @@ function writeSseFrame(res, eventName, payload) {
  * （浏览器报 `Failed to fetch`）而拿不到 413 响应体。这里只停止累积、丢弃后续数据，
  * 让 Node 在响应写完后自行收尾连接。
  */
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {number} [limit]
+ * @returns {Promise<Buffer>}
+ */
 function readBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
+    /** @type {Buffer[]} */
     const chunks = []
     let size = 0
     let exceeded = false
@@ -142,6 +185,11 @@ function readBody(req, limit = MAX_BODY_BYTES) {
 }
 
 
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @param {Record<string, string>} [headers]
+ * @returns {void}
+ */
 function sendSseHeaders(res, headers = {}) {
   res.writeHead(200, {
     ...headers,
@@ -160,6 +208,12 @@ function sendSseHeaders(res, headers = {}) {
  *
  * **两个维度都要**：按来源 IP 挡单点滥用；按房间挡「多来源一起灌同一个房间」
  * （出口 IP 多变的滥用者），并保证单房间被灌爆不会牵连其它房间。
+ */
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {string} roomId
+ * @param {number} size
+ * @returns {boolean}
  */
 function isUploadBytesExceeded(req, roomId, size) {
   if (MAX_UPLOAD_BYTES_PER_WINDOW > 0) {
@@ -191,6 +245,11 @@ const roomByteBuckets = new Map()
  * 取出（必要时新建）某个键在当前限流窗口内的计数桶。
  * 三个限流器共用这一种桶形状，避免各写一遍「取桶 → 判过期 → 新建」。
  */
+/**
+ * @param {Map<string, { count: number, bytes: number, resetAt: number }>} store
+ * @param {string} key
+ * @returns {{ count: number, bytes: number, resetAt: number }}
+ */
 function takeBucket(store, key) {
   const now = Date.now()
   let bucket = store.get(key)
@@ -204,6 +263,10 @@ function takeBucket(store, key) {
 }
 
 
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {boolean}
+ */
 function isRateLimited(req) {
   // 注意：限流一旦启用就一定计数，即使随后请求因其他原因被拒（fail-closed 方向）
   const bucket = takeBucket(rateBuckets, resolveClientIp(req))

@@ -13,6 +13,43 @@ import {
 } from './relay-config.js'
 import { HttpError, auditLog, nowIso, relayUrl, writeSseFrame } from './relay-http.js'
 
+/**
+ * 一条落进房间的上传（内存态）。字段与 relay-server 的 parseUploadMetadata 产物一一对应。
+ *
+ * @typedef {object} Upload
+ * @property {string} id
+ * @property {string} roomId
+ * @property {string} name
+ * @property {string} mimeType
+ * @property {string} lastModified
+ * @property {string} uploadedAt
+ * @property {number} size
+ * @property {number} quotaBytes
+ * @property {string | null} text
+ * @property {boolean} textTruncated
+ * @property {string | null} previewText
+ * @property {string} [storagePath] 落盘后的绝对路径；未落盘时不存在
+ * @property {string} [storageFileName] 落盘后的文件名；未落盘时不存在
+ */
+
+/**
+ * 房间内存态。**字段即契约**：`serverStored`、下载链接等都从这里派生。
+ *
+ * @typedef {object} Room
+ * @property {string} id
+ * @property {string} createdAt
+ * @property {string} updatedAt
+ * @property {number} lastActivity
+ * @property {{ res: import('node:http').ServerResponse, heartbeat: NodeJS.Timeout } | null} receiver
+ * @property {{ id: string, type: string, createdAt: string, data: unknown }[]} queue
+ * @property {Map<string, Upload>} uploads
+ * @property {number} storedBytes
+ * @property {number} pendingUploads
+ * @property {boolean} destroyed
+ * @property {{ receiverConnections: number, uploads: number, eventsDelivered: number }} stats
+ */
+
+/** @type {Map<string, Room>} */
 const rooms = new Map()
 
 
@@ -20,6 +57,10 @@ const rooms = new Map()
 let totalStoredBytes = 0
 
 
+/**
+ * @param {string} [roomId] 省略时生成完整 UUID
+ * @returns {{ room: Room, created: boolean }}
+ */
 function createRoom(roomId = randomUUID()) {
   const id = sanitizeRoomId(roomId)
   if (!id) {
@@ -57,6 +98,10 @@ function createRoom(roomId = randomUUID()) {
 }
 
 
+/**
+ * @param {unknown} roomId
+ * @returns {Room | null}
+ */
 function getRoom(roomId) {
   const id = sanitizeRoomId(roomId)
   if (!id) return null
@@ -69,6 +114,10 @@ function getRoom(roomId) {
  *
  * 检查与扣减必须**同步**完成：一旦中间插入 `await`，并发请求会全部读到旧值而击穿配额
  * （实测 32 并发可把 4MB 配额打到 8.39×）。返回值是回滚函数，落盘失败时必须调用。
+ *
+ * @param {Room} room
+ * @param {number} quotaBytes
+ * @returns {() => void} 回滚函数（幂等且受 `room.destroyed` 短路）
  */
 function reserveStorageQuota(room, quotaBytes) {
   if (room.storedBytes + quotaBytes > MAX_ROOM_UPLOAD_BYTES) {
@@ -97,6 +146,9 @@ function reserveStorageQuota(room, quotaBytes) {
  * 与配额同理：必须把「正在落盘中」的请求也计入，否则并发下每个请求都只看到
  * `uploads.size` 的旧值（实测限额 5、50 并发可全部通过）。成功落盘后调用返回的函数，
  * 此时 `uploads.size` 已经加过，`pendingUploads` 减回，账目守恒。
+ *
+ * @param {Room} room
+ * @returns {() => void} 槽位释放函数（幂等）
  */
 function reserveUploadSlot(room) {
   if (room.uploads.size + room.pendingUploads >= MAX_ROOM_UPLOADS) {
@@ -114,6 +166,10 @@ function reserveUploadSlot(room) {
 }
 
 
+/**
+ * @param {Room} room
+ * @returns {object} 房间元信息 + 上传摘要列表（**不含正文**）
+ */
 function roomSnapshot(room) {
   // 房间状态只暴露元信息与下载链接，正文走 details 端点按需拉取
   const uploads = Array.from(room.uploads.values())
@@ -140,6 +196,17 @@ function roomSnapshot(room) {
  *
  * 刻意**不接受 `req`**：URL 由 relayUrl 生成（相对路径或运维配置的基址），
  * 绝不让请求头参与拼接 —— 见 relay-http.js 的 relayUrl 与 F-001。
+ *
+ * @param {Upload} upload
+ * @param {{ includeContent?: boolean }} [options] 默认 `true` **只对 details 端点成立**；
+ *   SSE 广播与 201 响应必须显式传 `false`（否则回吐正文，见铁律 22）
+ * @returns {{
+ *   id: string, name: string, mimeType: string, size: number,
+ *   uploadedAt: string, lastModified: string,
+ *   previewText: string | null, textTruncated: boolean,
+ *   contentIncluded: boolean, contentText: string | null, contentBase64: string | null,
+ *   detailsUrl: string, downloadUrl: string, serverStored: boolean
+ * }}
  */
 function uploadSummary(upload, { includeContent = true } = {}) {
   const detailsPath = `/api/rooms/${upload.roomId}/uploads/${upload.id}`
@@ -168,6 +235,10 @@ function uploadSummary(upload, { includeContent = true } = {}) {
 }
 
 
+/**
+ * @param {Room} room
+ * @returns {void}
+ */
 function trimQueue(room) {
   while (room.queue.length > MAX_QUEUE_EVENTS) {
     room.queue.shift()
@@ -175,6 +246,10 @@ function trimQueue(room) {
 }
 
 
+/**
+ * @param {Room} room
+ * @returns {void}
+ */
 function closeReceiver(room) {
   if (!room.receiver) return
 
@@ -188,12 +263,23 @@ function closeReceiver(room) {
 }
 
 
+/**
+ * @param {Room} room
+ * @param {{ id: string, type: string, createdAt: string, data: unknown }} event
+ * @returns {void}
+ */
 function queueEvent(room, event) {
   room.queue.push(event)
   trimQueue(room)
 }
 
 
+/**
+ * @param {Room} room
+ * @param {string} eventName
+ * @param {unknown} data
+ * @returns {{ id: string, type: string, createdAt: string, data: unknown }} 已投递或已入队的 SSE 事件
+ */
 function dispatchEvent(room, eventName, data) {
   const event = {
     id: randomUUID(),
@@ -230,13 +316,23 @@ function dispatchEvent(room, eventName, data) {
 const ROOM_SENTINEL_FILENAME = '.coolector-room'
 
 
+/**
+ * @param {string} roomUploadDir 房间上传目录（绝对路径）
+ * @param {string} roomId
+ * @returns {Promise<void>}
+ */
 async function writeRoomSentinel(roomUploadDir, roomId) {
   const payload = JSON.stringify({ generator: 'coolector-relay', version: 1, roomId })
   await writeFile(join(roomUploadDir, ROOM_SENTINEL_FILENAME), payload, 'utf8')
 }
 
 
-/** 读取目录归属标记；缺失 / 损坏 / 非本程序所写一律返回 null（此时**绝不删除**） */
+/**
+ * 读取目录归属标记；缺失 / 损坏 / 非本程序所写一律返回 null（此时**绝不删除**）
+ *
+ * @param {string} roomUploadDir
+ * @returns {Promise<string | null>}
+ */
 async function readRoomSentinel(roomUploadDir) {
   try {
     const raw = await readFile(join(roomUploadDir, ROOM_SENTINEL_FILENAME), 'utf8')
@@ -249,6 +345,11 @@ async function readRoomSentinel(roomUploadDir) {
 }
 
 
+/**
+ * @param {Upload} upload
+ * @param {Buffer} bytes 解码后的文件字节（**不是** base64 字符串）
+ * @returns {Promise<void>}
+ */
 async function persistUpload(upload, bytes) {
   // 入参是**解码后的文件字节**，不是 base64。签名收字符串时本函数要自己解一遍，
   // 加上调用方为量 `.length` 解的那一遍、以及裸 body 通道为拼响应字段做的那一遍编码，
@@ -279,6 +380,11 @@ async function persistUpload(upload, bytes) {
  * 未处理的拒绝会让整个 relay 进程退出（实测 exit=1，整站下线）。
  * 删除失败时返回 false，由调用方记录并等待下次重试。
  */
+/**
+ * @param {Room} room
+ * @param {{ removeDir?: typeof rm }} [options] 便于单测注入「删除失败」的替身
+ * @returns {Promise<boolean>} 目录是否删除成功（失败不抛出）
+ */
 async function destroyRoom(room, { removeDir = rm } = {}) {
   // 先置标记：在途上传据此判断「房间已经没了」，避免落盘后静默写入无人认领的文件
   room.destroyed = true
@@ -304,6 +410,10 @@ async function destroyRoom(room, { removeDir = rm } = {}) {
 }
 
 
+/**
+ * @param {{ removeDir?: typeof rm }} [options] 透传给 destroyRoom
+ * @returns {Promise<void>}
+ */
 async function cleanupRooms({ removeDir = rm } = {}) {
   const now = Date.now()
   const idleCutoff = now - ROOM_TTL_MS
@@ -358,6 +468,10 @@ async function cleanupRooms({ removeDir = rm } = {}) {
  * 无标记 / 标记不匹配 / 标记损坏的目录一律**不动**（宁可留一点占用，也不能误删运维自己的数据），
  * 并且不计入配额 —— 它们不是本程序产生的，与配额无关。
  */
+/**
+ * @param {string} dirPath
+ * @returns {Promise<number>} 目录下**直接**子文件的大小之和（不递归）
+ */
 async function measureDirectoryBytes(dirPath) {
   let total = 0
   const files = await readdir(dirPath, { withFileTypes: true })
@@ -372,6 +486,9 @@ async function measureDirectoryBytes(dirPath) {
 }
 
 
+/**
+ * @returns {Promise<void>}
+ */
 async function initStoredBytes() {
   totalStoredBytes = 0
 

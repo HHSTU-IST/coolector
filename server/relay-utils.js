@@ -14,6 +14,15 @@ import { parseRelayBaseUrl } from '../shared/relay-base-url.js'
  *
  * 背景：`Number('10mb')` 是 `NaN`，而 `size > NaN` 恒为 false —— 一个笔误就能让
  * 体积校验静默全失效（实测 12MB 文件被照单全收）。
+ *
+ * 返回的是**可判别联合**：`ok:false` 分支的 `value` 恒为 `null`，`ok:true` 分支的 `value`
+ * 一定是 `number`。必须写判别联合而不是 `{ ok: boolean, value: number | null }` —— 后者会让
+ * 调用方在 `process.exit(1)` 之后仍被推断成 `number | null`，再一路传染给全部配置常量
+ * （实测这一处 typedef 曾连带产生 17 条 `possibly null`）。
+ *
+ * @param {string | undefined | null} raw
+ * @param {{ fallback?: number, min?: number, max?: number }} [bounds]
+ * @returns {{ ok: true, value: number, usedFallback: boolean } | { ok: false, value: null, raw: string }}
  */
 export function parsePositiveInt(raw, { fallback = 0, min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (raw === undefined || raw === null || String(raw).trim() === '') {
@@ -36,6 +45,9 @@ const MAX_MIME_PART_LENGTH = 127
  *
  * 只防注入是不够的：超长的 `mimeType` 会让下载响应头溢出，客户端连响应头都解析不了
  * （实测 node fetch 抛 `UND_ERR_HEADERS_OVERFLOW`、curl 退出码 100），该文件将**永久无法下载**。
+ *
+ * @param {unknown} value
+ * @returns {string}
  */
 export function sanitizeMimeType(value) {
   const raw = String(value ?? '').trim()
@@ -58,6 +70,10 @@ export function sanitizeMimeType(value) {
 /**
  * 规范化日期字符串：校验可解析并统一为 ISO，同时限制长度。
  * 客户端传来的 `lastModified` 若不加约束，就是一个可写入任意长度内容的字段。
+ *
+ * @param {unknown} value
+ * @param {string} fallback 不可解析时原样返回的兜底值
+ * @returns {string}
  */
 export function normalizeIsoDate(value, fallback) {
   const raw = String(value ?? '').trim().slice(0, 64)
@@ -71,6 +87,10 @@ export function normalizeIsoDate(value, fallback) {
  * 限制上传文件名长度。超长名会同时放大内存、房间快照、SSE 帧与审计日志，
  * 也是「元数据不计配额」绕过的入口。
  * 截断时尽量保留扩展名，避免接收端把 `.md` / `.docx` 识别成无扩展名文件。
+ *
+ * @param {unknown} name
+ * @param {number} maxBytes
+ * @returns {{ name: string, truncated: boolean }}
  */
 export function limitUploadName(name, maxBytes) {
   const raw = String(name ?? '')
@@ -89,7 +109,13 @@ export function limitUploadName(name, maxBytes) {
   return { name: `${stem}${extension}`, truncated: true }
 }
 
-/** 按 UTF-8 字节数截断字符串，不产生半个码点（不完整的多字节序列被 StringDecoder 丢弃） */
+/**
+ * 按 UTF-8 字节数截断字符串，不产生半个码点（不完整的多字节序列被 StringDecoder 丢弃）
+ *
+ * @param {unknown} value
+ * @param {number} maxBytes
+ * @returns {{ text: string, truncated: boolean }}
+ */
 export function truncateUtf8(value, maxBytes) {
   const text = String(value ?? '')
   const buffer = Buffer.from(text, 'utf8')
@@ -106,6 +132,10 @@ export function truncateUtf8(value, maxBytes) {
 const ROOM_ID_MIN_LENGTH = 8
 const ROOM_ID_MAX_LENGTH = 64
 
+/**
+ * @param {unknown} roomId
+ * @returns {string | null} 合法时返回归一后的 ID，否则 `null`
+ */
 export function sanitizeRoomId(roomId) {
   if (!roomId || typeof roomId !== 'string') return null
   const normalized = roomId.trim()
@@ -122,6 +152,9 @@ const WEAK_ROOM_IDS = new Set([
 /**
  * 判断房间 ID 是否熵不足：弱命名，或字符种类过少（<2 类），或长度 < 12 且非 UUID 形态。
  * 服务端据此写审计告警、前端据此提示用户「请勿公开分享房间号」。
+ *
+ * @param {unknown} roomId
+ * @returns {boolean}
  */
 export function isWeakRoomId(roomId) {
   const raw = typeof roomId === 'string' ? roomId.trim() : ''
@@ -133,7 +166,12 @@ export function isWeakRoomId(roomId) {
   return classes < 2 || raw.length < 12
 }
 
-/** 清洗存储文件名：取 basename 阻断路径穿越，替换控制字符与非法字符，防纯点号名 */
+/**
+ * 清洗存储文件名：取 basename 阻断路径穿越，替换控制字符与非法字符，防纯点号名
+ *
+ * @param {unknown} fileName
+ * @returns {string}
+ */
 export function sanitizeStorageFileName(fileName) {
   const safeBaseName = basename(String(fileName))
     // 有意匹配控制字符：清洗它们以阻断路径穿越与非法文件名
@@ -148,6 +186,9 @@ export function sanitizeStorageFileName(fileName) {
 /**
  * HTTP 头值只能是 latin1，中文文件名需按 RFC 6266 用 filename* 携带 UTF-8 百分号编码，
  * 并给一份 ASCII 回退的 filename 供旧客户端使用。
+ *
+ * @param {unknown} fileName
+ * @returns {string}
  */
 export function contentDisposition(fileName) {
   const name = String(fileName)
@@ -163,13 +204,21 @@ export function contentDisposition(fileName) {
  * 以 latin1 还原原始字节再按 UTF-8 解码；纯 ASCII 值经此转换保持不变。
  *
  * 注意这是**原语**，只做字节还原。裸 body 路径的上传文件名请用 `decodeUploadFileName`。
+ *
+ * @param {unknown} value 非 string 原样返回，故返回类型同为 `unknown`（调用方自行收窄）
+ * @returns {unknown}
  */
 export function decodeHeaderValue(value) {
   if (typeof value !== 'string') return value
   return Buffer.from(value, 'latin1').toString('utf8')
 }
 
-/** 是否全部为可打印 ASCII（HTTP 头值在 latin1 通道下的正常形态） */
+/**
+ * 是否全部为可打印 ASCII（HTTP 头值在 latin1 通道下的正常形态）
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
 function isPrintableAscii(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index)
@@ -178,7 +227,12 @@ function isPrintableAscii(value) {
   return true
 }
 
-/** 是否含非 ASCII 码点（即「百分号转义确实承载了一个非 ASCII 文件名」） */
+/**
+ * 是否含非 ASCII 码点（即「百分号转义确实承载了一个非 ASCII 文件名」）
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
 function hasNonAscii(value) {
   for (let index = 0; index < value.length; index += 1) {
     if (value.charCodeAt(index) > 0x7f) return true
@@ -200,6 +254,9 @@ function hasNonAscii(value) {
  * 纯 ASCII 的 `%XX`（`note%20f.md`、`a%2Fb.txt`）**原样保留** —— 那本来就是一个合法文件名，
  * 自动解码等于把它悄悄改掉（正是本仓铁律禁止的「把非法值悄悄改成合法值」的反向版本：
  * 把合法值悄悄改成另一个值）。残缺转义（`100%.txt`）同理，按字面量处理、不报错。
+ *
+ * @param {unknown} value
+ * @returns {unknown} 与 `decodeHeaderValue` 同口径：非字符串入参原样透传
  */
 export function decodeUploadFileName(value) {
   const restored = decodeHeaderValue(value)
@@ -218,6 +275,11 @@ export function decodeUploadFileName(value) {
   return hasNonAscii(decoded) ? decoded : restored
 }
 
+/**
+ * @param {string} mimeType
+ * @param {string} fileName
+ * @returns {boolean}
+ */
 export function isTextMimeType(mimeType, fileName) {
   if (mimeType.startsWith('text/')) return true
   // ipynb 是 JSON 文本，但浏览器常给不出可靠 MIME（空串或无注册），必须靠扩展名兜底
@@ -231,6 +293,9 @@ export function isTextMimeType(mimeType, fileName) {
  * 免凭据的公开写路径意味着任意站点都能向「已知房间号」灌文件，因此「谁可以跨源调用」
  * 必须是显式决定。本机开发由 `server/start.js` 显式注入 localhost 白名单，
  * 端到端脚本亦自带白名单，都不依赖这个默认值。
+ *
+ * @param {unknown} raw
+ * @returns {string[]}
  */
 export function normalizeAllowedOrigins(raw) {
   if (typeof raw !== 'string') return []
@@ -252,6 +317,9 @@ export function normalizeAllowedOrigins(raw) {
  * （前端用正则、还会静默剥掉查询串，服务端用 `new URL` 解析并拒绝查询串），
  * 同一个地址可能「前端放行、服务端拒绝启动」或反之。现在只剩一处判据。
  * 本函数只负责把共享结果映射成服务端惯用的返回形态，`raw` 供启动失败的日志使用。
+ *
+ * @param {string | null | undefined} raw
+ * @returns {{ ok: true, value: string | null } | { ok: false, value: null, raw: string }}
  */
 export function parsePublicBaseUrl(raw) {
   const result = parseRelayBaseUrl(raw)
@@ -259,13 +327,26 @@ export function parsePublicBaseUrl(raw) {
   return { ok: true, value: result.value }
 }
 
-/** 判断监听地址是否为回环地址（用于 fail-closed 鉴权启动检查） */
+/**
+ * 判断监听地址是否为回环地址（用于 fail-closed 鉴权启动检查）
+ *
+ * @param {unknown} host
+ * @returns {boolean}
+ */
 export function isLoopbackHost(host) {
   const normalized = String(host).trim().toLowerCase().replace(/^\[|\]$/gu, '')
   return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1'
 }
 
-/** 按白名单生成 CORS 头工厂；来源不在白名单时返回空对象，浏览器会自行拦截 */
+/**
+ * 按白名单生成 CORS 头工厂；来源不在白名单时返回空对象，浏览器会自行拦截。
+ *
+ * `@returns` 里必须显式写出 `req` 的类型：工厂返回的是内联箭头函数，签名只能从这里推断，
+ * 否则 `req` 与随后动态挂上的 `Vary` 都会退化（前者隐式 `any`，后者被字面量类型拒绝）。
+ *
+ * @param {string[]} allowedOrigins
+ * @returns {(req: import('node:http').IncomingMessage) => Record<string, string>}
+ */
 export function makeCorsHeaders(allowedOrigins) {
   const allowAll = allowedOrigins.includes('*')
 
@@ -276,8 +357,11 @@ export function makeCorsHeaders(allowedOrigins) {
       return {}
     }
 
+    /** @type {Record<string, string>} */
     const headers = {
-      'Access-Control-Allow-Origin': allowAll ? '*' : origin,
+      // allowAll 时用 `*`；否则上面那道守卫已经保证 origin 是命中的非空字符串。
+      // 这里必须写断言：TS 不跨闭包边界收窄外层 const，若不写会认为 origin 仍是 `string | undefined`。
+      'Access-Control-Allow-Origin': allowAll ? '*' : /** @type {string} */ (origin),
       'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Envelope, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified'
     }
@@ -299,10 +383,14 @@ export function makeCorsHeaders(allowedOrigins) {
  *
  * 默认留空 = 不采信任何转发头（直连部署行为不变）。非法条目**不静默忽略**，
  * 由调用方 fail-closed 退出（与 `parsePositiveInt` 同一约定）。
+ *
+ * @param {unknown} raw
+ * @returns {{ list: import('node:net').BlockList, invalid: string[] }}
  */
 export function parseTrustedProxies(raw) {
   const entries = typeof raw === 'string' ? raw.split(',').map((entry) => entry.trim()).filter(Boolean) : []
   const list = new BlockList()
+  /** @type {string[]} */
   const invalid = []
 
   for (const entry of entries) {
@@ -329,6 +417,9 @@ export function parseTrustedProxies(raw) {
  *   该头由调用方任意伪造，直连时采信它等于把限流桶的分配权交给攻击者（可无限换桶绕过）。
  * - socket 地址命中可信代理 → 取 `X-Forwarded-For` 里**最左**的合法 IP（最左 = 最初的客户端），
  *   非法/缺失时回退到 socket 地址，绝不把任意字符串当 IP 用。
+ *
+ * @param {import('node:net').BlockList} trustedProxies
+ * @returns {(req: import('node:http').IncomingMessage) => string}
  */
 export function makeClientIpResolver(trustedProxies) {
   return (req) => {
@@ -355,6 +446,9 @@ export function makeClientIpResolver(trustedProxies) {
  * 注意：这里**刻意不支持** `?token=` 查询参数。长期密钥进入 URL 会残留在访问日志、
  * Referer 与浏览器历史中；SSE 无法自定义请求头的问题已由一次性短时效票据
  * （见 makeTicketStore + relay-server 的 isStreamTicketAuthorized）解决。
+ *
+ * @param {string} relayToken 空串表示未配置（放行一切）
+ * @returns {(req: import('node:http').IncomingMessage) => boolean}
  */
 export function makeAuthorizer(relayToken) {
   return (req) => {
@@ -371,6 +465,10 @@ export function makeAuthorizer(relayToken) {
  * `===` 会短路于首个不同字符，理论上是可测量侧信道；网络噪声远大于这个差异，
  * 但既然比较的是长期密钥，就没有理由不用恒定时间实现。
  * 长度不同直接返回 false：`timingSafeEqual` 对长度不等会抛错，且长度本身不是秘密。
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
  */
 function safeEqual(a, b) {
   const left = Buffer.from(a, 'utf8')
@@ -384,6 +482,10 @@ function safeEqual(a, b) {
  *
  * 审计日志里原本记的是**原始文件名**，而学生作业名普遍含「学号+姓名」——那就是 PII。
  * 换成摘要后：既不能反推姓名，又能让运维对「同一个文件被反复上传」做归并排查。
+ *
+ * @param {unknown} name
+ * @param {{ length?: number }} [options]
+ * @returns {string}
  */
 export function digestName(name, { length = 12 } = {}) {
   return createHash('sha256').update(String(name ?? ''), 'utf8').digest('hex').slice(0, length)
@@ -393,8 +495,16 @@ export function digestName(name, { length = 12 } = {}) {
  * 短时效、一次性 SSE 票据存储。
  * 用票据替代 URL 中的长期 token，规避 token 进入访问日志 / Referer / 浏览器历史。
  * 注入 `now` 便于单元测试。
+ *
+ * @param {{ ttlMs?: number, now?: () => number }} [options]
+ * @returns {{
+ *   issue: (roomId: string) => string,
+ *   consume: (ticket: string | null | undefined, roomId: string) => boolean,
+ *   readonly size: number
+ * }}
  */
 export function makeTicketStore({ ttlMs = 60_000, now = () => Date.now() } = {}) {
+  /** @type {Map<string, { roomId: string, expiresAt: number }>} */
   const tickets = new Map()
 
   const prune = () => {

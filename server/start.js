@@ -29,12 +29,16 @@ const config = {
   relayPort: process.env.PORT ?? process.env.RELAY_PORT ?? '8787'
 }
 
+/** @type {{ name: string, child: import('node:child_process').ChildProcess }[]} */
 const processes = []
 let isShuttingDown = false
 
 /**
  * 结束子进程。Windows 下 pnpm 是经 shell 派生的，真正的 vite 是**孙进程**，
  * 单纯 `child.kill()` 会把它留成孤儿并继续占用端口，因此按进程树结束。
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @returns {void}
  */
 function killProcessTree(child) {
   if (child.exitCode !== null || child.signalCode !== null) return
@@ -47,6 +51,14 @@ function killProcessTree(child) {
   child.kill('SIGTERM')
 }
 
+/**
+ * @param {string} name 子进程显示名（日志用）
+ * @param {string} command
+ * @param {string[]} args
+ * @param {Record<string, string>} [env] 追加到当前进程环境之上
+ * @param {import('node:child_process').SpawnOptions} [options]
+ * @returns {void}
+ */
 function startProcess(name, command, args, env = {}, options = {}) {
   const child = spawn(command, args, {
     env: {

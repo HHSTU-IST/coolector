@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.server.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* JS 类型门禁：server/ 与 shared/ 全是原生 ESM JavaScript */
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["server/**/*.js", "shared/**/*.js"],
+  /*
+   * 测试文件**暂不纳入**：relay-server.test.js / relay-utils.test.js 大量构造 mock 与匿名桩，
+   * 在 strict 下会报数百条「隐式 any」，且它们不决定任何运行时行为。
+   * 生产代码（约 1 995 行）在本配置下**已全量受检**；测试文件留作后续阶段
+   * （先给 mock 补类型，再删掉这条 exclude）。
+   */
+  "exclude": ["server/**/*.test.js"]
+}

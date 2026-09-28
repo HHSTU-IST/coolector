@@ -35,6 +35,34 @@ import {
 // 配置在 relay-config.js；HTTP 原语与准入在 relay-http.js；房间状态与资源记账在 relay-state.js。
 // 改动前请先确认逻辑属于哪一层，不要重新把状态或原语塞回本文件。
 
+/**
+ * 取出「已落盘」上传的存储路径。
+ *
+ * `Upload.storagePath` 在类型上是**可选**的（上传对象刚构造时尚未落盘），但能走到下载与
+ * 销毁清理的 upload 只可能来自 `persistUpload` 成功返回 —— 那时它必已赋值。这里把这条
+ * 契约显式化：对外返回 `string`，同时保留一条运行时守卫（真为空说明不变量被破坏了，
+ * 不该继续拿 `undefined` 去 `readFile` / `rm`）。
+ *
+ * @param {import('./relay-state.js').Upload} upload
+ * @returns {string}
+ */
+function requireStoragePath(upload) {
+  if (!upload.storagePath) {
+    throw new Error('Upload has no storage path')
+  }
+  return upload.storagePath
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {Buffer} bodyBuffer 请求体原始字节
+ * @param {import('node:http').IncomingHttpHeaders} headers
+ * @param {URLSearchParams} query
+ * @returns {{
+ *   name: string, mimeType: string, lastModified: string,
+ *   bytes: Buffer, text: string | null, textTruncatedByClient: boolean
+ * }}
+ */
 function parseUploadMetadata(req, bodyBuffer, headers, query) {
   // 是否按 JSON 信封解析，只取决于显式头 X-Relay-Envelope: 1。
   // 过去仅凭 Content-Type: application/json 判断，会把正文本身就是 JSON 的文件（如 .json/.ipynb）
@@ -116,6 +144,11 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
   }
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @returns {Promise<void>}
+ */
 async function handleCreateRoom(req, res) {
   const body = await readBody(req)
   let requestedId = null
@@ -163,6 +196,13 @@ async function handleCreateRoom(req, res) {
   }, corsHeaders(req))
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('./relay-state.js').Room} room
+ * @param {URLSearchParams} query
+ * @returns {Promise<void>}
+ */
 async function handleUpload(req, res, room, query) {
   const headers = corsHeaders(req)
   const body = await readBody(req)
@@ -205,6 +245,7 @@ async function handleUpload(req, res, room, query) {
 
   // 注意：`upload` 对象上**不放**正文 —— 正文只作为落盘入参传一次，内存里不常驻副本。
   // 从前它在对象上「赋值 → 落盘后置 null → 响应前又从 metadata 塞回」，字段在三态之间来回抖。
+  /** @type {import('./relay-state.js').Upload} */
   const upload = {
     id: randomUUID(),
     roomId: room.id,
@@ -235,7 +276,7 @@ async function handleUpload(req, res, room, query) {
   // 发送方以为成功，而接收端永远收不到（静默丢件）。
   if (room.destroyed || !rooms.has(room.id)) {
     try {
-      await rm(upload.storagePath, { force: true })
+      await rm(requireStoragePath(upload), { force: true })
     } catch (error) {
       auditLog('orphan_file_cleanup_failed', {
         roomId: room.id,
@@ -287,6 +328,14 @@ async function handleUpload(req, res, room, query) {
   }, headers)
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('./relay-state.js').Room} room
+ * @param {string} uploadId
+ * @param {URLSearchParams} query
+ * @returns {Promise<void>}
+ */
 async function handleDownload(req, res, room, uploadId, query) {
   const headers = corsHeaders(req)
   const upload = room.uploads.get(uploadId)
@@ -297,7 +346,7 @@ async function handleDownload(req, res, room, uploadId, query) {
   const download = query.get('download')
   if (download === '1') {
     // 正文落盘后内存不留副本（见 handleUpload），下载一律从磁盘读回
-    const buffer = await readFile(upload.storagePath)
+    const buffer = await readFile(requireStoragePath(upload))
     res.writeHead(200, {
       ...headers,
       'Content-Type': upload.mimeType,
@@ -316,11 +365,17 @@ async function handleDownload(req, res, room, uploadId, query) {
   // 另一处在 parseUploadMetadata 的信封 legacy 分支 —— 仅在客户端只给 `text`/`content`
   // 而未给 `contentBase64` 时触发，编的是那段文本，不是整份上传字节。
   const summary = uploadSummary(upload)
-  summary.contentBase64 = (await readFile(upload.storagePath)).toString('base64')
+  summary.contentBase64 = (await readFile(requireStoragePath(upload))).toString('base64')
 
   return writeJson(res, 200, { upload: summary }, headers)
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {import('./relay-state.js').Room} room
+ * @returns {void}
+ */
 function handleEvents(req, res, room) {
   closeReceiver(room)
   sendSseHeaders(res, corsHeaders(req))
@@ -348,6 +403,8 @@ function handleEvents(req, res, room) {
 
   while (room.queue.length > 0 && res.writable) {
     const event = room.queue.shift()
+    // 上面的 length > 0 已保证非空；这行只为把类型从 `… | undefined` 收窄，不改变运行时行为
+    if (!event) break
     writeSseFrame(res, event.type, event)
     room.stats.eventsDelivered += 1
   }
@@ -360,6 +417,12 @@ function handleEvents(req, res, room) {
   })
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {string} roomId
+ * @returns {Promise<void>}
+ */
 async function handleRoomDelete(req, res, roomId) {
   const room = getRoom(roomId)
   if (!room) {
