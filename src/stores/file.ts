@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { formatFileSize } from '../utils/format'
 import { extractStudentId, getFileBaseName, getFileExtension } from '../utils/filename'
-import { extractDocxText } from '../utils/docx'
 import { binaryPlaceholder } from '../utils/relay-content'
 
 export interface FileInfo {
@@ -12,11 +11,12 @@ export interface FileInfo {
     /**
      * 原始字节句柄（本地新增的文件才有）。
      *
-     * 上传走裸 body 通道时直接把它当请求体 —— 不再预先转 base64。
-     * 这不是单纯的省内存：`File` 由浏览器持有、底层通常是磁盘上的文件，
-     * 而 base64 字符串是实打实的 JS 堆内存，10MB 文件要吃掉 13.3MB 且生成时阻塞主线程。
+     * 上传时直接把它当请求体 —— 不再预先转 base64。这不是单纯的省内存：
+     * `File` 由浏览器持有、底层通常是磁盘上的文件，而 base64 字符串是实打实的 JS 堆内存，
+     * 10MB 文件要吃掉 13.3MB 且生成时阻塞主线程。
      *
-     * 中继接收来的文件没有这个字段（服务端不回传原始字节），上传时退回 JSON 信封。
+     * 中继接收来的文件没有这个字段（服务端只回传 base64），上传时在本地做一次
+     * base64 → Blob 的**懒**转换（见 `buildRelayUploadRequest`）—— 只有真要重传时才付这个代价。
      */
     blob?: Blob
     contentBase64?: string
@@ -46,7 +46,6 @@ export interface FileMetadata {
     createdAt: Date
     lastModified: Date
     isTextContent: boolean
-    isExtractedText: boolean
     studentId: string | null
     studentName: string | null
 }
@@ -71,14 +70,11 @@ export const MAX_FILES = 200
  * 的量本来也传不进一个房间，提前在本地拦下比上传到一半被 507 拒绝更友好。
  *
  * 记账口径是各文件的 `size`（原始字节）。它与真实堆占用有两处偏差，均偏向安全：
- * ① 容器类文档（docx）只保留提取出的正文，按 `size` 计会**高估**；
+ * ① 容器类文档（docx）在本地只留一句占位文案，按 `size` 计会**高估**；
  * ② 中继接收来的文件以 base64 常驻（≈1.33×），按 `size` 计会**低估 33%**，
  *    但该方向另有服务端房间配额逐房间兜底（见 `upsertRelayFile`）。
  */
 export const MAX_TOTAL_SIZE = 128 * 1024 * 1024
-
-/** 压缩容器类文档（docx 是 zip），需解压后才有可读正文，不能直接按纯文本解码 */
-export const DOCUMENT_TEXT_EXTENSIONS = new Set(['docx'])
 
 /** 嵌套量词（如 (a+)+、(a*)*、(a?)*、(a{2,})+），不匹配输入时指数级回溯；`?` 也计入内层量词 */
 const UNSAFE_QUANTIFIER = /\((?:[^()\\]|\\.)*(?:[+*?]|\{\d+,?\d*\})\)\s*(?:[+*]|\{\d+,?\d*\})/u
@@ -242,7 +238,6 @@ export const useFileStore = defineStore('file', () => {
         type: string
         lastModified: Date
         hasTextContent: boolean
-        isExtractedText?: boolean
         createdAt?: Date
     }): FileMetadata => {
         const studentInfo = extractStudentInfo(file.name)
@@ -255,16 +250,9 @@ export const useFileStore = defineStore('file', () => {
             createdAt: file.createdAt ?? new Date(),
             lastModified: file.lastModified,
             isTextContent: file.hasTextContent,
-            isExtractedText: file.isExtractedText ?? false,
             studentId: studentInfo.studentId,
             studentName: studentInfo.studentName
         }
-    }
-
-    /** 容器类文档（docx）需解压才有正文，其他二进制格式返回 null */
-    const extractContainerDocumentText = (fileName: string, buffer: ArrayBuffer) => {
-        if (!DOCUMENT_TEXT_EXTENSIONS.has(getFileExtension(fileName))) return Promise.resolve(null)
-        return extractDocxText(buffer)
     }
 
     const addFile = (file: File) => {
@@ -286,20 +274,19 @@ export const useFileStore = defineStore('file', () => {
         // 下面的 `arrayBuffer()` 一旦让出控制权，并发的第二个 `addFile` 就会看到已扣减的计数。
         usedBytes.value += file.size
 
-        return file.arrayBuffer().then(async (buffer) => {
+        return file.arrayBuffer().then((buffer) => {
             const hasTextContent = isTextFile(file)
-            // 容器类文档先解压读正文；提取失败只影响预览，原始文件仍按 base64 完整上传
-            const extractedText = hasTextContent
-                ? null
-                : await extractContainerDocumentText(file.name, buffer)
+            // 正文只在**文本类**文件上解码。二进制（含 docx）只留一句占位文案 ——
+            // 不为预览去解压别人的文件：docx 的提取已移到服务端（见 server/relay-docx.js），
+            // 那里收到的本来就是原件字节，解出来的正文同时供接收端使用（铁律 20：一份实现）。
             const content = hasTextContent
                 ? new TextDecoder('utf-8').decode(buffer)
-                : extractedText ?? binaryPlaceholder(file.name)
+                : binaryPlaceholder(file.name)
             const fileInfo: FileInfo = {
                 id: createFileId(),
                 name: file.name,
                 content,
-                // 只保留句柄，不做任何编码：base64 推迟到「确实要走信封」时再生成
+                // 只保留句柄，不做任何编码：base64 只在「本地确实没有字节」时才需要（见 relay-upload.ts）
                 blob: file,
                 hasTextContent,
                 filenameValidation: validateFileName(file.name),
@@ -308,8 +295,7 @@ export const useFileStore = defineStore('file', () => {
                     size: file.size,
                     type: file.type || 'application/octet-stream',
                     lastModified: new Date(file.lastModified),
-                    hasTextContent,
-                    isExtractedText: extractedText !== null
+                    hasTextContent
                 }),
                 size: file.size,
                 type: file.type || 'application/octet-stream',

@@ -133,7 +133,6 @@ const collectionItem = computed(() => {
 const describeContent = () => {
   if (!fileStore.selectedFile) return ''
   if (fileStore.selectedFile.metadata.isTextContent) return '文本，可预览'
-  if (fileStore.selectedFile.metadata.isExtractedText) return '文档，已提取正文'
   return '二进制，仅保留内容'
 }
 
@@ -188,18 +187,18 @@ const uploadSelectedFileToRelay = async () => {
 
     const selectedFile = fileStore.selectedFile
 
-    // 传输形态的选择与请求构造都在 relay-upload.ts（纯函数，可单测断言请求形状）。
-    // 默认走裸 body：不做 base64、不拼 JSON，带宽 −33% 且无主线程阻塞。
-    const { url, init } = await buildRelayUploadRequest({
+    // 请求构造在 relay-upload.ts（纯函数，可单测断言请求形状）。
+    // 只有裸 body 一种形态：不做 base64、不拼 JSON，带宽 −33% 且无主线程阻塞。
+    // docx 不再需要「同请求送达提取正文」—— 正文由服务端从收到字节里解（server/relay-docx.js）。
+    const { url, init } = buildRelayUploadRequest({
       baseUrl,
       roomId: targetRoomId,
       name: selectedFile.name,
       mimeType: selectedFile.type,
       lastModified: selectedFile.lastModified,
       blob: selectedFile.blob,
-      contentBase64: selectedFile.contentBase64,
-      // docx 的提取正文没有裸 body 的位置可放，只能随信封一起走
-      extractedText: selectedFile.metadata.isExtractedText ? selectedFile.content : null
+      // 中继接收来的文件本地没有字节句柄，只有 base64 —— 在本地还原成 Blob 走同一条路径
+      contentBase64: selectedFile.contentBase64
     })
 
     // 发送方（学生）不持有接收端管理密钥：房间 ID 本身即能力凭据，故不发送 Authorization

@@ -12,7 +12,7 @@ Coolector 是一个现代化的文件收集器。
 
 - [x] 文件上传
   - [x] 支持 .md, .ipynb, .docx
-    - [x] .docx 自动解压读取正文，原始文件字节完整保留
+    - [x] .docx 由服务端解包读取正文，原始文件字节完整保留
   - [x] 支持批量上传
 - [x] 拖拽上传和点击上传
 - [x] 文件名校验
@@ -198,7 +198,7 @@ sequenceDiagram
   Relay-->>R: 打开即补发 receiver.ready，并重放离线队列
 
   Note over S,Relay: ② 发送方上传（不需要任何密钥，房间号即能力凭据）
-  S->>Relay: POST /api/rooms/:roomId/uploads（默认裸 body；需带外正文时才用 JSON 信封）
+  S->>Relay: POST /api/rooms/:roomId/uploads（裸 body + ?name=）
   Relay->>Relay: 体积校验 → 原子预占房间配额与条数上限
   Relay->>Relay: 落盘到 UPLOAD_DIR/房间号/ 并写归属标记
   Relay-->>S: 201（只回元信息，不含正文）
@@ -241,7 +241,7 @@ src/
 │   └── ToastHost.vue       # 全局提示宿主
 ├── composables/        # 组合式函数（useToast / useRelayReceiver）
 ├── stores/             # Pinia 状态管理（file / collection）
-├── utils/              # 文件名解析、docx 解析、格式化、relay 凭据与契约类型
+├── utils/              # 文件名解析、格式化、relay 凭据与契约类型、上传请求构造
 ├── App.vue            # 根组件
 ├── main.ts            # 应用入口
 └── style.css          # 全局样式
@@ -292,12 +292,16 @@ curl -H "Authorization: Bearer $RELAY_TOKEN" http://localhost:8787/api/rooms/<ro
 
 `POST /api/rooms/:roomId/uploads` 接受两种请求体：
 
-- **裸 body（内置前端走这条）**：正文即文件原始字节，元信息走 URL 或请求头。**不做任何 base64**
-  —— 相比信封省掉 33% 带宽与客户端主线程上的编码开销。
+- **裸 body**：正文即文件原始字节，元信息走 URL 或请求头。**不做任何 base64**
+  —— 相比信封省掉 33% 带宽与客户端主线程上的编码开销。**内置前端只用这一种形态**。
 - **JSON 信封**：元信息与 base64 正文都在 body 里，须**显式**带 `X-Relay-Envelope: 1`
   —— 否则正文本身就是 JSON 的 `.json` / `.ipynb` 会被误判成信封。
-  内置前端仅在**必须携带带外数据**时才用：`.docx` 的客户端提取正文（裸 body 没有位置放它），
-  以及中继接收来的文件（本地只剩 base64，没有原始字节）。
+  这条通道**仅为第三方/自定义客户端保留**（服务端仍然支持并有测试守着）；
+  内置前端自 1.0.2 起不再使用它 —— 见下方「为什么前端不再用信封」。
+
+`.docx` 的正文提取在**服务端**完成（`server/relay-docx.js`：ZIP 中央目录解析 +
+`zlib.inflateRawSync`，零新依赖）：客户端把 docx 当普通二进制文件上传，服务端从收到的字节里
+解出正文供预览，**原始包字节原样落盘**（`?download=1` 拿到的永远是原件）。
 
 裸 body 形态的文件名以 **`?name=<百分号编码的 UTF-8>` 为准**，其次才是 `X-Relay-Filename` 头：
 
@@ -311,6 +315,18 @@ curl -X POST "http://localhost:8787/api/rooms/<roomId>/uploads?name=%E4%BD%9C%E4
 > 该头**也**接受百分号编码，但**仅当解出来确实含非 ASCII 字符时**才解码 ——
 > `note%20f.md` 这类纯 ASCII 的 `%XX` 原样保留，不会被人为改成另一个文件名。
 > 文件名里**本来就含** `%XX` 时，用 `?name=` 写双重编码（`note%2520f.md`）精确表达。
+
+#### 为什么前端不再用信封
+
+信封此前有两个非它不可的理由，**两个都已消除**：
+
+| 理由 | 消除方式 |
+|---|---|
+| `.docx` 的客户端提取正文没有位置放（裸 body 只有文件字节） | 正文提取移到服务端 ⇒ docx 与普通文件同路径 |
+| 中继接收来的文件本地只剩 base64，没有原始字节 | 上传前在本地做一次 base64 → Blob 转换 ⇒ 同样有字节可发 |
+
+信封一旦只为一个冷门场景留着，它就会长期躺在主路径上被误用（上一轮协议形态反复的成因）。
+现在前后端都只剩一种传输形态，`X-Relay-Envelope` 不再是任何主路径的一部分。
 
 ### 鉴权模型（重要）
 

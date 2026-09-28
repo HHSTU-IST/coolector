@@ -18,6 +18,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { DOCX_MIME, buildDocx } from '../scripts/lib/docx-fixture.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const TOKEN = 'integration-test-token'
@@ -513,6 +514,43 @@ describe('relay HTTP 层', () => {
       const details = await (await fetch(resolveUrl(relay.baseUrl, summary.detailsUrl), { headers: authHeaders })).json()
       expect(Buffer.byteLength(details.upload.contentText, 'utf8')).toBeLessThanOrEqual(1024 * 1024)
     })
+  })
+
+  /**
+   * 1h：docx 的正文提取已移到服务端，于是 docx 与普通文件走**同一条**裸 body 通道。
+   *
+   * 从前 docx 必须走 JSON 信封（把客户端提取好的正文随请求一起送达），代价是整份文件
+   * base64 膨胀 33%，且浏览器要先解压一遍。这条用例钉住三件事：
+   *   ① 裸 body 上传的 docx 也能拿到正文（服务端自己解）
+   *   ② 接收端经 details 端点读到的正文就是解析结果
+   *   ③ 下载端点取回的是**原始 docx 字节** —— 「正文只进预览，原件必须保真」（铁律 1 的实质）
+   */
+  it('docx 走裸 body，正文由服务端提取，且原件字节完整保留', async () => {
+    const room = await createRoom(relay.baseUrl, 'docx-raw-room')
+    const docx = buildDocx(['DOCX 服务端提取哨兵', '第二段：梯度下降实验'])
+    const name = '张三-20230101.docx'
+
+    const response = await fetch(
+      `${relay.baseUrl}/api/rooms/${room.roomId}/uploads?name=${encodeURIComponent(name)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': DOCX_MIME, 'X-Relay-Mime-Type': DOCX_MIME },
+        body: docx
+      }
+    )
+
+    expect(response.status).toBe(201)
+    const { upload: summary } = await response.json()
+    expect(summary.name).toBe(name)
+    expect(summary.size).toBe(docx.length)
+    // 请求体就是文件字节，服务端不做任何 base64 往返
+    expect(summary.contentText).toBeNull()
+
+    const details = await (await fetch(resolveUrl(relay.baseUrl, summary.detailsUrl), { headers: authHeaders })).json()
+    expect(details.upload.contentText).toBe('DOCX 服务端提取哨兵\n第二段：梯度下降实验')
+
+    const download = await fetch(resolveUrl(relay.baseUrl, summary.downloadUrl), { headers: authHeaders })
+    expect(Buffer.from(await download.arrayBuffer()).equals(docx)).toBe(true)
   })
 
   it('0 字节文件可上传（空 contentBase64 不被当作缺失）', async () => {

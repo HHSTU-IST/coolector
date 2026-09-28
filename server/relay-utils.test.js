@@ -1,9 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
+import { DOCX_MIME, buildZip, buildDocumentXml } from '../scripts/lib/docx-fixture.mjs'
 import {
   contentDisposition,
   decodeHeaderValue,
   decodeUploadFileName,
+  deriveUploadText,
   digestName,
   isLoopbackHost,
   isTextMimeType,
@@ -372,6 +374,39 @@ describe('isTextMimeType', () => {
 
   it('二进制扩展名判定为非文本', () => {
     expect(isTextMimeType('application/octet-stream', 'pic.png')).toBe(false)
+  })
+})
+
+/**
+ * `deriveUploadText` 是「字节 → 可读正文」的**唯一**实现：上传路径与 `detailsUrl` 都调它。
+ * 它一旦分叉出第二份实现，就会出现「刚上传时预览有正文、重启后拉正文变空」这类怪象。
+ */
+describe('deriveUploadText', () => {
+  it('文本类按 UTF-8 解码（MIME 缺失时靠扩展名）', () => {
+    const bytes = Buffer.from('作业正文：梯度下降', 'utf8')
+
+    expect(deriveUploadText(bytes, 'text/markdown', 'a.md')).toBe('作业正文：梯度下降')
+    expect(deriveUploadText(bytes, 'application/octet-stream', 'a.md')).toBe('作业正文：梯度下降')
+  })
+
+  it('docx 解压出正文（MIME 不可靠时靠扩展名）', () => {
+    const bytes = buildZip([{ name: 'word/document.xml', content: buildDocumentXml(['第一段', '第二段']) }])
+
+    expect(deriveUploadText(bytes, DOCX_MIME, '张三.docx')).toBe('第一段\n第二段')
+    expect(deriveUploadText(bytes, 'application/octet-stream', '张三.DOCX')).toBe('第一段\n第二段')
+  })
+
+  it('非文本非 docx 返回 null（不是空串 —— 空串会与「0 字节文本文件」混淆）', () => {
+    expect(deriveUploadText(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'image/png', 'a.png')).toBeNull()
+  })
+
+  it('名字像 docx 但内容不是 zip 时返回 null，不抛异常', () => {
+    expect(deriveUploadText(Buffer.from('not a zip at all'), DOCX_MIME, 'a.docx')).toBeNull()
+  })
+
+  it('非 Buffer 入参返回 null（fail-closed）', () => {
+    expect(deriveUploadText('纯文本', 'text/plain', 'a.txt')).toBeNull()
+    expect(deriveUploadText(undefined, 'text/plain', 'a.txt')).toBeNull()
   })
 })
 

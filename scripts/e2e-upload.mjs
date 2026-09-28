@@ -31,10 +31,20 @@ import { createServer as createHttpServer } from 'node:http'
 import { extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
+import { DOCX_MIME, buildDocx } from './lib/docx-fixture.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const DIST_DIR = join(ROOT, 'dist')
 const RELAY_TOKEN = 'e2e-token-not-for-production'
+
+/**
+ * docx 往返哨兵。
+ *
+ * 正文提取搬到服务端（`server/relay-docx.js`）之后，「docx 也能有正文」这件事必须在
+ * **真实浏览器 → 裸 body → 服务端解压 → 接收端渲染**这条完整链路上被证明一次：
+ * 单元测试只能证明解压函数本身对，证明不了它真的接在了上传路径上。
+ */
+const DOCX_SENTINEL = 'DOCX 服务端提取哨兵'
 
 const results = []
 let failed = 0
@@ -225,8 +235,11 @@ function buildFixtures() {
   const bigText = `${'# 大文件载荷\n'.repeat(1)}${'载荷'.repeat(1)}\n${'A'.repeat(8_500_000)}`
 
   return [
-    // 故意把二进制放第一位：接收端会自动选中首个文件，便于断言占位文案
-    ['李四-20230102.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', Buffer.from('not-a-real-zip-binary-payload')],
+    // 故意把**真二进制**放第一位：接收端会自动选中首个文件，便于断言占位文案。
+    // （docx 自 1h 起由服务端提取正文，接收端会渲染出文字 —— 不再能承担这个角色。）
+    ['孙八-20230106.pdf', 'application/pdf', Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x00, 0xff, 0xfe, 0x80])],
+    // 真实 docx（不是伪字节）：上传走裸 body，正文由服务端解压提取
+    ['李四-20230102.docx', DOCX_MIME, buildDocx([DOCX_SENTINEL, '第二段：梯度下降实验'])],
     ['张三-20230101.md', 'text/markdown', Buffer.from(encoder.encode(markdown))],
     ['王五-20230103.ipynb', '', Buffer.from(encoder.encode(notebook))],
     ['赵六-20230104.json', 'application/json', Buffer.from(encoder.encode(jsonDoc))],
@@ -440,6 +453,8 @@ async function main() {
 
     // 逐个切到其余文件，确认正文往返无损
     const contentExpectations = [
+      // docx：正文由**服务端**解压提取（客户端自 1h 起不再解压）
+      ['李四-20230102.docx', DOCX_SENTINEL],
       ['张三-20230101.md', '这是中文正文测试'],
       ['王五-20230103.ipynb', '梯度下降'],
       ['赵六-20230104.json', '正文本身就是 JSON']
@@ -465,6 +480,24 @@ async function main() {
       '8.5MB 文件确实落盘（旧实现在约 7.86MB 处失败）',
       Boolean(bigEntry) && bigEntry.size > 8_000_000,
       `size=${bigEntry?.size ?? 'missing'}`
+    )
+
+    // ── 5b. docx 原件保真：正文只进预览，下载端点必须给出**原始包**字节 ──────
+    // 这是铁律 1 的实质要求（「原件不能变纯文本」）。判据是「下载回来的字节与上传的
+    // docx 逐字节相等」，而不是「能下到一个文件」—— 后者在「服务端把提取正文当成文件存了」
+    // 的情况下同样会通过，而那正是要防的事故。
+    const docxName = '李四-20230102.docx'
+    const docxEntry = (roomState.uploads ?? []).find((item) => item.name === docxName)
+    const docxFixture = fixtures.find(([name]) => name === docxName)[2]
+    const docxDownloadUrl = String(docxEntry?.downloadUrl ?? '').startsWith('http')
+      ? String(docxEntry.downloadUrl)
+      : new URL(String(docxEntry?.downloadUrl ?? '/'), relayBaseUrl).toString()
+    const docxDownload = await fetch(docxDownloadUrl, { headers: { Authorization: `Bearer ${RELAY_TOKEN}` } })
+    const docxBytes = Buffer.from(await docxDownload.arrayBuffer())
+    check(
+      'docx 原件保真：下载端点返回原始包字节，而不是提取出的正文',
+      docxDownload.ok && docxBytes.equals(docxFixture),
+      `status=${docxDownload.status} 下载 ${docxBytes.length} 字节 / 上传 ${docxFixture.length} 字节`
     )
 
     // ── 6. 超限请求返回可读 413，而非连接中断 ─────────────────────────────

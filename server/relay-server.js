@@ -4,9 +4,9 @@ import { readFile, rm } from 'node:fs/promises'
 import {
   contentDisposition,
   decodeUploadFileName,
+  deriveUploadText,
   digestName,
   isLoopbackHost,
-  isTextMimeType,
   isWeakRoomId,
   limitUploadName,
   normalizeIsoDate,
@@ -107,7 +107,9 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
       mimeType: safeMimeType,
       lastModified: normalizeIsoDate(lastModified, nowIso()),
       bytes,
-      text: text ?? (isTextMimeType(safeMimeType, safeName) ? bytes.toString('utf8') : null),
+      // 信封里显式带了 text / contentText 就用它（第三方客户端可能送来服务端解不出的正文），
+      // 否则就地推导 —— docx 的提取已移到服务端，客户端不再有「必须随请求送达的带外正文」。
+      text: text ?? deriveUploadText(bytes, safeMimeType, safeName),
       // 客户端按 256KB 截断过提取正文时上报（服务端只知道自己那 1MB 的截断）
       textTruncatedByClient: raw.textTruncatedByClient === true
     }
@@ -138,7 +140,9 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
     // 从前这里 `toString('base64')` 造一个 13.33MB 字符串（只为填进 201 响应），
     // 调用方再把它解回 Buffer 量长度、解第三遍落盘 —— 纯属白造，且是这条通道的主要内存开销。
     bytes: bodyBuffer,
-    text: isTextMimeType(safeMimeType, safeName) ? bodyBuffer.toString('utf8') : null,
+    // docx 也走这条通道：正文由服务端从刚收到的字节里解（`deriveUploadText`），
+    // 于是「提取正文」不再是把 docx 赶进 JSON 信封的理由。
+    text: deriveUploadText(bodyBuffer, safeMimeType, safeName),
     // 裸 body 路径没有「客户端提取正文」这一步，自然也没有客户端截断
     textTruncatedByClient: false
   }

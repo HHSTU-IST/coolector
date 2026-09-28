@@ -5,6 +5,8 @@ import { basename } from 'node:path'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { BlockList, isIP } from 'node:net'
 import { StringDecoder } from 'node:string_decoder'
+// docx 正文提取（zip 容器解析）。与文本解码一起构成「字节 → 可读正文」的唯一实现，见 deriveUploadText。
+import { extractDocxText, isDocxMimeType } from './relay-docx.js'
 // Relay 基址判据的**唯一**实现，与前端（src/utils/relay.ts）共用同一份。
 // 跨端共享是为了消除「同一个语义值、两套判据」的漂移，详见该模块头部说明。
 import { parseRelayBaseUrl } from '../shared/relay-base-url.js'
@@ -284,6 +286,31 @@ export function isTextMimeType(mimeType, fileName) {
   if (mimeType.startsWith('text/')) return true
   // ipynb 是 JSON 文本，但浏览器常给不出可靠 MIME（空串或无注册），必须靠扩展名兜底
   return /\.(txt|md|markdown|json|ipynb|xml|csv|log|conf|ini|yaml|yml|env|toml|sql|js|mjs|cjs|ts|tsx|jsx|vue|css|scss|html|htm|sh|py)$/iu.test(fileName)
+}
+
+/**
+ * 「字节 → 可读正文」的**唯一**实现：文本类直接按 UTF-8 解码，docx 解压出正文，其余为 null。
+ *
+ * 抽成一处的原因有两条，缺一条它就该是两处：
+ *
+ * - 上传路径与 `detailsUrl` 必须给出**同一个**答案。以前客户端自己解 docx、服务端只负责存，
+ *   于是同一份逻辑存在两份（浏览器 `DecompressionStream` 一份、服务端 zlib 一份），
+ *   任何一方改了解析规则，上传时的预览与接收端拉到的正文就会不一致（铁律 20）。
+ * - 落盘后正文不再常驻内存（`upload.text` 恢复时是 null），`detailsUrl` 需要**按需**从
+ *   磁盘字节重新推导 —— 若那是第二份实现，重启前后的正文就可能不同。
+ *
+ * 只影响预览：原始字节始终完整落盘，`?download=1` 拿到的永远是原件。
+ *
+ * @param {Buffer} bytes 原始文件字节
+ * @param {string} mimeType
+ * @param {string} fileName
+ * @returns {string | null}
+ */
+export function deriveUploadText(bytes, mimeType, fileName) {
+  if (!Buffer.isBuffer(bytes)) return null
+  if (isTextMimeType(mimeType, fileName)) return bytes.toString('utf8')
+  if (isDocxMimeType(mimeType, fileName)) return extractDocxText(bytes)
+  return null
 }
 
 /**

@@ -35,6 +35,29 @@
     必然来自落盘成功 —— 把这层契约显式化，而不是用类型断言掩盖。
   - **门禁有效性已实测**：注入一处类型错误后 `vue-tsc -b` 以退出码 2 失败并精确指向该行。
   - CI 无需改动：`ci.yml` 本就在跑 `pnpm exec vue-tsc -b`，项目引用生效后自动覆盖服务端。
+- **docx 正文提取移到服务端，内置前端彻底告别 JSON 信封**。新增 `server/relay-docx.js`
+  （ZIP 中央目录解析 + `zlib.inflateRawSync`，零新依赖），`server/relay-utils.js` 新增
+  `deriveUploadText(bytes, mimeType, name)` 作为「字节 → 可读正文」的**唯一**实现 ——
+  上传路径与 `detailsUrl` 共用它，两处各写一份必然漂移。
+  - 此前 docx 必须走 JSON 信封，理由是「客户端提取的正文没有位置放」（裸 body 里只有文件字节），
+    代价是整份文件 base64 膨胀 33%、浏览器多一次解压与编码。现在 docx 与普通文件走**同一条**
+    裸 body 路径，服务端从刚收到的字节里解压提取，**原始包字节原样落盘**。
+  - 前端删除 `src/utils/docx.ts`（187 行）及其测试：同一份提取逻辑不该存在两处（铁律 20），
+    何况它让每个发送方都去解别人的文档。
+  - 「中继接收来的文件」这条理由也一并消除：上传前在本地做一次 base64 → Blob 转换
+    （`base64ToBlob`，**懒**转换 —— 只有真要转发时才付代价）。于是 `X-Relay-Envelope` 不再是
+    内置前端任何路径的一部分；服务端**仍然保留**信封解析以兼容第三方/自定义客户端。
+  - `src/utils/relay-upload.ts` 从 133 行收敛到 88 行：`truncateEnvelopeText`、
+    `arrayBufferToBase64`、`blobToBase64`、`ENVELOPE_TEXT_MAX_BYTES` 随信封一起删除；
+    「既无 blob 也无 base64」由「交给服务端报 400」改为**本地抛错**（没有信封可发，
+    静默发一个 0 字节请求会让接收端收到空文件）。
+  - ⚠️ **发送方界面的行为变化**：本地预览 docx 时不再显示提取正文，改为与其他二进制格式一致的
+    占位文案（接收端不受影响，它拿到的仍是服务端提取的正文）。这是「一份实现」的代价。
+  - 顺带修掉一处移植来的缺陷：`safeCodePoint` 的区间判定没排除**代理项区间**（U+D800–U+DFFF）——
+    该区间不抛错，却会产出孤立代理项、让整段正文变成 ill-formed UTF-16。
+  - 验证：`server/relay-docx.test.js` 16 条 + `deriveUploadText` 5 条 + 集成 1 条（裸 body 上传
+    docx → details 拿到正文 → 下载端点逐字节等于原件）+ e2e 新增 2 条（接收端渲染出服务端提取的
+    正文、docx 原件保真）。夹具 `scripts/lib/docx-fixture.mjs` 手工拼装最小 ZIP，三处测试共用。
 
 ### Fixed
 
