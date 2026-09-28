@@ -285,7 +285,7 @@ curl -H "Authorization: Bearer $RELAY_TOKEN" http://localhost:8787/api/rooms/<ro
 > 升级顺序建议 **先前端后 Relay**（新前端会带 `X-Relay-Envelope` 标志，旧 Relay 也能正确解析）。
 
 > **公网部署**：Relay Server 是有状态服务，CI 只部署静态前端，**需自行托管才能公网可达**。
-> 完整部署清单（Docker / 反向代理 / 环境变量 / 安全）见 [RELAY_DEPLOY.md](./RELAY_DEPLOY.md)。
+> 完整部署清单（反向代理 / 环境变量 / 安全）见 [RELAY_DEPLOY.md](./RELAY_DEPLOY.md)。
 > 部署到公网时务必设置 `RELAY_TOKEN` 与 `RELAY_ALLOWED_ORIGINS`，并强制 HTTPS。
 > 反代后**无需**任何额外配置：服务端对外只返回相对路径，接收端按它自己填写的 Relay 地址
 > 解析，因此不会出现混合内容。服务端刻意**不**从 `Host` / `x-forwarded-*` 推断自身地址

@@ -5,15 +5,13 @@ Coolector 的「在线收集」能力由两部分组成：
 - **前端**（静态站，可托管到 GitHub Pages / Nginx / 任意静态服务）
 - **Relay Server**（`server/relay-server.js`，有状态 Node 服务，**必须自托管**才能公网可达）
 
-仓库 CI 只部署静态前端；Relay Server 需要你按本文档自行部署到有公网 IP 的主机 / 容器。
+仓库 CI 只部署静态前端；Relay Server 需要你按本文档自行部署到一台有公网 IP 的主机。
 
 ## 1. 前置要求
 
-- Node.js 24+（或 Docker，推荐）
-- 一台有公网 IP 的服务器（或容器平台）
+- Node.js 24+
+- 一台有公网 IP 的服务器
 - 一个域名（用于 TLS，可选但强烈建议）
-
-Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 
 ## 2. 环境变量
 
@@ -27,7 +25,7 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 | `RELAY_ALLOWED_ORIGINS`  | 空（不发 CORS 头）   | CORS 白名单，逗号分隔。**留空 = 拒绝所有跨源前端**（同源部署无需配置）；前后端不同源时必须显式填前端域名，`*` 只适合本机/内网。本机 `pnpm start` 会自动放行 `localhost:5174`                                                                                                     |
 | `RELAY_PUBLIC_BASE_URL`  | 空（只输出相对路径） | 对外 URL 基址。**留空即可，反代 HTTPS 部署也一样**——接收端按它填写的 Relay 地址解析相对路径。服务端不会从 `Host` / `x-forwarded-*` 推断自身地址（那会让攻击者用伪造 `Host` 把接收端的管理密钥引向外部）。仅当有非浏览器客户端需要绝对 URL 时才设，如 `https://relay.example.com` |
 | `RELAY_TRUSTED_PROXIES`  | 空（忽略转发头）     | 可信反向代理网段（IP/CIDR，逗号分隔）。**反代部署必须声明**，否则所有请求的 socket 地址都是代理 IP、全站共用一个限流桶 —— 单个滥用者足以让全班 429。例：`127.0.0.1,10.0.0.0/8`。直连部署留空（留空 = 不采信 `X-Forwarded-For`，防伪造换桶绕过限流）                              |
-| `UPLOAD_DIR`             | `./server/uploads`   | 上传落盘目录，**生产务必挂持久卷**                                                                                                                                                                                                                                               |
+| `UPLOAD_DIR`             | `./server/uploads`   | 上传落盘目录，**生产务必指向持久磁盘上的专用目录**（见 §5 与 §6）                                                                                                                                                                                                                |
 | `MAX_TOTAL_UPLOAD_BYTES` | `1073741824` (1GB)   | 全局磁盘配额，超出返回 **507**                                                                                                                                                                                                                                                   |
 | `MAX_ROOM_UPLOAD_BYTES`  | 全局的 1/8（128MB）  | **单房间**配额。文本类作业为主时需调大一档（见 `.env.example` 的计费口径说明）                                                                                                                                                                                                   |
 
@@ -58,45 +56,21 @@ Relay Server 是纯 Node、零第三方依赖，无需 `npm install`。
 > 房间 ID 默认是服务端生成的完整 UUID，长度下限 8 位；`demo-room` 这类弱房间名会记一条
 > `weak_room_id` 审计日志。
 
-## 3. Docker 部署（推荐）
+## 3. 启动 Relay Server
 
-### 3.1 构建与启动
-
-仓库已提供 `server/Dockerfile` 与 `docker-compose.yml`：
+Relay Server 是纯 Node、零第三方依赖的单进程服务，直接运行即可 —— **无需构建，也无需 `npm install`**：
 
 ```bash
-# 准备环境变量
-cp .env.example .env
-# 至少填写 RELAY_TOKEN 与 RELAY_ALLOWED_ORIGINS
+cp .env.example .env         # 至少填写 RELAY_TOKEN 与 RELAY_ALLOWED_ORIGINS
+node server/relay-server.js  # 前台运行，日志走 stdout/stderr
 
-# 启动（后台）
-docker compose up -d --build
-
-# 查看日志
-docker compose logs -f relay
-
-# 健康检查
+# 健康检查（应返回 {"status":"ok"}）
 curl http://127.0.0.1:8787/healthz
 ```
 
-`docker-compose.yml` 已做：
-
-- 容器重启策略 `unless-stopped`
-- 上传目录挂命名卷 `relay-uploads`（持久化，容器重建不丢）
-- `HEALTHCHECK` 每 30s 探 `/healthz`
-
-### 3.2 仅 Docker（不用 compose）
-
-```bash
-docker build -f server/Dockerfile -t coolector-relay .
-docker run -d --name coolector-relay \
-  -p 8787:8787 \
-  -e RELAY_TOKEN=你的强token \
-  -e RELAY_ALLOWED_ORIGINS=https://app.example.com \
-  -v coolector-uploads:/data/uploads \
-  --restart unless-stopped \
-  coolector-relay
-```
+- 生产应交给进程守护（`systemd` / `pm2` 等）托管，进程退出后自动拉起；`SIGTERM` 会直接结束进程，不保证上传落盘中途完成，重启前请先停止外部流量。
+- 上传落盘目录由 `UPLOAD_DIR` 决定（默认 `./server/uploads`），**生产务必指向持久磁盘**，并确保运行用户对该目录有写权限（否则建房间目录时 `EACCES`）。
+- ⚠️ **不要在公网直接暴露 8787**：Relay 自身不处理 TLS。应让它只监听回环/内网，由反向代理对外提供 HTTPS（见下一节）。
 
 ## 4. 反向代理（TLS）
 
@@ -104,31 +78,18 @@ Relay Server 本身不处理 TLS。生产应通过反向代理暴露 HTTPS。
 
 **Relay 不读取 `X-Forwarded-Proto` / `Host` 等请求头来推断自己的对外地址。** 服务端对外**只输出相对路径**，由前端按界面填写（或构建期 `VITE_RELAY_URL`）的 Relay 地址解析。这样做是因为请求头由调用方任意控制，而接收端会自动带凭据去拉取服务端返回的 URL —— 一旦采信这些头，无凭据的发送方只要伪造 `Host`，就能让接收端把管理密钥发往攻击者域（已修复的 F-001）。因此反代侧**不需要**任何特殊配置，HTTPS 下也不存在混合内容问题。
 
-### 4.1 Caddy（自动 TLS，最简）
+反向代理只需满足四件事，本文不提供现成配置文件（各家代理语法差异大，照抄易漂移）：
 
-`deploy/Caddyfile`：
+| 要求 | 原因 |
+| --- | --- |
+| 终结 TLS（Caddy 可自动申请证书；Nginx 可配 certbot 或等价方案） | 前端与 Relay 都必须是 HTTPS，否则浏览器按混合内容拦掉 |
+| **关闭响应缓冲**（Nginx 关 `proxy_buffering`；Caddy 默认即不缓冲） | 否则 SSE 事件被攒在代理里，接收端看起来「没有反应」 |
+| 请求体上限 ≥ `MAX_BODY_BYTES`（默认派生 15,160,662 B ≈ 15.16 MB；Nginx 为 `client_max_body_size`） | 小于它时大文件会在到达 Relay 之前被代理截断，且报错来自代理、与 Relay 无关 |
+| 代理会改写来源地址时，同时设置 `RELAY_TRUSTED_PROXIES` | 否则限流按代理 IP 计数，退化为全站单桶（见 §2 与 `.env.example`） |
 
-```caddyfile
-relay.example.com {
-    reverse_proxy 127.0.0.1:8787
-}
-```
+`X-Forwarded-*` / `Host` 只对**代理自身的日志与访问控制**有意义：relay 不读取它们，生成绝对 URL 是客户端的事。
 
-```bash
-caddy run --config deploy/Caddyfile
-```
-
-Caddy 自动向 Let's Encrypt 申请并续期证书，SSE 默认不缓冲，开箱即用。
-
-### 4.2 Nginx + Let's Encrypt
-
-`deploy/nginx.conf.example`（配合 `certbot --nginx -d relay.example.com`）：
-
-- `proxy_buffering off` 保证 SSE 事件实时下发
-- 样例里的 `X-Forwarded-*` / `Host` **仅供代理自身的日志与访问控制**：relay 不读取它们（见上一节），生成绝对 URL 是客户端的事
-- `client_max_body_size 20m` 需 >= `MAX_BODY_BYTES`（默认派生 15,160,662 B ≈ 15.16 MB）
-
-### 4.3 建议的响应头（托管侧）
+### 4.1 建议的响应头（托管侧）
 
 GitHub Pages **无法自定义响应头**，因此前端产物里的 CSP 是以 `<meta>` 形式在构建期注入的
 （见 `vite.config.ts` 的 `coolector:inject-csp`）。若你自托管前端（Nginx / 对象存储 / CDN），
@@ -181,7 +142,7 @@ gh workflow run deploy.yml --repo <org>/<repo>  # 或随便 push 一次
 **② 让 Relay 放行 Pages 的源**
 
 ```bash
-# .env（docker compose 则写进 compose 的 environment）
+# .env（relay 进程启动时读取）
 RELAY_TOKEN=<强随机值>
 RELAY_ALLOWED_ORIGINS=https://<org>.github.io
 ```
@@ -213,20 +174,20 @@ curl -s -D- -o /dev/null -H 'Origin: https://<org>.github.io' https://relay.exam
 - [ ] `RELAY_TOKEN` 设为强随机值；前端调用 `/api` 时携带 `Authorization: Bearer <token>`
 - [ ] `RELAY_ALLOWED_ORIGINS` 显式设为前端域名（如 `https://app.example.com`）；留空即拒绝所有跨源，`*` 只适合本机/内网
 - [ ] 反向代理强制 HTTPS（HSTS 可选）
-- [ ] `UPLOAD_DIR` 挂持久卷，并设合理的 `MAX_TOTAL_UPLOAD_BYTES` 防磁盘写满
+- [ ] `UPLOAD_DIR` 指向持久磁盘上的专用目录，并设合理的 `MAX_TOTAL_UPLOAD_BYTES` 防磁盘写满
 - [ ] 服务器防火墙只放行 443（反代）与必要的 22；8787 不必对外暴露（由反代转发）
 
 ## 7. 持久化与运维
 
-- **上传文件**：存于 `UPLOAD_DIR`，容器请挂卷；房间 `ROOM_TTL_MS` 过期后自动删除并回收配额。
+- **上传文件**：存于 `UPLOAD_DIR`，生产应指向持久磁盘；房间 `ROOM_TTL_MS` 过期后自动删除并回收配额。
 - **房间状态**：存于内存，进程重启即清空（已落盘文件仍在 `UPLOAD_DIR`）。单实例足够；多实例不共享状态（无 Redis/DB），需扩展时请引入外部存储。
-- **日志**：stdout/stderr，compose 用 `docker compose logs`，裸跑看终端。
-- **升级**：`docker compose up -d --build`（本服务是本地 build + `image: coolector-relay:latest`，**没有远端仓库可 `pull`**，`docker compose pull` 会失败并阻断后续命令）；或重新 `docker build` 后重启。
+- **日志**：stdout/stderr，前台运行直接看终端；交给进程守护托管时看它自己的日志收集。
+- **升级**：拉取新代码后重启进程即可 —— 服务端无构建步骤、无第三方依赖，不需要任何安装动作。**先摘流量再重启**：房间只存在于内存，重启后旧房间号一律 404，接收端必须重新建房并把新房间号发给发送方。
 - **回滚（重要）**：**不要**用 `git revert` 回退 F-001 那一批修复 —— 它会原样复活 Critical（服务端重新输出
   `http://evil.example/...`，接收端把管理密钥送进攻击者域）。且**部分回滚双向有害**：只回退前端 → 相对路径会打到静态站自己身上（功能崩）；
   只回退服务端 → 前端第二道防线失去上游配合。正确处置是**前滚修复**；确实必须临时降级时，前后端必须**整批**回退到同一版本，
   并**同时轮换 `RELAY_TOKEN`**（该窗口内密钥应视为可被劫持）。
-- **停服**：`docker compose down`（卷保留）；`docker compose down -v` 会删除上传卷。
+- **停服**：结束进程即可（`Ctrl-C` 或向进程发 `SIGTERM`）；上传文件留在 `UPLOAD_DIR`，不随进程退出删除。若要连文件一起清空，需自行删除 `UPLOAD_DIR` 下的房间目录。
 
 ## 8. 本地开发（不走公网）
 

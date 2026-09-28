@@ -29,7 +29,6 @@
   绝对 URL 的来源。留空（默认）= 只输出相对路径，适用于浏览器场景；仅当 curl / 自定义集成等
   非浏览器客户端需要绝对 URL 时才设置。非法值（非 http(s)、含凭据 / 查询串 / hash）会让服务端
   拒绝启动（fail-closed）。
-- `.dockerignore` 排除 `server/*.test.js`：测试脚本不再进入生产镜像。
 - 请求行解析改用固定基准，不再以 `Host` 头为基准拼 URL。
 
 ### Fixed（发布门禁、可用性与合规，第七轮全检）
@@ -64,8 +63,8 @@
   破坏性「清空列表」加确认、标题与加载文案统一用 `…`
 - 生产 `sourcemap: false`：`dist/` 会原样发布到公开 Pages，带 `.map` 等于公开全部 TS 源码
 - `index.html` 补 `referrer` 策略（URL 里可能带 SSE 一次性票据）；`request_error` 审计日志只记 pathname
-- `README` 结构树、`/relay` 子路径说法、nginx `client_max_body_size` 说明（13.4MB → 15.16MB）、
-  `docker compose pull`（本服务无远端镜像可拉）等文档漂移一并修正
+- `README` 结构树、`/relay` 子路径说法、nginx `client_max_body_size` 说明（13.4MB → 15.16MB）等
+  文档漂移一并修正
 
 ### Hardened（第七轮收尾：P2/P3 残余项）
 
@@ -132,8 +131,7 @@
 - Relay 鉴权改为 fail-closed；SSE 改用一次性短时效票据；启动时按磁盘占用初始化配额
 - 新增固定窗口请求计数与写入字节双限流；未知内部错误统一模糊为 `Bad request`
 - `x-forwarded-proto` / `x-forwarded-host` 仅在 `RELAY_TRUST_PROXY=true`（可信代理后）才采信
-- **密钥泄露 CI 守卫** `pnpm guard:no-secret`；根目录新增 `.dockerignore`（此前缺失，
-  构建上下文会把含真实密钥的 `.env` 一并送进 daemon）
+- **密钥泄露 CI 守卫** `pnpm guard:no-secret`
 - （**运维动作**）轮换 `RELAY_TOKEN` —— 旧值曾以内联形式出现在公开产物中，必须视为已泄露
 
 ### Fixed
@@ -191,7 +189,7 @@
 - Relay 接收端在 SSE 只推送元信息后丢失文件全文与二进制内容（改为按 `detailsUrl` 按需拉取正文）
 - 文件名范式 ReDoS 拦截遗漏嵌套可选量词（如 `(a?)*`、`(\w+\s?)*`）
 - docx 解压增加 64 MB 膨胀上限，防止压缩炸弹导致内存耗尽
-- `docker-compose` 的 `RELAY_ALLOWED_ORIGINS` 空值不再导致 CORS 头缺失
+- `RELAY_ALLOWED_ORIGINS` 空值不再导致 CORS 头缺失
 - **新克隆仓库执行 `pnpm start` 两个进程全灭**：编排器把 relay `HOST` 硬编码为 `0.0.0.0`，
   与 fail-closed 检查冲突。现未配置令牌时自动回退 `127.0.0.1` 并给出提示
 
@@ -210,8 +208,6 @@
 - 上传与下载的体积口径统一：客户端 `MAX_FILE_SIZE` ≡ 服务端 `MAX_FILE_BYTES`
 - 构建期依赖（Tailwind / PostCSS / autoprefixer）从 `dependencies` 迁至 `devDependencies`
 - 移除未使用的 `@tailwindcss/typography` 依赖；统一 `formatFileSize` / `formatDate` 到 `src/utils/format.ts`
-- `docker-compose.yml` 透传 `RELAY_TRUST_PROXY` / `MAX_FILE_BYTES` / `MAX_TEXT_BYTES` /
-  `MAX_ROOM_UPLOAD_BYTES` / `MAX_ROOM_UPLOADS` / `MAX_QUEUE_EVENTS` / `MAX_UPLOAD_BYTES_PER_WINDOW` 等
 - 文档同步：README、RECEIVER_SETUP、RELAY_DEPLOY、`.env.example` 全部按新鉴权模型与运行期语义重写
 
 ### Added
