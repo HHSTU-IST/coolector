@@ -70,14 +70,16 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
       throw new HttpError(400, 'Missing file content')
     }
 
-    const decoded = Buffer.from(contentBase64, 'base64')
+    // 只解码这一次：size 与落盘都复用这个 Buffer。
+    // 从前 handleUpload 为读 `.length` 解一遍、persistUpload 又解一遍，三份与文件等大的 Buffer 并存。
+    const bytes = Buffer.from(contentBase64, 'base64')
     const safeName = limitUploadName(fileName, MAX_UPLOAD_NAME_BYTES).name
     return {
       name: safeName,
       mimeType: safeMimeType,
       lastModified: normalizeIsoDate(lastModified, nowIso()),
-      contentBase64,
-      text: text ?? (isTextMimeType(safeMimeType, safeName) ? decoded.toString('utf8') : null),
+      bytes,
+      text: text ?? (isTextMimeType(safeMimeType, safeName) ? bytes.toString('utf8') : null),
       // 客户端按 256KB 截断过提取正文时上报（服务端只知道自己那 1MB 的截断）
       textTruncatedByClient: raw.textTruncatedByClient === true
     }
@@ -99,17 +101,16 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
 
   const safeMimeType = sanitizeMimeType(headers['x-relay-mime-type'] ?? 'application/octet-stream')
   const safeName = limitUploadName(fileName, MAX_UPLOAD_NAME_BYTES).name
-  const contentBase64 = bodyBuffer.toString('base64')
-  const text = isTextMimeType(safeMimeType, safeName)
-    ? bodyBuffer.toString('utf8')
-    : null
 
   return {
     name: safeName,
     mimeType: safeMimeType,
     lastModified: normalizeIsoDate(headers['x-relay-last-modified'], nowIso()),
-    contentBase64,
-    text,
+    // 请求体**本身就是**文件字节 —— 原样复用这个 Buffer 去量长度与落盘，全程不做 base64。
+    // 从前这里 `toString('base64')` 造一个 13.33MB 字符串（只为填进 201 响应），
+    // 调用方再把它解回 Buffer 量长度、解第三遍落盘 —— 纯属白造，且是这条通道的主要内存开销。
+    bytes: bodyBuffer,
+    text: isTextMimeType(safeMimeType, safeName) ? bodyBuffer.toString('utf8') : null,
     // 裸 body 路径没有「客户端提取正文」这一步，自然也没有客户端截断
     textTruncatedByClient: false
   }
@@ -166,7 +167,9 @@ async function handleUpload(req, res, room, query) {
   const headers = corsHeaders(req)
   const body = await readBody(req)
   const metadata = parseUploadMetadata(req, body, req.headers, query)
-  const size = Buffer.from(metadata.contentBase64, 'base64').length
+  // 直接取字节数。从前是 `Buffer.from(metadata.contentBase64, 'base64').length` ——
+  // 把整个文件解一遍只为读一个 `.length`，解出来的 Buffer 立刻成为垃圾。
+  const size = metadata.bytes.length
 
   if (size > MAX_FILE_BYTES) {
     throw new HttpError(413, `File exceeds size limit (${MAX_FILE_BYTES} bytes)`)
@@ -200,8 +203,8 @@ async function handleUpload(req, res, room, query) {
     throw error
   }
 
-  // 注意：`upload` 对象上**不放** contentBase64 —— 正文只作为落盘入参传一次。
-  // 过去它在对象上「赋值 → 落盘后置 null → 响应前又从 metadata 塞回」，字段在三态之间来回抖。
+  // 注意：`upload` 对象上**不放**正文 —— 正文只作为落盘入参传一次，内存里不常驻副本。
+  // 从前它在对象上「赋值 → 落盘后置 null → 响应前又从 metadata 塞回」，字段在三态之间来回抖。
   const upload = {
     id: randomUUID(),
     roomId: room.id,
@@ -219,7 +222,7 @@ async function handleUpload(req, res, room, query) {
   }
 
   try {
-    await persistUpload(upload, metadata.contentBase64)
+    await persistUpload(upload, metadata.bytes)
   } catch (error) {
     // 落盘失败必须退回预占的配额与槽位，否则房间会被永久"占额"
     releaseQuota()
@@ -262,10 +265,16 @@ async function handleUpload(req, res, room, query) {
     bodyBytes: body.length
   })
 
-  // 201 响应里带上完整正文（发送方原本就能拿到），广播事件里只带元信息
-  const uploadPayload = uploadSummary(upload)
-  uploadPayload.contentBase64 = metadata.contentBase64
-
+  // 201 与 SSE 广播的内容口径一致：**都只带元信息**。
+  //
+  // 从前 201 里塞的是完整 base64（注释写的是「发送方自检用」），实测代价：10MB 上传的往返
+  // 是上行 10.49MB + 下行 13.98MB = 24.47MB —— **响应比请求还大**，而发送方刚把这些字节发上去，
+  // 回显只是让它再下载一遍。文本类文件还有第二层：摘要的 `contentText` 最多 1MB，
+  // 于是一份 8.5MB 的 .md 仍会换回 1.05MB 的响应（e2e 实测发现）。
+  // 需要正文的一方只有接收端，它走 details 端点（须凭据）—— 那才是唯一的正文出口。
+  //
+  // 两份摘要**刻意分开构造**：广播那份可能被存进离线队列等待重放，
+  // 与响应共用同一对象会让「将来谁给响应加个字段」顺着重放漏出去。
   const event = dispatchEvent(room, 'upload.created', {
     roomId: room.id,
     upload: uploadSummary(upload, { includeContent: false }),
@@ -273,7 +282,7 @@ async function handleUpload(req, res, room, query) {
   })
 
   return writeJson(res, 201, {
-    upload: uploadPayload,
+    upload: uploadSummary(upload, { includeContent: false }),
     eventId: event.id
   }, headers)
 }
@@ -302,7 +311,10 @@ async function handleDownload(req, res, room, uploadId, query) {
   }
 
   // 落盘后内存里不保留 base64 副本（见 handleUpload），这里从磁盘读回。
-  // 这是全仓**唯一**一处「正文 → base64」的产出路径。
+  // 这是全仓唯一一处**按需**产出整份文件 base64 的地方：上传路径既不解码也不编码
+  // （见 parseUploadMetadata 的裸 body 分支），201 响应也不再回吐正文。
+  // 另一处在 parseUploadMetadata 的信封 legacy 分支 —— 仅在客户端只给 `text`/`content`
+  // 而未给 `contentBase64` 时触发，编的是那段文本，不是整份上传字节。
   const summary = uploadSummary(upload)
   summary.contentBase64 = (await readFile(upload.storagePath)).toString('base64')
 

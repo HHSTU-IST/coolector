@@ -187,10 +187,10 @@ sequenceDiagram
   Relay-->>R: 打开即补发 receiver.ready，并重放离线队列
 
   Note over S,Relay: ② 发送方上传（不需要任何密钥，房间号即能力凭据）
-  S->>Relay: POST /api/rooms/:roomId/uploads（JSON 信封：name + contentBase64 + text）
+  S->>Relay: POST /api/rooms/:roomId/uploads（默认裸 body；需带外正文时才用 JSON 信封）
   Relay->>Relay: 体积校验 → 原子预占房间配额与条数上限
   Relay->>Relay: 落盘到 UPLOAD_DIR/房间号/ 并写归属标记
-  Relay-->>S: 201（带完整正文，发送方自检用）
+  Relay-->>S: 201（只回元信息，不含正文）
   Relay-->>R: SSE upload.created（只带元信息，不含正文）
 
   Note over R,Relay: ③ 接收端按需把正文拉回来（Bearer）
@@ -200,6 +200,12 @@ sequenceDiagram
 
 > 为什么 SSE 只推元信息：单文件上限 10 MB，正文广播会按接收端数量成倍放大内存与流量；
 > 正文一律走 `detailsUrl` 按需拉取，`download` 端点则直接从磁盘读回。
+>
+> **201 与 SSE 广播口径一致：只回元信息，不含正文**。发送方刚把这些字节发上来，回显只是让它
+> 再下载一遍 —— 实测一次 10 MB 上传在回显形态下往返 **24.47 MB**（上行 10.49 + 下行 13.98），
+> 响应比请求还大；去掉回显后往返降到 **10.49 MB**，服务端单次上传的峰值内存从 **43.4 MB**
+> 降到 **10.1 MB**。文本类文件另有 1 MB 的 `contentText` 一层，同样已去掉。
+> 需要正文的一方（只有接收端）走 `detailsUrl`，它需要 Bearer 凭据。
 
 ## 项目结构
 

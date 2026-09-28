@@ -375,6 +375,17 @@ async function main() {
         `${sentUrl.slice(sentUrl.indexOf('?name='))}`
       )
 
+      // 201 不得回吐正文：从前它带着整份文件的 base64，于是「上传」变成上行一遍、下行一遍；
+      // 文本类文件还多一层最多 1MB 的 `contentText`（8.5MB 的 .md 曾换回 1.05MB 响应 —— 就是这里发现的）。
+      // 判据取「响应体与文件大小无关」而不是「字段不存在」—— 摘要里这两个**键**一直都在（值为 null）。
+      // 上限取 64KB：摘要本身约 700 字节，文本文件再加 previewText（4096 字符 ≈12KB）。
+      const responseBody = await uploadResponse.text()
+      check(
+        `发送方 ${name} 的 201 不回吐正文（响应体与文件大小无关）`,
+        responseBody.length < 64 * 1024,
+        `${responseBody.length} 字节 / 文件 ${buffer.length} 字节`
+      )
+
       const isLarge = name.includes('20230105')
       await waitFor(async () => {
         const text = await viewer.innerText()

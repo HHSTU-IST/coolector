@@ -280,10 +280,13 @@ describe('relay HTTP 层', () => {
     expect(response.status).toBe(201)
     const payload = await response.json()
     expect(payload.upload.size).toBe(Buffer.byteLength(jsonText))
-    // 回读文件名与正文：上一版只断言 status 与 size，正是这里让下面的百分号编码缺陷
-    // 带着一条空转断言活过了六轮审计（断言了 201 却没断言存下来的到底是什么）
+    // 回读文件名与**落盘内容**：上一版只断言 status 与 size，正是这里让下面的百分号编码缺陷
+    // 带着一条空转断言活过了六轮审计（断言了 201 却没断言存下来的到底是什么）。
+    // 内容改从 download 端点回读而不是取 201 的 contentText —— 201 只回元信息（见下一条用例）。
     expect(payload.upload.name).toBe(fileName)
-    expect(payload.upload.contentText).toBe(jsonText)
+
+    const download = await fetch(resolveUrl(relay.baseUrl, payload.upload.downloadUrl), { headers: authHeaders })
+    expect(await download.text()).toBe(jsonText)
   })
 
   describe('裸 body 路径的文件名通道', () => {
@@ -401,6 +404,117 @@ describe('relay HTTP 层', () => {
     })
   })
 
+  describe('上传不再回吐正文', () => {
+    // 201 从前把整个文件以 base64 塞回去（原注释写的是「发送方自检用」）。实测代价：
+    // 一次 10MB 上传的往返是上行 10.49MB + 下行 13.98MB —— **响应比请求还大**，
+    // 而发送方刚把这些字节发上去，回显只是让它再下载一遍。服务端还得为此多编码一次。
+    // 文本类文件还有第二层：摘要的 `contentText` 最多带 1MB —— 见本组最后一条用例。
+    const MAX_SIZE = Buffer.alloc(10 * 1024 * 1024, 0x42)
+
+    it('裸 body 通道：201 只回元信息，响应体与文件大小无关', async () => {
+      const room = await createRoom(relay.baseUrl, 'no-echo-raw')
+
+      const response = await fetch(
+        `${relay.baseUrl}/api/rooms/${room.roomId}/uploads?name=big.bin`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: MAX_SIZE
+        }
+      )
+
+      expect(response.status).toBe(201)
+      const text = await response.text()
+      // 判据是「响应体不随文件增长」：10MB 的文件如果被回吐，这里至少 13MB
+      expect(text.length).toBeLessThan(4096)
+      const payload = JSON.parse(text)
+      expect(payload.upload.contentBase64).toBeNull()
+      expect(payload.upload.size).toBe(MAX_SIZE.length)
+    })
+
+    it('JSON 信封通道：201 同样不回吐文件字节', async () => {
+      const room = await createRoom(relay.baseUrl, 'no-echo-envelope')
+
+      const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: ENVELOPE_HEADERS,
+        body: JSON.stringify({
+          name: 'big2.bin',
+          mimeType: 'application/octet-stream',
+          lastModified: new Date(0).toISOString(),
+          contentBase64: MAX_SIZE.toString('base64')
+        })
+      })
+
+      expect(response.status).toBe(201)
+      const text = await response.text()
+      expect(text.length).toBeLessThan(4096)
+      expect(JSON.parse(text).upload.size).toBe(MAX_SIZE.length)
+    })
+
+    it.each([
+      ['裸 body', 'raw'],
+      ['JSON 信封', 'envelope']
+    ])('落盘的就是原始字节，逐字节一致（%s）', async (_label, form) => {
+      const room = await createRoom(relay.baseUrl, `bytes-fidelity-${form}`)
+      // 含 0x00 与高位字节：任何「当作文本处理」或编码往返有损的路径都会在这里露馅
+      const bytes = Buffer.from([0x00, 0x01, 0x7f, 0x80, 0xff, 0xfe, 0x00, 0x41])
+
+      const response = await fetch(
+        form === 'raw'
+          ? `${relay.baseUrl}/api/rooms/${room.roomId}/uploads?name=fidelity.bin`
+          : `${relay.baseUrl}/api/rooms/${room.roomId}/uploads`,
+        form === 'raw'
+          ? { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes }
+          : {
+              method: 'POST',
+              headers: ENVELOPE_HEADERS,
+              body: JSON.stringify({
+                name: 'fidelity.bin',
+                mimeType: 'application/octet-stream',
+                lastModified: new Date(0).toISOString(),
+                contentBase64: bytes.toString('base64')
+              })
+            }
+      )
+
+      expect(response.status).toBe(201)
+      const { upload: summary } = await response.json()
+      expect(summary.size).toBe(bytes.length)
+
+      const download = await fetch(resolveUrl(relay.baseUrl, summary.downloadUrl), { headers: authHeaders })
+      expect(download.status).toBe(200)
+      expect(Buffer.from(await download.arrayBuffer()).equals(bytes)).toBe(true)
+    })
+
+    it('文本类文件同样只回元信息（contentText 从前最多带 1MB）', async () => {
+      // 这一层是 e2e 发现的：10MB 二进制那条已修好后，一份 8.5MB 的 .md 仍换回 1.05MB 响应
+      // —— 因为摘要默认带 `contentText`（截断到 MAX_TEXT_BYTES = 1MB）。
+      const room = await createRoom(relay.baseUrl, 'no-echo-text')
+      const text = '作业正文'.repeat(200_000) // ≈2.4MB UTF-8，已超过 MAX_TEXT_BYTES
+
+      const response = await fetch(
+        `${relay.baseUrl}/api/rooms/${room.roomId}/uploads?name=long.md`,
+        { method: 'POST', headers: { 'Content-Type': 'text/markdown' }, body: text }
+      )
+
+      expect(response.status).toBe(201)
+      const responseText = await response.text()
+      // 判据：响应体只在 `previewText` 的量级（4096 字符 ≈12KB），不是 1MB
+      expect(responseText.length).toBeLessThan(64 * 1024)
+
+      const { upload: summary } = JSON.parse(responseText)
+      expect(summary.contentIncluded).toBe(false)
+      expect(summary.contentText).toBeNull()
+      expect(summary.textTruncated).toBe(true)
+      expect(summary.size).toBe(Buffer.byteLength(text))
+
+      // 正文仍可从 details 端点取回 —— 接收端走的就是这条
+      const details = await (await fetch(resolveUrl(relay.baseUrl, summary.detailsUrl), { headers: authHeaders })).json()
+      expect(Buffer.byteLength(details.upload.contentText, 'utf8')).toBeLessThanOrEqual(1024 * 1024)
+    })
+  })
+
   it('0 字节文件可上传（空 contentBase64 不被当作缺失）', async () => {
     const room = await createRoom(relay.baseUrl, 'empty-file-room')
 
@@ -473,7 +587,12 @@ describe('relay HTTP 层', () => {
     expect(response.status).toBe(201)
     const payload = await response.json()
     expect(payload.upload.textTruncated).toBe(true)
-    expect(Buffer.byteLength(payload.upload.contentText, 'utf8')).toBeLessThanOrEqual(limit)
+
+    // 截断后的正文从 details 端点读回（201 只回元信息）。这条是接收端真正走的那条路。
+    const details = await fetch(resolveUrl(relay.baseUrl, payload.upload.detailsUrl), { headers: authHeaders })
+    expect(details.status).toBe(200)
+    const { upload: detail } = await details.json()
+    expect(Buffer.byteLength(detail.contentText, 'utf8')).toBeLessThanOrEqual(limit)
   })
 
   it.each([

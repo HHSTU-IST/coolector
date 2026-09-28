@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -173,5 +173,28 @@ describe('uploadSummary', () => {
     expect(summary.contentText).toBeNull()
     expect(summary.contentBase64).toBeNull()
     expect(summary.detailsUrl).toBe('/api/rooms/r1/uploads/u1')
+  })
+})
+
+describe('persistUpload', () => {
+  it('接收 Buffer 并逐字节落盘', async () => {
+    const { room } = state.createRoom('unit-persist-room')
+    const upload = { id: 'persist-1', roomId: room.id, name: 'raw.bin' }
+    const bytes = Buffer.from([0x00, 0x80, 0xff, 0x0a])
+
+    await state.persistUpload(upload, bytes)
+
+    expect(Buffer.from(await readFile(upload.storagePath)).equals(bytes)).toBe(true)
+    expect(upload.storageFileName).toBe('persist-1-raw.bin')
+  })
+
+  it('传 base64 字符串 fail-fast，不静默写出一份坏文件', async () => {
+    // 旧签名 `persistUpload(upload, contentBase64)` 收字符串。改成收 Buffer 之后，
+    // 若还有调用方照旧传 base64，最坏结果是一份「看起来正常」的坏文件 —— 必须当场抛。
+    const { room } = state.createRoom('unit-persist-guard-room')
+
+    await expect(
+      state.persistUpload({ id: 'persist-2', roomId: room.id, name: 'x.txt' }, 'aGk=')
+    ).rejects.toThrowError(TypeError)
   })
 })

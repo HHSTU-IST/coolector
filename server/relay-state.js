@@ -249,16 +249,23 @@ async function readRoomSentinel(roomUploadDir) {
 }
 
 
-async function persistUpload(upload, contentBase64 = '') {
+async function persistUpload(upload, bytes) {
+  // 入参是**解码后的文件字节**，不是 base64。签名收字符串时本函数要自己解一遍，
+  // 加上调用方为量 `.length` 解的那一遍、以及裸 body 通道为拼响应字段做的那一遍编码，
+  // 一次 10MB 上传的峰值内存会达到文件本身的 4.3 倍（实测 43.4 MB vs 10.1 MB）。
+  // 这里用 fail-fast 而不是默认空 Buffer：静默接受一个 base64 字符串会写出一份看似正常的坏文件。
+  if (!Buffer.isBuffer(bytes)) {
+    throw new TypeError('persistUpload expects a Buffer of decoded file bytes')
+  }
+
   const roomUploadDir = join(UPLOAD_DIR, upload.roomId)
   const storageFileName = `${upload.id}-${sanitizeStorageFileName(upload.name)}`
   const storagePath = join(roomUploadDir, storageFileName)
-  const buffer = Buffer.from(contentBase64, 'base64')
 
   await mkdir(roomUploadDir, { recursive: true })
   // 先写归属标记再写正文，保证目录一旦有内容就一定带标记
   await writeRoomSentinel(roomUploadDir, upload.roomId)
-  await writeFile(storagePath, buffer)
+  await writeFile(storagePath, bytes)
 
   upload.storagePath = storagePath
   upload.storageFileName = storageFileName
