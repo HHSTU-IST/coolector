@@ -36,10 +36,10 @@ const QUOTA_WRITER_ALLOWLIST = [
   // 两个原子原语：唯一的「增加」入口
   'reserveStorageQuota',
   'reserveUploadSlot',
-  // 整体回收（房间销毁 / 清理循环 / 启动重建）
+  // 整体回收（房间销毁 / 清理循环 / 启动时按元数据重建）
   'destroyRoom',
   'cleanupRooms',
-  'initStoredBytes'
+  'restoreRooms'
 ]
 
 /** 计数型字段名；出现在赋值左侧即视为「写配额」 */

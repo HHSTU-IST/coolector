@@ -16,7 +16,7 @@ import {
 } from './relay-utils.js'
 import {
   ALLOWED_ORIGINS, HOST, MAX_FILE_BYTES, MAX_ROOMS, MAX_ROOM_BYTES_PER_WINDOW, MAX_TEXT_BYTES,
-  MAX_UPLOAD_BYTES_PER_WINDOW, MAX_UPLOAD_NAME_BYTES, PORT, RELAY_TOKEN,
+  MAX_UPLOAD_BYTES_PER_WINDOW, MAX_UPLOAD_NAME_BYTES, PORT, PREVIEW_TEXT_CHARS, RELAY_TOKEN,
   ROOM_CLEANUP_INTERVAL_MS, RATE_LIMIT_WINDOW_MS, STREAM_TICKET_TTL_MS
 } from './relay-config.js'
 import {
@@ -27,8 +27,8 @@ import {
 } from './relay-http.js'
 import {
   cleanupRooms, closeReceiver, createRoom, destroyRoom, dispatchEvent, getRoom,
-  initStoredBytes, persistUpload, reserveStorageQuota, reserveUploadSlot,
-  roomSnapshot, rooms, uploadSummary
+  persistRoomMetadata, persistUpload, reserveStorageQuota, reserveUploadSlot,
+  restoreRooms, roomSnapshot, rooms, uploadSummary
 } from './relay-state.js'
 
 // Relay 主服务：只做**编排** —— 路由分发 + 各 handler + 定时器 + 监听。
@@ -263,7 +263,7 @@ async function handleUpload(req, res, room, query) {
     text: textField ? textField.text : null,
     // 两端任一发生截断都要告诉接收端，否则用户以为看到的就是全文
     textTruncated: Boolean(textField?.truncated) || metadata.textTruncatedByClient,
-    previewText: textField ? textField.text.slice(0, 4096) : null
+    previewText: textField ? textField.text.slice(0, PREVIEW_TEXT_CHARS) : null
   }
 
   try {
@@ -297,6 +297,18 @@ async function handleUpload(req, res, room, query) {
   room.stats.uploads += 1
   room.updatedAt = upload.uploadedAt
   room.lastActivity = Date.now()
+
+  // 房间元数据落盘（每房间串行 + 临时文件 rename 原子替换），让这条作业在重启后依然可见。
+  // 等待它只为缩小「已 ack 但未记录」的窗口；它**从不抛错**（失败只记日志），
+  // 因此这里不会把一次已经成功的上传变成 500。
+  //
+  // 已销毁的房间不再写：否则会把刚被 `rm` 掉的目录重新创建出来，让它下次启动时
+  // 「复活」成一个空房间。仍有极小的竞态窗口（销毁发生在写入途中）—— 那时的结果是
+  // 一个没有作业的空房间，会被存活上限在下一轮清理中删除，不会造成数据错乱。
+  if (!room.destroyed) {
+    await persistRoomMetadata(room)
+  }
+
   // 不记原始文件名：作业名普遍是「学号+姓名」，那是 PII；摘要 + 长度既够归并排查，又不落个人信息。
   // （同时也避免了超长文件名把审计日志放大到 MB 级）
   auditLog('upload_created', {
@@ -368,8 +380,17 @@ async function handleDownload(req, res, room, uploadId, query) {
   // （见 parseUploadMetadata 的裸 body 分支），201 响应也不再回吐正文。
   // 另一处在 parseUploadMetadata 的信封 legacy 分支 —— 仅在客户端只给 `text`/`content`
   // 而未给 `contentBase64` 时触发，编的是那段文本，不是整份上传字节。
+  const buffer = await readFile(requireStoragePath(upload))
   const summary = uploadSummary(upload)
-  summary.contentBase64 = (await readFile(requireStoragePath(upload))).toString('base64')
+
+  // 重启后 `upload.text` 为 null（正文不持久化，见 relay-state 的 room.json 约定）：
+  // 就地用刚读出的这份字节推导。与上传路径共用 `deriveUploadText`，
+  // 因此「重启前」与「重启后」拿到的正文口径完全一致（铁律 20）。
+  if (summary.contentText === null) {
+    summary.contentText = deriveUploadText(buffer, upload.mimeType, upload.name)
+  }
+
+  summary.contentBase64 = buffer.toString('base64')
 
   return writeJson(res, 200, { upload: summary }, headers)
 }
@@ -615,7 +636,7 @@ if (ALLOWED_ORIGINS.length === 0) {
   console.warn('[relay] 同源部署无需配置；前后端不同源时请显式白名单，例：RELAY_ALLOWED_ORIGINS=https://app.example.com')
 }
 
-await initStoredBytes()
+await restoreRooms()
 
 server.listen(PORT, HOST, () => {
   console.log(`Relay server listening on http://${HOST}:${PORT}`)

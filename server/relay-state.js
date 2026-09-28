@@ -4,17 +4,21 @@
 // 且所有「检查 + 消耗」都必须走 reserveStorageQuota / reserveUploadSlot 两个原子原语。
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { sanitizeRoomId, sanitizeStorageFileName } from './relay-utils.js'
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+import { normalizeIsoDate, sanitizeMimeType, sanitizeRoomId, sanitizeStorageFileName } from './relay-utils.js'
 import {
-  KEEP_ORPHAN_UPLOADS, MAX_QUEUE_EVENTS, MAX_ROOM_UPLOAD_BYTES,
-  MAX_ROOM_UPLOADS, MAX_TOTAL_UPLOAD_BYTES, ROOM_MAX_LIFETIME_MS, ROOM_TTL_MS, UPLOAD_DIR
+  MAX_QUEUE_EVENTS, MAX_ROOM_UPLOAD_BYTES,
+  MAX_ROOM_UPLOADS, MAX_TOTAL_UPLOAD_BYTES, PREVIEW_TEXT_CHARS, ROOM_MAX_LIFETIME_MS, ROOM_TTL_MS, UPLOAD_DIR
 } from './relay-config.js'
 import { HttpError, auditLog, nowIso, relayUrl, writeSseFrame } from './relay-http.js'
 
 /**
  * 一条落进房间的上传（内存态）。字段与 relay-server 的 parseUploadMetadata 产物一一对应。
+ *
+ * 其中只有 `storageFileName` / `previewText` / `textTruncated` 会持久化（见 serializeRoom）：
+ * 正文 `text` 是**字节的纯函数**（`deriveUploadText`），重启后按需从磁盘重新推导即可，
+ * 把它写进元数据会让每个房间的元数据文件随文本类作业线性膨胀到几百 MB。
  *
  * @typedef {object} Upload
  * @property {string} id
@@ -25,7 +29,7 @@ import { HttpError, auditLog, nowIso, relayUrl, writeSseFrame } from './relay-ht
  * @property {string} uploadedAt
  * @property {number} size
  * @property {number} quotaBytes
- * @property {string | null} text
+ * @property {string | null} text 本进程内上传过才有；重启后为 null，由 details 端点按需推导
  * @property {boolean} textTruncated
  * @property {string | null} previewText
  * @property {string} [storagePath] 落盘后的绝对路径；未落盘时不存在
@@ -46,6 +50,7 @@ import { HttpError, auditLog, nowIso, relayUrl, writeSseFrame } from './relay-ht
  * @property {number} storedBytes
  * @property {number} pendingUploads
  * @property {boolean} destroyed
+ * @property {Promise<void>} metadataChain 元数据写入的串行链（并发上传不得互相覆盖）
  * @property {{ receiverConnections: number, uploads: number, eventsDelivered: number }} stats
  */
 
@@ -53,8 +58,47 @@ import { HttpError, auditLog, nowIso, relayUrl, writeSseFrame } from './relay-ht
 const rooms = new Map()
 
 
-/** 已落盘的字节总数，用于配额判断；进程重启后重新累计。 */
+/** 已落盘的字节总数，用于配额判断；进程启动时按磁盘上的房间元数据重建。 */
 let totalStoredBytes = 0
+
+
+/**
+ * 构造一个房间内存态（**不**入 rooms Map）。
+ *
+ * 与 `createRoom` 分开是为了让恢复路径复用同一份字段定义：恢复出来的房间只多带
+ * 持久化的 `createdAt` / `updatedAt`，其余字段（含 `metadataChain`、`stats`）必须完全一致，
+ * 否则「恢复的房间」与「新建的房间」会走上两条不同的代码路径。
+ *
+ * @param {string} id 已归一化的房间 ID
+ * @param {{ createdAt?: string, updatedAt?: string }} [persisted]
+ * @returns {Room}
+ */
+function makeRoom(id, { createdAt, updatedAt } = {}) {
+  const timestamp = nowIso()
+
+  return {
+    id,
+    createdAt: createdAt ?? timestamp,
+    updatedAt: updatedAt ?? timestamp,
+    lastActivity: Date.now(),
+    receiver: null,
+    queue: [],
+    uploads: new Map(),
+    /** 本房间已占用的字节数（正文 + 元数据 + 保留文本），用于单房间配额 */
+    storedBytes: 0,
+    /** 已预占但尚未完成落盘的上传条数（见 reserveUploadSlot） */
+    pendingUploads: 0,
+    /** 是否已被销毁：用于让在途上传感知到「房间已没了」而不是静默写入 */
+    destroyed: false,
+    /** 元数据写入串行链：并发上传各自触发一次全量写，必须排队，否则后写覆盖先写 */
+    metadataChain: Promise.resolve(),
+    stats: {
+      receiverConnections: 0,
+      uploads: 0,
+      eventsDelivered: 0
+    }
+  }
+}
 
 
 /**
@@ -72,27 +116,7 @@ function createRoom(roomId = randomUUID()) {
     return { room: existing, created: false }
   }
 
-  const room = {
-    id,
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    lastActivity: Date.now(),
-    receiver: null,
-    queue: [],
-    uploads: new Map(),
-    /** 本房间已占用的字节数（正文 + 元数据 + 保留文本），用于单房间配额 */
-    storedBytes: 0,
-    /** 已预占但尚未完成落盘的上传条数（见 reserveUploadSlot） */
-    pendingUploads: 0,
-    /** 是否已被销毁：用于让在途上传感知到「房间已没了」而不是静默写入 */
-    destroyed: false,
-    stats: {
-      receiverConnections: 0,
-      uploads: 0,
-      eventsDelivered: 0
-    }
-  }
-
+  const room = makeRoom(id)
   rooms.set(id, room)
   return { room, created: true }
 }
@@ -312,40 +336,220 @@ function dispatchEvent(room, eventName, data) {
 
 
 /**
- * 房间目录的归属标记文件名。
+ * 房间元数据的文件名与写入约定。
  *
- * 启动回收**只删**「内含该标记、且标记里的 roomId 与目录名一致」的目录。
- * 没有这一层守卫的话，一个无差别的 `rm -rf` 在 `UPLOAD_DIR` 指向卷根时会删掉无关数据
- * （实测把 `notes.backup/`、`my notes/` 一起删光）。
+ * 房间的可持久化状态就是**房间目录内的这一个 JSON**，它同时承担三件事：
+ * ① 「重启不丢作业」—— 启动时据此重建房间与上传；
+ * ② **归属证明** —— 取代原先的 `.coolector-room` 标记（内容更丰富、可自校验）；
+ * ③ 全局配额的复原依据 —— 每条上传的 `quotaBytes` 落在这里。
+ *
+ * 正文（`text`）**不写进去**：它是**字节的纯函数**（`deriveUploadText`），而文本类作业的
+ * 正文可达 1MB —— 写进去会让每个房间的元数据文件随作业量线性膨胀到几百 MB，
+ * 而它随时可以从落盘字节重新推导。`previewText` / `textTruncated` 则**必须**持久化：
+ * 它们是「上传那一刻」的截断产物，事后无法从字节还原。
+ *
+ * 文件名用 `room.json` 而非 `.coolector-room`：上传正文一律存为 `<上传ID>-<安全文件名>`，
+ * 不可能恰好等于 `room.json`，因此两者不会互相覆盖；而点号开头的名字反而会被
+ * `sanitizeStorageFileName` 归一成 `file`，在上传通道里造成歧义。
  */
-const ROOM_SENTINEL_FILENAME = '.coolector-room'
+const ROOM_METADATA_FILENAME = 'room.json'
+
+/** 元数据的临时写入口：先写它再 `rename` 覆盖正式文件，避免读者看到半截 JSON */
+const ROOM_METADATA_TEMP_FILENAME = 'room.json.tmp'
+
+const ROOM_METADATA_GENERATOR = 'coolector-relay'
+const ROOM_METADATA_VERSION = 1
+
+// —— 恢复时的字段约束 ——
+// 元数据由本程序写出，但磁盘会损坏、文件也可能被人工改过：恢复路径必须能容忍任何内容，
+// 且**一律以「跳过 + 告警」应对**，绝不因为一份坏元数据而删除目录（见 restoreRooms）。
+const UPLOAD_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u
+const MAX_PERSISTED_NAME_CHARS = 512
+const MAX_STORAGE_FILE_NAME_CHARS = 200
 
 
 /**
- * @param {string} roomUploadDir 房间上传目录（绝对路径）
- * @param {string} roomId
- * @returns {Promise<void>}
+ * 把房间的可持久化状态序列化为 JSON 文本（不含正文，理由见上）。
+ *
+ * @param {Room} room
+ * @returns {string}
  */
-async function writeRoomSentinel(roomUploadDir, roomId) {
-  const payload = JSON.stringify({ generator: 'coolector-relay', version: 1, roomId })
-  await writeFile(join(roomUploadDir, ROOM_SENTINEL_FILENAME), payload, 'utf8')
+function serializeRoom(room) {
+  const payload = {
+    generator: ROOM_METADATA_GENERATOR,
+    version: ROOM_METADATA_VERSION,
+    roomId: room.id,
+    createdAt: room.createdAt,
+    updatedAt: room.updatedAt,
+    uploads: Array.from(room.uploads.values(), (upload) => ({
+      id: upload.id,
+      name: upload.name,
+      mimeType: upload.mimeType,
+      lastModified: upload.lastModified,
+      uploadedAt: upload.uploadedAt,
+      size: upload.size,
+      quotaBytes: Number.isFinite(upload.quotaBytes) ? upload.quotaBytes : upload.size,
+      textTruncated: Boolean(upload.textTruncated),
+      previewText: upload.previewText ?? null,
+      storageFileName: upload.storageFileName ?? null
+    }))
+  }
+
+  return JSON.stringify(payload, null, 2)
 }
 
 
 /**
- * 读取目录归属标记；缺失 / 损坏 / 非本程序所写一律返回 null（此时**绝不删除**）
+ * 落盘一次房间元数据：写临时文件再 `rename` 原子替换。
  *
- * @param {string} roomUploadDir
- * @returns {Promise<string | null>}
+ * **绝不抛出**。元数据写入失败不能让一次已经成功的上传变成 500，更不能让清理定时器
+ * 产生未处理拒绝（那会让整个 relay 进程退出）。失败只记审计日志与 stderr，
+ * 代价是「该条记录重启后丢失」，由运维从日志发现 —— 比丢掉整个请求小得多。
+ *
+ * @param {Room} room
+ * @returns {Promise<void>}
  */
-async function readRoomSentinel(roomUploadDir) {
+async function writeRoomMetadataNow(room) {
+  const roomDir = join(UPLOAD_DIR, room.id)
+
   try {
-    const raw = await readFile(join(roomUploadDir, ROOM_SENTINEL_FILENAME), 'utf8')
-    const parsed = JSON.parse(raw)
-    if (parsed?.generator !== 'coolector-relay') return null
-    return typeof parsed.roomId === 'string' ? parsed.roomId : null
+    await mkdir(roomDir, { recursive: true })
+    const tempPath = join(roomDir, ROOM_METADATA_TEMP_FILENAME)
+    await writeFile(tempPath, serializeRoom(room), 'utf8')
+    // rename 覆盖是原子的：读到 room.json 的一方要么看到旧内容、要么看到新内容，不会是半截
+    await rename(tempPath, join(roomDir, ROOM_METADATA_FILENAME))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    auditLog('room_metadata_write_failed', { roomId: room.id, message })
+    console.error(`[relay] 房间元数据写入失败（本次上传仍已落盘，但重启后该条记录会丢失）：${roomDir} —— ${message}`)
+  }
+}
+
+
+/**
+ * 排队写一次房间元数据，返回本次写入完成（无论成败）的 Promise，**永不 reject**。
+ *
+ * 必须**串行**：并发上传各自触发一次「全量写」，若不排队，多次写入会共用同一个临时文件
+ * 并各自 `rename`，最终 `rename` 未必来自最新快照 —— 后写的旧快照会覆盖先写的新快照，
+ * 重启后就少一条作业（静默丢件）。
+ *
+ * @param {Room} room
+ * @param {{ write?: (room: Room) => Promise<void> }} [options] 便于单测注入一个「会记录并发度」
+ *   的替身来断言串行性（与 `destroyRoom` 的 `removeDir` 同一模式）
+ * @returns {Promise<void>}
+ */
+function persistRoomMetadata(room, { write = writeRoomMetadataNow } = {}) {
+  const run = () => write(room)
+  const next = room.metadataChain.then(run, run)
+  room.metadataChain = next
+  return next
+}
+
+
+/**
+ * @param {unknown} fileName
+ * @returns {boolean} 能否作为「房间目录内的一个文件名」安全使用
+ */
+function isSafeStorageFileName(fileName) {
+  if (typeof fileName !== 'string' || !fileName) return false
+  if (fileName.length > MAX_STORAGE_FILE_NAME_CHARS) return false
+  // basename 相等 = 不含路径分隔符，阻断元数据被篡改成 `../../etc/passwd` 一类的读取
+  if (basename(fileName) !== fileName) return false
+  return fileName !== ROOM_METADATA_FILENAME && fileName !== ROOM_METADATA_TEMP_FILENAME
+}
+
+
+/**
+ * 读取并校验房间元数据。
+ *
+ * 返回 `null` 覆盖三种情况，**且都绝不删除目录**：文件不存在（外来目录 / 老版本遗留）、
+ * JSON 解析失败（半截文件 / 磁盘损坏）、字段校验不通过（被人工改过）。宁可让一个目录
+ * 变成「不认识的目录」，也不能把运维自己的数据当成垃圾清掉。
+ *
+ * @param {string} roomDir
+ * @param {string} roomId 目录名；必须与元数据内的 roomId 一致，否则视为不属于本程序
+ * @returns {Promise<{ createdAt?: unknown, updatedAt?: unknown, uploads: unknown[] } | null>}
+ */
+async function readRoomMetadata(roomDir, roomId) {
+  let parsed
+  try {
+    parsed = JSON.parse(await readFile(join(roomDir, ROOM_METADATA_FILENAME), 'utf8'))
   } catch {
     return null
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null
+  if (parsed.generator !== ROOM_METADATA_GENERATOR) return null
+  if (parsed.version !== ROOM_METADATA_VERSION) return null
+  if (parsed.roomId !== roomId) return null
+  if (!Array.isArray(parsed.uploads)) return null
+
+  return parsed
+}
+
+
+/**
+ * 由一条持久化记录重建上传对象。
+ *
+ * 恒不带正文（`text: null`）：`details` 端点会从落盘字节按需推导，与上传路径共用
+ * `deriveUploadText` 这一份实现，因此重启前后的正文口径完全一致（铁律 20）。
+ *
+ * @param {string} roomDir
+ * @param {string} roomId
+ * @param {unknown} item 元数据 `uploads` 数组里的一条记录
+ * @returns {Promise<Upload | null>} 记录不可用（文件缺失 / 字段非法）时返回 `null`
+ */
+async function restoreUpload(roomDir, roomId, item) {
+  if (!item || typeof item !== 'object') return null
+  // 从 `object` 收窄成可按名取值的记录：此后每个字段仍需各自校验 —— 元数据来自磁盘，
+  // 任何字段都可能是任意类型（被人工改过 / 半截写入 / 旧版本格式）。
+  const record = /** @type {Record<string, unknown>} */ (item)
+
+  const id = record.id
+  if (typeof id !== 'string' || !UPLOAD_ID_PATTERN.test(id)) return null
+
+  const storageFileName = record.storageFileName
+  if (typeof storageFileName !== 'string' || !isSafeStorageFileName(storageFileName)) return null
+
+  const storagePath = join(roomDir, storageFileName)
+  let fileStat
+  try {
+    fileStat = await stat(storagePath)
+  } catch {
+    // 元数据引用的正文不在磁盘上（被人工删除 / 写入未完成）—— 跳过这一条，其余照常恢复
+    return null
+  }
+  if (!fileStat.isFile()) return null
+
+  const size = fileStat.size
+
+  // 配额以**磁盘字节**为下界：即使元数据被改小，也不允许低于文件本身的体积
+  const persistedQuota = record.quotaBytes
+  const quotaBytes = typeof persistedQuota === 'number' && persistedQuota >= size
+    ? Math.floor(persistedQuota)
+    : size
+
+  const persistedName = record.name
+  const persistedPreview = record.previewText
+
+  return {
+    id,
+    roomId,
+    name: typeof persistedName === 'string' && persistedName
+      ? persistedName.slice(0, MAX_PERSISTED_NAME_CHARS)
+      : storageFileName,
+    mimeType: sanitizeMimeType(record.mimeType),
+    lastModified: normalizeIsoDate(record.lastModified, nowIso()),
+    uploadedAt: normalizeIsoDate(record.uploadedAt, nowIso()),
+    size,
+    quotaBytes,
+    text: null,
+    textTruncated: record.textTruncated === true,
+    previewText: typeof persistedPreview === 'string'
+      ? persistedPreview.slice(0, PREVIEW_TEXT_CHARS)
+      : null,
+    storagePath,
+    storageFileName
   }
 }
 
@@ -369,8 +573,6 @@ async function persistUpload(upload, bytes) {
   const storagePath = join(roomUploadDir, storageFileName)
 
   await mkdir(roomUploadDir, { recursive: true })
-  // 先写归属标记再写正文，保证目录一旦有内容就一定带标记
-  await writeRoomSentinel(roomUploadDir, upload.roomId)
   await writeFile(storagePath, bytes)
 
   upload.storagePath = storagePath
@@ -464,109 +666,98 @@ async function cleanupRooms({ removeDir = rm } = {}) {
 
 
 /**
- * 启动时扫描 UPLOAD_DIR。
+ * 启动时按磁盘上的房间元数据重建房间与上传，并复原全局配额。
  *
- * 房间只存在于内存，所以**启动瞬间磁盘上的每个目录都是「无主目录」** ——
- * 它们已无法通过任何 HTTP 路径访问（房间 404），却会被永久计入全局配额、把磁盘占住。
+ * 这取代了原先的「无主目录回收」：房间现在**不只在内存里** —— 磁盘上的房间目录不再是
+ * 垃圾，而是「重启后仍然可访问的作业」。因此本函数**只读不删**：没有元数据、元数据损坏、
+ * 字段不合法的目录一律跳过并告警（`UPLOAD_DIR` 指向卷根时不会误删 `notes.backup/` 这类数据）。
  *
- * ⚠️ 但回收**必须可判定**：只删「内含本程序写的归属标记、且标记里的 roomId 与目录名一致」的目录。
- * 无标记 / 标记不匹配 / 标记损坏的目录一律**不动**（宁可留一点占用，也不能误删运维自己的数据），
- * 并且不计入配额 —— 它们不是本程序产生的，与配额无关。
- */
-/**
- * @param {string} dirPath
- * @returns {Promise<number>} 目录下**直接**子文件的大小之和（不递归）
- */
-async function measureDirectoryBytes(dirPath) {
-  let total = 0
-  const files = await readdir(dirPath, { withFileTypes: true })
-
-  for (const file of files) {
-    if (!file.isFile()) continue
-    const fileStat = await stat(join(dirPath, file.name))
-    total += fileStat.size
-  }
-
-  return total
-}
-
-
-/**
+ * 有意保留的取舍：若 `destroyRoom` 的 `rm` 失败（目录残留、元数据还在），下次启动会把这个
+ * 房间**恢复出来**。磁盘上的作业确实还在、删除本就没成功，恢复比「悄悄丢掉」更符合
+ * 「不误删」原则；且它若已超过绝对存活上限，下一轮清理会立即再次尝试删除（`createdAt`
+ * 一并持久化就是为了让这条上限在重启后依然有效）。恢复时**不强制**反查配额上限 ——
+ * 运维调小了上限不该导致既有作业被丢弃；新上传由 `reserveStorageQuota` 照常拦截。
+ *
  * @returns {Promise<void>}
  */
-async function initStoredBytes() {
+async function restoreRooms() {
   totalStoredBytes = 0
 
   let entries
   try {
     entries = await readdir(UPLOAD_DIR, { withFileTypes: true })
   } catch {
-    // 目录不存在（首次启动），无需初始化
+    // 目录不存在（首次启动），无需恢复
     return
   }
 
-  let reclaimedDirs = 0
-  let reclaimedBytes = 0
-  let keptBytes = 0
-  const foreignDirs = []
+  let restoredRooms = 0
+  let restoredUploads = 0
+  let restoredBytes = 0
+  let skippedUploads = 0
   let strayFiles = 0
+  /** 名称不是合法房间 ID、或没有有效元数据的目录 */
+  const unrecognized = []
 
   for (const entry of entries) {
-    const entryPath = join(UPLOAD_DIR, entry.name)
-
     if (!entry.isDirectory()) {
       strayFiles += 1
       continue
     }
 
-    const sentinelRoomId = await readRoomSentinel(entryPath)
-    if (!sentinelRoomId || sentinelRoomId !== entry.name || !sanitizeRoomId(sentinelRoomId)) {
-      foreignDirs.push(entry.name)
+    const roomId = sanitizeRoomId(entry.name)
+    if (!roomId || roomId !== entry.name) {
+      unrecognized.push(entry.name)
       continue
     }
 
-    let dirBytes = 0
-    try {
-      dirBytes = await measureDirectoryBytes(entryPath)
-    } catch {
-      foreignDirs.push(entry.name)
+    const roomDir = join(UPLOAD_DIR, entry.name)
+    const metadata = await readRoomMetadata(roomDir, roomId)
+    if (!metadata) {
+      unrecognized.push(entry.name)
       continue
     }
 
-    if (KEEP_ORPHAN_UPLOADS) {
-      keptBytes += dirBytes
-      continue
+    const room = makeRoom(roomId, {
+      createdAt: normalizeIsoDate(metadata.createdAt, nowIso()),
+      updatedAt: normalizeIsoDate(metadata.updatedAt, nowIso())
+    })
+
+    for (const item of metadata.uploads) {
+      const upload = await restoreUpload(roomDir, roomId, item)
+      if (!upload) {
+        skippedUploads += 1
+        continue
+      }
+
+      room.uploads.set(upload.id, upload)
+      room.storedBytes += upload.quotaBytes
+      totalStoredBytes += upload.quotaBytes
+      restoredBytes += upload.quotaBytes
+      restoredUploads += 1
     }
 
-    try {
-      await rm(entryPath, { recursive: true, force: true })
-      reclaimedDirs += 1
-      reclaimedBytes += dirBytes
-    } catch (error) {
-      // 删不掉就保留并计入配额 —— 启动过程绝不能因为一个目录删不掉而失败
-      keptBytes += dirBytes
-      console.warn(`[relay] 无主上传目录删除失败，已保留并计入配额：${entryPath} —— ${error instanceof Error ? error.message : error}`)
-    }
+    room.stats.uploads = room.uploads.size
+    rooms.set(roomId, room)
+    restoredRooms += 1
   }
 
-  if (reclaimedDirs > 0) {
-    auditLog('orphan_uploads_reclaimed', { dirs: reclaimedDirs, bytes: reclaimedBytes })
-    console.log(`[relay] 已回收 ${reclaimedDirs} 个无主上传目录（${reclaimedBytes} 字节）：房间仅存于内存，重启后这些文件已不可访问。`)
+  if (restoredUploads > 0) {
+    auditLog('rooms_restored', { rooms: restoredRooms, uploads: restoredUploads, bytes: restoredBytes })
+    console.log(`[relay] 已从磁盘恢复 ${restoredRooms} 个房间 / ${restoredUploads} 条上传（${restoredBytes} 字节）：这些作业在重启后仍可访问。`)
   }
-  if (keptBytes > 0) {
-    console.warn(`[relay] 保留了 ${keptBytes} 字节无主上传文件（RELAY_KEEP_ORPHAN_UPLOADS=true 或删除失败）：仍计入配额，只能人工清理。`)
+  if (skippedUploads > 0) {
+    console.warn(`[relay] ${skippedUploads} 条上传记录被跳过：元数据引用的正文不在磁盘上，或记录字段不合法。`)
   }
-  if (foreignDirs.length > 0) {
-    // 这里是刻意不删、也不计账的：无法证明它们是本程序产生的
-    console.warn(`[relay] ⚠️ UPLOAD_DIR 下有 ${foreignDirs.length} 个目录不属于本程序（无有效归属标记），已跳过、不计入配额、也不会被删除：`)
-    console.warn(`[relay]    ${foreignDirs.slice(0, 10).join(', ')}${foreignDirs.length > 10 ? ` …（共 ${foreignDirs.length} 个）` : ''}`)
-    console.warn('[relay]    若确认这些是历史版本遗留的上传目录，请人工删除或迁移；UPLOAD_DIR 建议指向专用子目录。')
+  if (unrecognized.length > 0) {
+    // 刻意不删：无法证明它们是本程序产生的（可能是老版本遗留目录或运维自己的数据）
+    console.warn(`[relay] ⚠️ UPLOAD_DIR 下有 ${unrecognized.length} 个目录没有有效的房间元数据（${ROOM_METADATA_FILENAME}），已跳过、不计入配额、也不会被删除：`)
+    console.warn(`[relay]    ${unrecognized.slice(0, 10).join(', ')}${unrecognized.length > 10 ? ` …（共 ${unrecognized.length} 个）` : ''}`)
+    console.warn('[relay]    若是旧版本遗留的上传目录，请人工删除或迁移；UPLOAD_DIR 建议指向专用子目录。')
   }
   if (strayFiles > 0) {
     console.warn(`[relay] UPLOAD_DIR 根目录下有 ${strayFiles} 个散落文件：既不计入配额也不会被回收，请确认 UPLOAD_DIR 配置是否正确。`)
   }
-
-  totalStoredBytes = keptBytes
 }
 
 
@@ -574,6 +765,7 @@ async function initStoredBytes() {
 export {
   rooms,
   totalStoredBytes,
+  ROOM_METADATA_FILENAME,
   createRoom,
   getRoom,
   reserveStorageQuota,
@@ -583,7 +775,9 @@ export {
   closeReceiver,
   dispatchEvent,
   persistUpload,
+  persistRoomMetadata,
+  serializeRoom,
   destroyRoom,
   cleanupRooms,
-  initStoredBytes
+  restoreRooms
 }

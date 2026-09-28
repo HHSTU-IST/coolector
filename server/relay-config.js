@@ -96,10 +96,11 @@ const MAX_UPLOAD_NAME_BYTES = requirePositiveInt('MAX_UPLOAD_NAME_BYTES', 255)
 // 房间清理扫描周期（毫秒）
 const ROOM_CLEANUP_INTERVAL_MS = requirePositiveInt('ROOM_CLEANUP_INTERVAL_MS', 30 * 60 * 1000)
 
-// 启动时是否保留「无主目录」（磁盘存在但内存无对应房间的目录）。
-// 默认回收：房间只活在内存里，重启后这些文件已无法通过任何 HTTP 路径访问，
-// 却会被 initStoredBytes 永久计入全局配额，且没有回收路径。
-const KEEP_ORPHAN_UPLOADS = (process.env.RELAY_KEEP_ORPHAN_UPLOADS ?? 'false') === 'true'
+// 房间快照 / SSE 帧里展示的正文预览长度（**字符**数）。
+// 纯模块常量而非运维旋钮：改它没有运维意义，但两端必须一致 ——
+// server 侧截 previewText 用它，relay-state 恢复元数据时也用它兜住 previewText 的上限，
+// 否则一份被改过的元数据就能塞进任意长度的预览串。
+const PREVIEW_TEXT_CHARS = 4096
 
 
 // 对外基址。**这是服务端唯一允许产生绝对 URL 的来源。**
@@ -165,7 +166,7 @@ export {
   MAX_ROOM_UPLOADS,
   MAX_UPLOAD_NAME_BYTES,
   ROOM_CLEANUP_INTERVAL_MS,
-  KEEP_ORPHAN_UPLOADS,
+  PREVIEW_TEXT_CHARS,
   PUBLIC_BASE_URL,
   STREAM_TICKET_TTL_MS,
   RATE_LIMIT_WINDOW_MS,

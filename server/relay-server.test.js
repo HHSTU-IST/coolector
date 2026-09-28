@@ -1089,12 +1089,12 @@ describe('房间生命周期', () => {
   }, 20000)
 }, 60000)
 
-describe('启动回收的归属门控', () => {
+describe('启动恢复的归属门控', () => {
   let uploadDir
 
   beforeAll(async () => {
-    uploadDir = await mkdtemp(join(tmpdir(), 'coolector-sentinel-'))
-    // 这些目录不属于本程序（没有归属标记），启动回收必须放过它们
+    uploadDir = await mkdtemp(join(tmpdir(), 'coolector-foreign-'))
+    // 这些目录没有房间元数据（room.json），启动恢复必须放过它们
     await mkdir(join(uploadDir, 'notes.backup'), { recursive: true })
     await writeFile(join(uploadDir, 'notes.backup', 'db-dump.sql'), 'precious data'.repeat(512))
     await mkdir(join(uploadDir, 'my notes'), { recursive: true })
@@ -1106,7 +1106,7 @@ describe('启动回收的归属门控', () => {
     await rm(uploadDir, { recursive: true, force: true })
   })
 
-  it('无归属标记的目录与散落文件既不被删除，也不计入配额', async () => {
+  it('无元数据的目录与散落文件既不被删除，也不计入配额', async () => {
     // 配额刻意设得比这些「外来文件」的总字节还小：若它们被计入配额，下面那次上传必然 507
     const relay = await startRelay({
       MAX_TOTAL_UPLOAD_BYTES: '2048',
@@ -1125,7 +1125,7 @@ describe('启动回收的归属门控', () => {
       expect(root.storageLimitBytes).toBeUndefined()
 
       // 行为断言（取代原先读数字）：外来字节没有占用全局配额 —— 新房间照常能上传
-      const room = await createRoom(relay.baseUrl, 'sentinel-quota-room')
+      const room = await createRoom(relay.baseUrl, 'foreign-quota-room')
       const upload = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
         method: 'POST',
         headers: ENVELOPE_HEADERS,
@@ -1182,8 +1182,12 @@ describe('在途上传与房间删除的交界', () => {
 
     const roomGone = (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).status === 404
     const roomDir = join(relay.uploadDir, room.roomId)
+    // 只算「上传正文」：房间元数据（room.json / .tmp）与点号文件不算载荷，
+    // 否则本用例会把「元数据还在」误判成「留下了无人认领的作业」
     const hasPayloadFile = existsSync(roomDir)
-      && readdirSync(roomDir).some((name) => !name.startsWith('.'))
+      && readdirSync(roomDir).some((name) => (
+        !name.startsWith('.') && name !== 'room.json' && name !== 'room.json.tmp'
+      ))
 
     // 需要防住的状态：房间已不存在，磁盘上却留着没有归属的文件（静默丢件 + 占额）
     expect(roomGone && hasPayloadFile).toBe(false)
@@ -1219,66 +1223,118 @@ describe('details 端点契约', () => {
     expect(details.contentBase64).toBeUndefined()
   })
 
-  it('房间目录写入归属标记（供启动回收判定）', async () => {
+  it('房间目录写入元数据 room.json（供重启恢复判定）', async () => {
     const room = await createRoom(relay.baseUrl, 'details-room-2')
 
     await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
       method: 'POST',
       headers: ENVELOPE_HEADERS,
-      body: envelopeBody({ name: 'sentinel.md', content: 'x' })
+      body: envelopeBody({ name: 'meta.md', content: 'x' })
     })
 
-    const sentinelPath = join(relay.uploadDir, room.roomId, '.coolector-room')
-    expect(existsSync(sentinelPath)).toBe(true)
+    const metadataPath = join(relay.uploadDir, room.roomId, 'room.json')
+    expect(existsSync(metadataPath)).toBe(true)
 
-    const sentinel = JSON.parse(await readFile(sentinelPath, 'utf8'))
-    expect(sentinel.generator).toBe('coolector-relay')
-    expect(sentinel.roomId).toBe(room.roomId)
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
+    expect(metadata.generator).toBe('coolector-relay')
+    expect(metadata.version).toBe(1)
+    expect(metadata.roomId).toBe(room.roomId)
+    expect(metadata.uploads).toHaveLength(1)
+    expect(metadata.uploads[0].name).toBe('meta.md')
+    // 正文不落进元数据（它是字节的纯函数，写进去会让元数据随作业量线性膨胀）
+    expect(metadata.uploads[0]).not.toHaveProperty('text')
+    // 但截断信息无法事后还原，必须持久化
+    expect(metadata.uploads[0]).toHaveProperty('textTruncated')
   })
 }, 60000)
 
-describe('启动时回收无主上传目录', () => {
+describe('重启后恢复房间与作业（房间元数据持久化）', () => {
   let uploadDir
 
   beforeAll(async () => {
-    uploadDir = await mkdtemp(join(tmpdir(), 'coolector-orphan-'))
+    uploadDir = await mkdtemp(join(tmpdir(), 'coolector-restore-'))
   }, 30000)
 
   afterAll(async () => {
     await rm(uploadDir, { recursive: true, force: true })
   })
 
-  it('重启后无主目录被回收，不再永久占用全局配额', async () => {
+  it('房间、上传与配额在重启后完整复原，且正文仍可按需推导', async () => {
     const first = await startRelay({ MAX_FILE_BYTES: String(1024 * 1024) }, { uploadDir })
-    const room = await createRoom(first.baseUrl, 'orphan-room-1')
+    const room = await createRoom(first.baseUrl, 'restore-room-1')
 
+    // 文本类：正文可推导；二进制类：正文为 null（不是空串）
+    const textContent = '重启后仍应能读到的正文'
     await fetch(`${first.baseUrl}/api/rooms/${room.roomId}/uploads`, {
       method: 'POST',
       headers: ENVELOPE_HEADERS,
-      body: envelopeBody({ name: 'o.md', content: Buffer.alloc(512 * 1024, 0x46) })
+      body: envelopeBody({ name: '作业.md', content: textContent })
+    })
+    const binaryBytes = Buffer.from([0x00, 0x01, 0x80, 0xff, 0x0a])
+    await fetch(`${first.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+      method: 'POST',
+      headers: ENVELOPE_HEADERS,
+      body: envelopeBody({ name: 'raw.bin', mimeType: 'application/octet-stream', content: binaryBytes })
     })
 
-    // 重启：房间只在内存里，磁盘上的目录随即变成"无主目录"
+    const before = await (await fetch(`${first.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+    expect(before.uploadCount).toBe(2)
+    const storedBefore = before.storedBytes
+    expect(storedBefore).toBeGreaterThan(0)
+
+    // 重启：房间与上传现在应能从磁盘恢复（旧行为是整目录被当「无主目录」回收、作业全丢）
     await first.stop({ keepUploadDir: true })
 
     const second = await startRelay({ MAX_FILE_BYTES: String(1024 * 1024) }, { uploadDir })
     try {
-      // 关键回归：无主目录被真正回收（磁盘上不再存在）
-      expect(existsSync(join(uploadDir, room.roomId))).toBe(false)
+      const after = await (await fetch(`${second.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+      expect(after.uploadCount).toBe(2)
+      // 配额逐字节复原 —— 否则重启会「凭空」放出磁盘额度
+      expect(after.storedBytes).toBe(storedBefore)
 
-      const root = await (await fetch(`${second.baseUrl}/`)).json()
-      // 匿名根路由不再暴露用量（信息暴露收敛；配额是否被占由下面的上传行为证明）
-      expect(root.storageUsedBytes).toBeUndefined()
+      const textUpload = after.uploads.find((item) => item.name === '作业.md')
+      const binaryUpload = after.uploads.find((item) => item.name === 'raw.bin')
+      expect(textUpload).toBeTruthy()
+      expect(binaryUpload).toBeTruthy()
 
-      const fresh = await createRoom(second.baseUrl, 'orphan-room-2')
-      const upload = await fetch(`${second.baseUrl}/api/rooms/${fresh.roomId}/uploads`, {
-        method: 'POST',
-        headers: ENVELOPE_HEADERS,
-        body: envelopeBody({ name: 'n.md', content: 'ok' })
-      })
-      expect(upload.status).toBe(201)
+      // 正文：重启后 `upload.text` 为空，details 端点从落盘字节按需推导
+      const textDetails = await (await fetch(resolveUrl(second.baseUrl, textUpload.detailsUrl), { headers: authHeaders })).json()
+      expect(textDetails.upload.contentText).toBe(textContent)
+
+      // 非文本类推导结果应为 null，而不是空串
+      const binaryDetails = await (await fetch(resolveUrl(second.baseUrl, binaryUpload.detailsUrl), { headers: authHeaders })).json()
+      expect(binaryDetails.upload.contentText).toBeNull()
+
+      // 原件字节保真：下载拿到的必须与上传的逐字节一致
+      const download = await fetch(resolveUrl(second.baseUrl, binaryUpload.downloadUrl), { headers: authHeaders })
+      expect(Buffer.from(await download.arrayBuffer()).equals(binaryBytes)).toBe(true)
     } finally {
       await second.stop()
+    }
+  }, 60000)
+
+  it('元数据损坏的目录不被删除也不被恢复（宁可留占用，不可误删）', async () => {
+    // 伪造一个「名字像房间、元数据却是半截 JSON」的目录
+    const brokenDir = join(uploadDir, 'broken-room-00')
+    await mkdir(brokenDir, { recursive: true })
+    await writeFile(join(brokenDir, 'room.json'), '{ "generator": "coolector-relay", "upload')
+    await writeFile(join(brokenDir, 'leftover.bin'), 'x'.repeat(8192))
+
+    const restarted = await startRelay({ MAX_TOTAL_UPLOAD_BYTES: '4096', MAX_ROOM_UPLOAD_BYTES: '4096' }, { uploadDir })
+    try {
+      // 关键回归：坏元数据既不触发删除，也不占用配额
+      expect(existsSync(join(brokenDir, 'leftover.bin'))).toBe(true)
+
+      const room = await createRoom(restarted.baseUrl, 'restore-quota-room')
+      const upload = await fetch(`${restarted.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: ENVELOPE_HEADERS,
+        body: envelopeBody({ name: 'ok.md', content: 'ok' })
+      })
+      // 外来 8KB 若被计入 4KB 的全局配额，这次上传必然 507
+      expect(upload.status).toBe(201)
+    } finally {
+      await restarted.stop()
     }
   }, 40000)
 }, 60000)

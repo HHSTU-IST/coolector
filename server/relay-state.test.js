@@ -198,3 +198,93 @@ describe('persistUpload', () => {
     ).rejects.toThrowError(TypeError)
   })
 })
+
+describe('serializeRoom / persistRoomMetadata（房间元数据持久化）', () => {
+  /** @param {string} roomId */
+  const makeRoomWithUpload = (roomId) => {
+    const { room } = state.createRoom(roomId)
+    room.uploads.set('meta-1', {
+      id: 'meta-1',
+      roomId: room.id,
+      name: '作业.md',
+      mimeType: 'text/markdown',
+      lastModified: new Date(0).toISOString(),
+      uploadedAt: new Date(0).toISOString(),
+      size: 42,
+      quotaBytes: 99,
+      text: '完整正文（不应出现元数据里）',
+      textTruncated: true,
+      previewText: '完整正文',
+      storagePath: join(uploadDir, room.id, 'meta-1-作业.md'),
+      storageFileName: 'meta-1-作业.md'
+    })
+    return room
+  }
+
+  it('元数据不含正文，但保留无法事后推导的截断信息与配额', () => {
+    const parsed = JSON.parse(state.serializeRoom(makeRoomWithUpload('unit-meta-serialize')))
+
+    expect(parsed.generator).toBe('coolector-relay')
+    expect(parsed.uploads).toHaveLength(1)
+    // 正文是字节的纯函数：写进元数据会让它随文本类作业线性膨胀
+    expect(parsed.uploads[0]).not.toHaveProperty('text')
+    expect(JSON.stringify(parsed)).not.toContain('完整正文（不应出现元数据里）')
+    // 这两项事后推导不出来（是上传那一刻的截断产物），必须持久化
+    expect(parsed.uploads[0].textTruncated).toBe(true)
+    expect(parsed.uploads[0].previewText).toBe('完整正文')
+    // 配额是复原依据：缺了它重启后配额会凭空变化
+    expect(parsed.uploads[0].quotaBytes).toBe(99)
+  })
+
+  it('persistRoomMetadata 落盘为可读回的合法 JSON', async () => {
+    const room = makeRoomWithUpload('unit-meta-persist')
+
+    await state.persistRoomMetadata(room)
+
+    const onDisk = JSON.parse(await readFile(join(uploadDir, room.id, state.ROOM_METADATA_FILENAME), 'utf8'))
+    expect(onDisk.roomId).toBe(room.id)
+    expect(onDisk.uploads[0].name).toBe('作业.md')
+  })
+
+  it('并发触发的多次写入被串行化（任何时刻只有一个写入在跑）', async () => {
+    // 每次写入都是「全量快照」，且共用同一个临时文件。若不排队，多个写入会同时写 tmp
+    // 并各自 rename，最终留下的是哪个快照就成了竞态 —— 可能少几条作业。
+    //
+    // 这里注入一个「会记录并发度」的替身来直接观测串行性：不注入的话，五次写入的
+    // serializeRoom 都发生在各自 await 之后，读到的都是「五次修改之后」的全量状态，
+    // 于是用例会因错误的理由通过（实测过）。
+    const { room } = state.createRoom('unit-meta-chain')
+
+    let active = 0
+    let maxActive = 0
+    const write = async () => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5)
+      })
+      active -= 1
+    }
+
+    await Promise.all(
+      ['c1', 'c2', 'c3', 'c4', 'c5'].map(() => state.persistRoomMetadata(room, { write }))
+    )
+
+    expect(maxActive).toBe(1)
+  })
+
+  it('落盘内容始终是当前完整快照', async () => {
+    const room = makeRoomWithUpload('unit-meta-snapshot')
+    room.uploads.set('meta-2', {
+      ...room.uploads.get('meta-1'),
+      id: 'meta-2',
+      name: 'second.md',
+      storageFileName: 'meta-2-second.md'
+    })
+
+    await state.persistRoomMetadata(room)
+
+    const onDisk = JSON.parse(await readFile(join(uploadDir, room.id, state.ROOM_METADATA_FILENAME), 'utf8'))
+    expect(onDisk.uploads.map((item) => item.id).sort()).toEqual(['meta-1', 'meta-2'])
+  })
+})
