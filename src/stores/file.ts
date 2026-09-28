@@ -60,6 +60,23 @@ export const MAX_FILE_SIZE = 10 * 1024 * 1024
 /** 文件总数上限，控制整体内存占用 */
 export const MAX_FILES = 200
 
+/**
+ * 全部文件体积之和上限。
+ *
+ * 单条 10MB × 200 条 ⇒ 理论上限 2GB，全部常驻前端堆（文本文件的 `content` 是解码后的
+ * 字符串、中继文件还有 `contentBase64`），足以让标签页直接 OOM。条数上限拦不住这种情形：
+ * 200 个 10MB 文件合法通过 `MAX_FILES`，却要吃掉 2GB。
+ *
+ * 取值与服务端 `MAX_ROOM_UPLOAD_BYTES` 的默认值（全局配额 1GB 的 1/8）一致 —— 本地装得下
+ * 的量本来也传不进一个房间，提前在本地拦下比上传到一半被 507 拒绝更友好。
+ *
+ * 记账口径是各文件的 `size`（原始字节）。它与真实堆占用有两处偏差，均偏向安全：
+ * ① 容器类文档（docx）只保留提取出的正文，按 `size` 计会**高估**；
+ * ② 中继接收来的文件以 base64 常驻（≈1.33×），按 `size` 计会**低估 33%**，
+ *    但该方向另有服务端房间配额逐房间兜底（见 `upsertRelayFile`）。
+ */
+export const MAX_TOTAL_SIZE = 128 * 1024 * 1024
+
 /** 压缩容器类文档（docx 是 zip），需解压后才有可读正文，不能直接按纯文本解码 */
 export const DOCUMENT_TEXT_EXTENSIONS = new Set(['docx'])
 
@@ -72,6 +89,16 @@ const UNSAFE_ALTERNATION = /\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\
 export const useFileStore = defineStore('file', () => {
     const files = ref<FileInfo[]>([])
     const selectedFile = ref<FileInfo | null>(null)
+
+    /**
+     * 已入列文件的体积之和（字节），与 `files` 严格同步。
+     *
+     * 本变量是**唯一**允许改动客户端体积计数的地方（对应服务端的 `relay-state.js`）。
+     * 它必须与 `files` 的增删同步更新，且**增量的检查与扣减之间不能插入 `await`** ——
+     * 否则并发 `addFile` 会同时读到旧值而击穿 `MAX_TOTAL_SIZE`（铁律 14，服务端曾因此
+     * 把 4MB 配额打到 8.39×）。
+     */
+    const usedBytes = ref(0)
     const filenamePattern = ref('^.+\\.(md|ipynb|docx)$')
     const filenamePatternError = ref('')
     const textFileExtensions = new Set([
@@ -249,6 +276,16 @@ export const useFileStore = defineStore('file', () => {
             return Promise.reject(new Error(`文件数量已达上限（${MAX_FILES} 个）：${file.name}`))
         }
 
+        if (usedBytes.value + file.size > MAX_TOTAL_SIZE) {
+            return Promise.reject(
+                new Error(`全部文件体积将超过 ${formatFileSize(MAX_TOTAL_SIZE)} 上限，请先删除部分文件：${file.name}`)
+            )
+        }
+
+        // 同步预占：`file.size` 无需读取内容即可得到，因此检查与扣减能完整落在 `await` 之前。
+        // 下面的 `arrayBuffer()` 一旦让出控制权，并发的第二个 `addFile` 就会看到已扣减的计数。
+        usedBytes.value += file.size
+
         return file.arrayBuffer().then(async (buffer) => {
             const hasTextContent = isTextFile(file)
             // 容器类文档先解压读正文；提取失败只影响预览，原始文件仍按 base64 完整上传
@@ -282,6 +319,10 @@ export const useFileStore = defineStore('file', () => {
 
             files.value.push(fileInfo)
             return fileInfo
+        }).catch((error: unknown) => {
+            // 入列失败须回滚预占，否则计数会随失败次数单调偏离真实占用（铁律 14 的回滚要求）
+            usedBytes.value -= file.size
+            throw error
         })
     }
 
@@ -315,6 +356,8 @@ export const useFileStore = defineStore('file', () => {
                 hasTextContent,
                 createdAt: existing.metadata.createdAt
             })
+            // 同一 uploadId 可能被重复 upsert（SSE 重连补发），按差值调整而非重复累加
+            usedBytes.value += file.size - existing.size
             existing.size = file.size
             existing.type = file.type
             existing.lastModified = normalizedLastModified
@@ -349,6 +392,10 @@ export const useFileStore = defineStore('file', () => {
             receivedAt
         }
 
+        // 中继侧刻意不设 `MAX_TOTAL_SIZE` 硬闸：单房间体积已由服务端 `MAX_ROOM_UPLOAD_BYTES`
+        // 约束，此处再加一道会在接收热路径上引入「可被中断的失败」。但仍参与记账，
+        // 因此中继文件会一并挤占本地收集的额度（总量口径统一）。
+        usedBytes.value += file.size
         files.value.unshift(fileInfo)
         return fileInfo
     }
@@ -357,7 +404,9 @@ export const useFileStore = defineStore('file', () => {
         const index = files.value.findIndex((item) => item.id === id)
         if (index === -1) return
 
-        files.value.splice(index, 1)
+        const [removed] = files.value.splice(index, 1)
+        // clamp 到 0：并发的启动回收等路径万一重复释放，也不至于把计数打成负数
+        usedBytes.value = Math.max(usedBytes.value - removed.size, 0)
         if (selectedFile.value?.id === id) {
             selectedFile.value = null
         }
@@ -373,6 +422,7 @@ export const useFileStore = defineStore('file', () => {
 
     return {
         files,
+        usedBytes,
         selectedFile,
         filenamePattern,
         filenamePatternError,

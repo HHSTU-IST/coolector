@@ -49,7 +49,13 @@
 
     <!-- 文件列表 -->
     <div v-if="fileStore.files.length > 0" class="mt-6">
-      <h3 class="text-lg font-medium text-gray-900 mb-4">已上传的文件</h3>
+      <div class="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 class="text-lg font-medium text-gray-900">已上传的文件</h3>
+        <p class="text-xs" :class="totalSizeNearLimit ? 'text-amber-600' : 'text-gray-500'">
+          {{ fileStore.files.length }} 个文件 · 合计 {{ formatFileSize(fileStore.usedBytes) }} / 上限
+          {{ formatFileSize(MAX_TOTAL_SIZE) }}
+        </p>
+      </div>
       <div class="space-y-2">
         <div v-for="file in fileStore.files" :key="file.id"
           class="flex flex-col gap-3 rounded-lg bg-gray-50 p-3 transition-colors hover:bg-gray-100 sm:flex-row sm:items-center sm:justify-between">
@@ -118,8 +124,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useFileStore } from '../stores/file'
+import { computed, ref } from 'vue'
+import { MAX_TOTAL_SIZE, useFileStore } from '../stores/file'
 import type { FileInfo } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
@@ -130,6 +136,9 @@ const collectionStore = useCollectionStore()
 const fileInput = ref<HTMLInputElement>()
 const collectionInput = ref<HTMLInputElement>()
 const filenamePatternInput = ref(String(fileStore.filenamePattern))
+
+/** 体积接近上限时把数字标黄，让「再传就装不下」在拒绝之前就可见 */
+const totalSizeNearLimit = computed(() => fileStore.usedBytes >= MAX_TOTAL_SIZE * 0.9)
 
 const formatExtractedInfo = (file: FileInfo) => {
   const studentId = file.metadata.studentId ? `学号: ${file.metadata.studentId}` : '学号: 未识别'
