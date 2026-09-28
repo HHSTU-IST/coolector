@@ -39,6 +39,11 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # 并发不变量：配额/槽位的「检查 + 扣减」之间不得出现 await（铁律 14）。
+      # 这类缺陷在测试里只能靠并发用例撞上，且一旦复发就是静默超配额（曾打到 8.39× / 10×）。
+      - name: Check concurrency invariants
+        run: pnpm check:atomic
+
       - name: Unit test
         run: pnpm test
 

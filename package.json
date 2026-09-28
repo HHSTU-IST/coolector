@@ -20,6 +20,7 @@
     "lint:fix": "oxlint --fix",
     "test": "vitest run",
     "e2e": "pnpm build && node scripts/e2e-upload.mjs",
+    "check:atomic": "node scripts/check-atomic-invariants.mjs",
     "guard:no-secret": "node scripts/check-no-secrets.mjs"
   },
   "dependencies": {

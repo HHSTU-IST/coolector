@@ -115,6 +115,9 @@ function getRoom(roomId) {
  * 检查与扣减必须**同步**完成：一旦中间插入 `await`，并发请求会全部读到旧值而击穿配额
  * （实测 32 并发可把 4MB 配额打到 8.39×）。返回值是回滚函数，落盘失败时必须调用。
  *
+ * @atomic `scripts/check-atomic-invariants.mjs` 会断言本函数体内（不含嵌套函数）没有 `await`。
+ *   要在这里做异步操作时，请把异步那半挪到调用方，不要挪进来。
+ *
  * @param {Room} room
  * @param {number} quotaBytes
  * @returns {() => void} 回滚函数（幂等且受 `room.destroyed` 短路）
@@ -146,6 +149,8 @@ function reserveStorageQuota(room, quotaBytes) {
  * 与配额同理：必须把「正在落盘中」的请求也计入，否则并发下每个请求都只看到
  * `uploads.size` 的旧值（实测限额 5、50 并发可全部通过）。成功落盘后调用返回的函数，
  * 此时 `uploads.size` 已经加过，`pendingUploads` 减回，账目守恒。
+ *
+ * @atomic 同 `reserveStorageQuota`：本函数体内不得出现 `await`（由静态检查断言）。
  *
  * @param {Room} room
  * @returns {() => void} 槽位释放函数（幂等）

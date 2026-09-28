@@ -94,6 +94,7 @@ pnpm run preview
 ```bash
 pnpm test                # 单元测试（vitest）
 pnpm lint                # oxlint，要求 0 warning / 0 error
+pnpm check:atomic        # 并发不变量：配额/槽位的检查与扣减之间不得出现 await
 pnpm exec vue-tsc -b     # 类型检查：src/ + vite.config.ts + server/ + shared/（pnpm build 已包含）
 pnpm build               # 生产构建
 pnpm guard:no-secret     # 断言构建产物中不含任何密钥（需先 build）
@@ -103,6 +104,12 @@ pnpm e2e                 # 真实浏览器端到端回归（会先 build）
 `server/` 与 `shared/` 是原生 JavaScript，由 `tsconfig.server.json` 的 `checkJs` + `strict` 纳入
 类型检查（生产代码全量受检；测试文件暂未纳入，理由见该配置内的注释）。因此给服务端函数补
 JSDoc `@param` / `@returns` 是这条门禁的要求，而不是可选修饰。
+
+`pnpm check:atomic` 是**本项目唯一反复复发的缺陷类**（配额 TOCTOU，曾把 4MB 房间打到 8.39×）
+的可执行防线：它用 TypeScript 编译器 API 解析 `server/relay-state.js`，断言
+`reserveStorageQuota` / `reserveUploadSlot` 的 JSDoc 带 `@atomic`、函数自身作用域内没有
+`await`、且配额计数字段只在白名单函数里被写入。规则与判别力测试见
+`scripts/check-atomic-invariants.mjs` 与 `server/relay-atomic-invariants.test.js`。
 
 `pnpm e2e` 需要本机有 Chromium：`pnpm exec playwright install chromium`，
 或用 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定已有的浏览器路径。
