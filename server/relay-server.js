@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
 import {
   contentDisposition,
-  decodeHeaderValue,
+  decodeUploadFileName,
   digestName,
   isLoopbackHost,
   isTextMimeType,
@@ -83,8 +83,16 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
     }
   }
 
-  // 裸 body 分支：正文即请求体，元信息放在头或查询参数里（curl 等非浏览器客户端）
-  const fileName = decodeHeaderValue(headers['x-relay-filename']) ?? query.get('name')
+  // 裸 body 分支：正文即请求体，元信息放在头或查询参数里（curl 等非浏览器客户端）。
+  //
+  // **查询串优先于请求头**。`?name=` 是唯一无歧义的通道：URLSearchParams 完成百分号解码，
+  // 且浏览器也构造得出；头通道受 ISO-8859-1 约束，只能靠 latin1 直传或百分号编码绕行。
+  // 这一顺序还有一层实用价值：文件名里**本来就含** `%XX` 时（如 `note%20f.md`），
+  // 头通道无法表达「这是字面量」，而 `?name=note%2520f.md` 可以精确指定。
+  const queryName = query.get('name')
+  const fileName = typeof queryName === 'string' && queryName.length > 0
+    ? queryName
+    : decodeUploadFileName(headers['x-relay-filename'])
   if (!fileName) {
     throw new HttpError(400, 'Missing file name')
   }

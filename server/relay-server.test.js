@@ -82,6 +82,7 @@ async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
 
   return {
     baseUrl,
+    port,
     uploadDir,
     logs,
     async stop({ keepUploadDir = false } = {}) {
@@ -264,13 +265,14 @@ describe('relay HTTP 层', () => {
   it('裸 body 不会被误判为信封（.json 文件照常上传）', async () => {
     const room = await createRoom(relay.baseUrl, 'raw-body-room')
     const jsonText = JSON.stringify({ name: '赵六', text: '正文本身就是 JSON' })
+    const fileName = 'zhao-20230104.json'
 
     // 关键：Content-Type 是 application/json，但**没有** X-Relay-Envelope 标志
     const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Relay-Filename': encodeURIComponent('赵六-20230104.json')
+        'X-Relay-Filename': fileName
       },
       body: jsonText
     })
@@ -278,6 +280,125 @@ describe('relay HTTP 层', () => {
     expect(response.status).toBe(201)
     const payload = await response.json()
     expect(payload.upload.size).toBe(Buffer.byteLength(jsonText))
+    // 回读文件名与正文：上一版只断言 status 与 size，正是这里让下面的百分号编码缺陷
+    // 带着一条空转断言活过了六轮审计（断言了 201 却没断言存下来的到底是什么）
+    expect(payload.upload.name).toBe(fileName)
+    expect(payload.upload.contentText).toBe(jsonText)
+  })
+
+  describe('裸 body 路径的文件名通道', () => {
+    const CHINESE_NAME = '赵六-20230104.md'
+    const PERCENT_ENCODED = encodeURIComponent(CHINESE_NAME)
+
+    async function uploadedNames(roomId) {
+      const state = await (await fetch(`${relay.baseUrl}/api/rooms/${roomId}`, { headers: authHeaders })).json()
+      return state.uploads.map((item) => item.name)
+    }
+
+    it('?name=<百分号编码> 还原为正确的中文文件名', async () => {
+      const room = await createRoom(relay.baseUrl, 'raw-name-query')
+      const body = '# 作业正文'
+
+      const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads?name=${PERCENT_ENCODED}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/markdown' },
+        body
+      })
+
+      expect(response.status).toBe(201)
+      const payload = await response.json()
+      expect(payload.upload.name).toBe(CHINESE_NAME)
+      expect(payload.upload.size).toBe(Buffer.byteLength(body))
+      expect(await uploadedNames(room.roomId)).toContain(CHINESE_NAME)
+    })
+
+    it('请求头里的百分号编码文件名也能还原（缺陷本体）', async () => {
+      const room = await createRoom(relay.baseUrl, 'raw-name-header-pct')
+
+      const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/markdown', 'X-Relay-Filename': PERCENT_ENCODED },
+        body: '# 作业正文'
+      })
+
+      expect(response.status).toBe(201)
+      expect((await response.json()).upload.name).toBe(CHINESE_NAME)
+    })
+
+    it('请求头里的原始 UTF-8 字节（curl 直发）仍按 latin1 还原', async () => {
+      const room = await createRoom(relay.baseUrl, 'raw-name-header-latin1')
+
+      // fetch 无法发送非 ASCII 头值（ByteString 约束），只能用 node:http 复现 curl 的直发行为
+      const response = await requestWithHost(relay.port, `/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/markdown',
+          'X-Relay-Filename': Buffer.from(CHINESE_NAME, 'utf8').toString('latin1')
+        },
+        body: '# 作业正文'
+      })
+
+      expect(response.status).toBe(201)
+      expect(JSON.parse(response.text).upload.name).toBe(CHINESE_NAME)
+    })
+
+    it('纯 ASCII 的 %XX 不被当作转义（不把合法文件名悄悄改掉）', async () => {
+      const room = await createRoom(relay.baseUrl, 'raw-name-literal')
+      const literal = 'note%20f.md'
+
+      const response = await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/markdown', 'X-Relay-Filename': literal },
+        body: 'x'
+      })
+
+      expect(response.status).toBe(201)
+      expect((await response.json()).upload.name).toBe(literal)
+    })
+
+    it('?name= 优先于请求头，且能表达「名字里本来就含 %XX」', async () => {
+      const room = await createRoom(relay.baseUrl, 'raw-name-precedence')
+      const literal = 'note%20f.md'
+
+      const response = await fetch(
+        `${relay.baseUrl}/api/rooms/${room.roomId}/uploads?name=${encodeURIComponent(literal)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/markdown', 'X-Relay-Filename': 'stale-header.md' },
+          body: 'x'
+        }
+      )
+
+      expect(response.status).toBe(201)
+      // 残留的头不会顶掉显式指定的名字 —— 这也正是「字面量 %XX」的逃生口
+      expect((await response.json()).upload.name).toBe(literal)
+    })
+
+    it('下载头按 RFC 6266 单次编码，不再二次编码', async () => {
+      const room = await createRoom(relay.baseUrl, 'raw-name-download')
+
+      // 走**请求头**的百分号编码通道：这条守的是「上传 → 落盘 → 下载头」整条链。
+      // 若改用 `?name=`，服务端拿到的本来就是 URLSearchParams 解好的值，缺陷会被绕过去。
+      const created = await (await fetch(
+        `${relay.baseUrl}/api/rooms/${room.roomId}/uploads`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/markdown', 'X-Relay-Filename': PERCENT_ENCODED },
+          body: '# 作业正文'
+        }
+      )).json()
+
+      const download = await fetch(
+        `${relay.baseUrl}/api/rooms/${room.roomId}/uploads/${created.upload.id}?download=1`,
+        { headers: authHeaders }
+      )
+
+      expect(download.status).toBe(200)
+      const disposition = download.headers.get('content-disposition')
+      expect(disposition).toContain(`filename*=UTF-8''${PERCENT_ENCODED}`)
+      // `%` → `%25` 是「名字里带着百分号串」的指纹：缺陷年代老师下载到的就是这种名字
+      expect(disposition).not.toContain('%25')
+    })
   })
 
   it('0 字节文件可上传（空 contentBase64 不被当作缺失）', async () => {

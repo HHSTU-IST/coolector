@@ -161,10 +161,61 @@ export function contentDisposition(fileName) {
 /**
  * Node 的 req.headers 按 latin1 解码，浏览器发来的 UTF-8 文件名会变成乱码。
  * 以 latin1 还原原始字节再按 UTF-8 解码；纯 ASCII 值经此转换保持不变。
+ *
+ * 注意这是**原语**，只做字节还原。裸 body 路径的上传文件名请用 `decodeUploadFileName`。
  */
 export function decodeHeaderValue(value) {
   if (typeof value !== 'string') return value
   return Buffer.from(value, 'latin1').toString('utf8')
+}
+
+/** 是否全部为可打印 ASCII（HTTP 头值在 latin1 通道下的正常形态） */
+function isPrintableAscii(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code < 0x20 || code > 0x7e) return false
+  }
+  return true
+}
+
+/** 是否含非 ASCII 码点（即「百分号转义确实承载了一个非 ASCII 文件名」） */
+function hasNonAscii(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) > 0x7f) return true
+  }
+  return false
+}
+
+/**
+ * 解析裸 body 上传路径里 `X-Relay-Filename` 头的文件名。
+ *
+ * 该头是一条 **latin1 通道**（HTTP 头只接受 ISO-8859-1），于是同一个文件名有两种到达方式：
+ * ① curl 之类客户端把 UTF-8 字节直接写进头里 —— latin1 还原即可；
+ * ② 浏览器 `fetch` 与多数脚本语言**无法**把非 ASCII 写进头值，因此改用百分号编码。
+ *
+ * 旧实现只做 ①，② 会被**静默**存成 `%E4%BD%9C...`：接收端看到乱码文件名，下载时
+ * `contentDisposition` 再把它二次编码（`%` → `%25`），老师拿到的是一个打不开的名字。
+ *
+ * 解码规则**刻意收窄**：只有「百分号转义解出来确实含非 ASCII 码点」时才采用解码结果。
+ * 纯 ASCII 的 `%XX`（`note%20f.md`、`a%2Fb.txt`）**原样保留** —— 那本来就是一个合法文件名，
+ * 自动解码等于把它悄悄改掉（正是本仓铁律禁止的「把非法值悄悄改成合法值」的反向版本：
+ * 把合法值悄悄改成另一个值）。残缺转义（`100%.txt`）同理，按字面量处理、不报错。
+ */
+export function decodeUploadFileName(value) {
+  const restored = decodeHeaderValue(value)
+  if (typeof restored !== 'string' || !restored) return restored
+
+  // 非 ASCII 说明 ① 已经还原完成；不含 `%XX` 则没有任何转义可解
+  if (!isPrintableAscii(restored) || !/%[0-9a-f]{2}/iu.test(restored)) return restored
+
+  let decoded
+  try {
+    decoded = decodeURIComponent(restored)
+  } catch {
+    return restored
+  }
+
+  return hasNonAscii(decoded) ? decoded : restored
 }
 
 export function isTextMimeType(mimeType, fileName) {

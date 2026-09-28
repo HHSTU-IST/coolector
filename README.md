@@ -271,6 +271,27 @@ GET /api/rooms/:roomId/uploads/:uploadId?download=1
 curl -H "Authorization: Bearer $RELAY_TOKEN" http://localhost:8787/api/rooms/<roomId>
 ```
 
+### 上传请求的两种形态
+
+`POST /api/rooms/:roomId/uploads` 接受两种请求体：
+
+- **JSON 信封**（前端走这条）：元信息都在 body 里，须**显式**带 `X-Relay-Envelope: 1`
+  —— 否则正文本身就是 JSON 的 `.json` / `.ipynb` 会被误判成信封。
+- **裸 body**（curl 等脚本客户端）：正文即文件内容，元信息走 URL 或请求头。
+
+裸 body 形态的文件名以 **`?name=<百分号编码的 UTF-8>` 为准**，其次才是 `X-Relay-Filename` 头：
+
+```bash
+# %E4%BD%9C%E4%B8%9A.docx 即「作业.docx」
+curl -X POST "http://localhost:8787/api/rooms/<roomId>/uploads?name=%E4%BD%9C%E4%B8%9A.docx" \
+  --data-binary @作业.docx
+```
+
+> HTTP 头值只接受 ISO-8859-1，所以 `X-Relay-Filename` 只适合 curl 直接写 UTF-8 字节的形态。
+> 该头**也**接受百分号编码，但**仅当解出来确实含非 ASCII 字符时**才解码 ——
+> `note%20f.md` 这类纯 ASCII 的 `%XX` 原样保留，不会被人为改成另一个文件名。
+> 文件名里**本来就含** `%XX` 时，用 `?name=` 写双重编码（`note%2520f.md`）精确表达。
+
 ### 鉴权模型（重要）
 
 - **接收端**持有管理密钥 `RELAY_TOKEN`：建房、查状态、签发 SSE 票据、删除房间都需要它。

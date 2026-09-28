@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   contentDisposition,
   decodeHeaderValue,
+  decodeUploadFileName,
   digestName,
   isLoopbackHost,
   isTextMimeType,
@@ -310,6 +311,39 @@ describe('decodeHeaderValue', () => {
 
   it('非字符串原样返回', () => {
     expect(decodeHeaderValue(undefined)).toBeUndefined()
+  })
+})
+
+describe('decodeUploadFileName', () => {
+  it('latin1 直传的 UTF-8 字节还原（curl 路径）', () => {
+    const latin1 = Buffer.from('赵六-20230104.json', 'utf8').toString('latin1')
+    expect(decodeUploadFileName(latin1)).toBe('赵六-20230104.json')
+  })
+
+  it('百分号编码还原（此前被静默存成 %E8%B5%B5… 的那条）', () => {
+    expect(decodeUploadFileName(encodeURIComponent('赵六-20230104.json'))).toBe('赵六-20230104.json')
+  })
+
+  it('纯 ASCII 的 %XX 原样保留 —— 不把合法文件名悄悄改掉', () => {
+    for (const literal of ['note%20f.md', 'a%2Fb.txt', 'v1%2E0.md']) {
+      expect(decodeUploadFileName(literal)).toBe(literal)
+    }
+  })
+
+  it('残缺转义按字面量处理，不抛错', () => {
+    for (const literal of ['100%.txt', '100%2.txt', '%zz.md', '%']) {
+      expect(decodeUploadFileName(literal)).toBe(literal)
+    }
+  })
+
+  it('非法 UTF-8 转义（%FF）按字面量处理', () => {
+    expect(decodeUploadFileName('%FF.md')).toBe('%FF.md')
+  })
+
+  it('纯 ASCII 名与缺失值不变', () => {
+    expect(decodeUploadFileName('report.md')).toBe('report.md')
+    expect(decodeUploadFileName('')).toBe('')
+    expect(decodeUploadFileName(undefined)).toBeUndefined()
   })
 })
 
