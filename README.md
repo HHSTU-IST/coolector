@@ -275,9 +275,12 @@ curl -H "Authorization: Bearer $RELAY_TOKEN" http://localhost:8787/api/rooms/<ro
 
 `POST /api/rooms/:roomId/uploads` 接受两种请求体：
 
-- **JSON 信封**（前端走这条）：元信息都在 body 里，须**显式**带 `X-Relay-Envelope: 1`
+- **裸 body（内置前端走这条）**：正文即文件原始字节，元信息走 URL 或请求头。**不做任何 base64**
+  —— 相比信封省掉 33% 带宽与客户端主线程上的编码开销。
+- **JSON 信封**：元信息与 base64 正文都在 body 里，须**显式**带 `X-Relay-Envelope: 1`
   —— 否则正文本身就是 JSON 的 `.json` / `.ipynb` 会被误判成信封。
-- **裸 body**（curl 等脚本客户端）：正文即文件内容，元信息走 URL 或请求头。
+  内置前端仅在**必须携带带外数据**时才用：`.docx` 的客户端提取正文（裸 body 没有位置放它），
+  以及中继接收来的文件（本地只剩 base64，没有原始字节）。
 
 裸 body 形态的文件名以 **`?name=<百分号编码的 UTF-8>` 为准**，其次才是 `X-Relay-Filename` 头：
 
@@ -303,7 +306,9 @@ curl -X POST "http://localhost:8787/api/rooms/<roomId>/uploads?name=%E4%BD%9C%E4
 
 > 变更影响：`POST /api/rooms/:roomId/uploads` 不再「上传即建房」。房间必须由接收端先创建，
 > 否则上传返回 404 —— 过去发送方落进没有接收端的房间等于进了黑洞，且允许自造房间号无限建房。
-> 升级顺序建议 **先前端后 Relay**（新前端会带 `X-Relay-Envelope` 标志，旧 Relay 也能正确解析）。
+> 升级顺序建议 **先前端后 Relay**：新前端默认走裸 body 且不带凭据，旧 Relay 本来就支持这条通道
+> （`?name=` 由 `URLSearchParams` 解码），因此不会出现「前端已升级、上传全失败」的窗口；
+> 反向（先 Relay 后前端）同样安全。
 
 > **公网部署**：Relay Server 是有状态服务，CI 只部署静态前端，**需自行托管才能公网可达**。
 > 完整部署清单（反向代理 / 环境变量 / 安全）见 [RELAY_DEPLOY.md](./RELAY_DEPLOY.md)。

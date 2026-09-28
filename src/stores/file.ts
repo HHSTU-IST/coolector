@@ -9,6 +9,16 @@ export interface FileInfo {
     id: string
     name: string
     content: string
+    /**
+     * 原始字节句柄（本地新增的文件才有）。
+     *
+     * 上传走裸 body 通道时直接把它当请求体 —— 不再预先转 base64。
+     * 这不是单纯的省内存：`File` 由浏览器持有、底层通常是磁盘上的文件，
+     * 而 base64 字符串是实打实的 JS 堆内存，10MB 文件要吃掉 13.3MB 且生成时阻塞主线程。
+     *
+     * 中继接收来的文件没有这个字段（服务端不回传原始字节），上传时退回 JSON 信封。
+     */
+    blob?: Blob
     contentBase64?: string
     hasTextContent: boolean
     filenameValidation: FileNameValidation
@@ -224,19 +234,6 @@ export const useFileStore = defineStore('file', () => {
         }
     }
 
-    const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
-        const bytes = new Uint8Array(buffer)
-        // 8KB 分块低于各引擎实参上限，避免一次性展开过多参数
-        const chunkSize = 0x2000
-        let binary = ''
-
-        for (let index = 0; index < bytes.length; index += chunkSize) {
-            binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
-        }
-
-        return btoa(binary)
-    }
-
     /** 容器类文档（docx）需解压才有正文，其他二进制格式返回 null */
     const extractContainerDocumentText = (fileName: string, buffer: ArrayBuffer) => {
         if (!DOCUMENT_TEXT_EXTENSIONS.has(getFileExtension(fileName))) return Promise.resolve(null)
@@ -265,7 +262,8 @@ export const useFileStore = defineStore('file', () => {
                 id: createFileId(),
                 name: file.name,
                 content,
-                contentBase64: arrayBufferToBase64(buffer),
+                // 只保留句柄，不做任何编码：base64 推迟到「确实要走信封」时再生成
+                blob: file,
                 hasTextContent,
                 filenameValidation: validateFileName(file.name),
                 metadata: extractFileMetadata({

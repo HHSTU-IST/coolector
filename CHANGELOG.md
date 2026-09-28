@@ -22,6 +22,20 @@
 
 ### Changed
 
+- **发送方上传默认改走「裸 body」通道，不再把文件包成 base64 JSON 信封**。前端此前对**所有**文件
+  都做 `arrayBufferToBase64` + `JSON.stringify` 再上传，代价是：10MB 文件在客户端主线程阻塞约
+  **212.7 ms**（编码 187.3 + 序列化 25.4）、请求体膨胀 **+33.3%**、服务端摄取劣化 **2.40×**
+  —— 端到端约 **5.6×** 的差距。这些代价原本只为绕开「HTTP 头只能 ISO-8859-1」，而裸 body 通道
+  早就支持 `?name=<百分号编码>`，只是前端没用它。
+  现在文件原始字节直接作为请求体（`File` 句柄不再预先编码），文件名走 `?name=`，
+  MIME 与修改时间走 `X-Relay-Mime-Type` / `X-Relay-Last-Modified`。
+  - 传输形态的选择与请求构造抽出为 `src/utils/relay-upload.ts`（纯函数，19 条用例直接断言请求形状）。
+  - **信封仅保留两处例外**：① docx —— 客户端提取的正文没有裸 body 的位置可放，只能随信封一起走；
+    ② 中继接收来的文件本地没有原始字节，只剩 base64。两处之外一律走裸 body。
+  - 旧版 Relay **无需同步升级**：`?name=` 由 `URLSearchParams` 解码，旧实现在这条通道上本来就是对的
+    （上一轮修的是 `X-Relay-Filename` 头通道）。
+  - 顺带的语义修正：上传字节限流此前按 base64 后的请求体计费，10MB 文件要占掉 13.33MB 额度；
+    现在按真实文件字节计费。
 - **`VITE_RELAY_URL` 的判据收敛为「http(s) 绝对地址」唯一形态**。同一个值此前有三个判据：
   CI 门禁（`deploy.yml` 的 `Validate VITE_RELAY_URL`）与构建守卫（`check-no-secrets.mjs`）只认
   绝对地址，而前端 `validateRelayUrl` 还放行同源相对路径 `/relay` —— 于是同一个值「本地构建得过、

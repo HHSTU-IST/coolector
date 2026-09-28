@@ -357,6 +357,24 @@ async function main() {
 
       check(`发送方上传 ${name} 返回 201`, uploadResponse.status() === 201, `HTTP ${uploadResponse.status()}`)
 
+      // ── 传输形态断言：只有这里能证明「裸 body」真的在用 ────────────────────
+      // 上面那条 201 与下面的中文名断言，**信封形态同样能满足** —— 不钉住形态的话，
+      // 前端哪天退回 base64 信封也不会有任何用例变红（正是上一轮文件名缺陷的教训）。
+      const sent = uploadResponse.request()
+      const sentUrl = sent.url()
+      const sentHeaders = sent.headers()
+
+      check(
+        `发送方 ${name} 走裸 body（不带信封标志）`,
+        sentHeaders['x-relay-envelope'] === undefined,
+        `x-relay-envelope=${sentHeaders['x-relay-envelope'] ?? '(无)'}`
+      )
+      check(
+        `发送方 ${name} 的 ?name= 逐字还原文件名且已百分号编码`,
+        new URL(sentUrl).searchParams.get('name') === name && [...sentUrl].every((char) => char.charCodeAt(0) < 0x80),
+        `${sentUrl.slice(sentUrl.indexOf('?name='))}`
+      )
+
       const isLarge = name.includes('20230105')
       await waitFor(async () => {
         const text = await viewer.innerText()
@@ -365,6 +383,28 @@ async function main() {
 
       const viewerText = await viewer.innerText()
       check(`发送方上传 ${name} 前端提示成功`, viewerText.includes('已发送到房间'), viewerText.split('\n').at(-1) ?? '')
+    }
+
+    // ── 2b. 「没有 base64 膨胀」由服务端计量证明 ───────────────────────────
+    // 浏览器侧拿不到 fetch 的请求体字节数（`request.headers()` 无 Content-Length，
+    // `postDataBuffer()` 返回 null，`sizes().requestBodySize` 恒为 0），所以只能看服务端。
+    // 审计日志把 `bodyBytes`（实际传输）与 `size`（解码后）并排记下 —— 二者相等即证明无膨胀，
+    // 信封形态下 `bodyBytes` 会是 `size` 的约 4/3 倍。按 `size` 匹配，因为各 fixture 体积互不相同。
+    const uploadAudits = relay.logs.join('')
+      .split('\n')
+      .filter((line) => line.includes('[relay][audit]'))
+      .map((line) => {
+        try { return JSON.parse(line.slice(line.indexOf('{'))) } catch { return null }
+      })
+      .filter((entry) => entry?.event === 'upload_created')
+
+    for (const [name, , buffer] of fixtures) {
+      const matched = uploadAudits.find((entry) => entry.size === buffer.length)
+      check(
+        `服务端收到的 ${name} 请求体等于文件字节数（无 base64 膨胀）`,
+        matched?.bodyBytes === buffer.length,
+        `bodyBytes=${matched?.bodyBytes ?? '(未匹配到审计记录)'} / 文件 ${buffer.length} 字节`
+      )
     }
 
     check('发送方页面无未捕获异常', senderPageErrors.length === 0, senderPageErrors.join(' | '))

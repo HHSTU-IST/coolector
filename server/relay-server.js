@@ -255,7 +255,11 @@ async function handleUpload(req, res, room, query) {
     roomId: room.id,
     nameLength: upload.name.length,
     nameDigest: digestName(upload.name),
-    size
+    size,
+    // `size` 是解码后的文件字节数，`bodyBytes` 是请求体实际传输的字节数。
+    // 两者在裸 body 通道下相等，在 JSON 信封下 bodyBytes ≈ size × 4/3 ——
+    // 把它们并排记下来，线上「传输是否还有 base64 膨胀」就是可观测的，而不是只能靠推断。
+    bodyBytes: body.length
   })
 
   // 201 响应里带上完整正文（发送方原本就能拿到），广播事件里只带元信息

@@ -103,6 +103,7 @@ import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
 import { formatDate, formatFileSize } from '../utils/format'
 import { DEFAULT_RELAY_URL, looksWeakRoomId, normalizeRelayUrl, validateRelayUrl, validateRoomId } from '../utils/relay'
+import { buildRelayUploadRequest } from '../utils/relay-upload'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -122,23 +123,6 @@ const roomIdHint = computed(() => {
 
 interface RelayUploadResponse {
   error?: string
-}
-
-/**
- * 信封里 `text` 字段的字节上限。
- * 服务端 `MAX_TEXT_BYTES` 默认 1MB 且会被钳制为不低于 256KB，这里取同一保守值 ——
- * 否则「接近 10MB 的 docx + 长提取正文」会把请求体顶到服务端上限之外，被误判 413。
- */
-const MAX_ENVELOPE_TEXT_BYTES = 256 * 1024
-
-/** 按 UTF-8 字节截断正文；`stream: true` 让不完整的多字节序列被丢弃而不是变成乱码 */
-const truncateEnvelopeText = (value: string) => {
-  const bytes = new TextEncoder().encode(value)
-  if (bytes.length <= MAX_ENVELOPE_TEXT_BYTES) return { text: value, truncated: false }
-  return {
-    text: new TextDecoder('utf-8').decode(bytes.subarray(0, MAX_ENVELOPE_TEXT_BYTES), { stream: true }),
-    truncated: true
-  }
 }
 
 const collectionItem = computed(() => {
@@ -204,35 +188,22 @@ const uploadSelectedFileToRelay = async () => {
 
     const selectedFile = fileStore.selectedFile
 
-    // 文件名一律放进 JSON 信封的 body：HTTP 头值只能是 ISO-8859-1，
-    // 把中文名放进请求头会让浏览器在请求出网前就抛 TypeError（主路径阻断）。
-    const envelope: Record<string, unknown> = {
+    // 传输形态的选择与请求构造都在 relay-upload.ts（纯函数，可单测断言请求形状）。
+    // 默认走裸 body：不做 base64、不拼 JSON，带宽 −33% 且无主线程阻塞。
+    const { url, init } = await buildRelayUploadRequest({
+      baseUrl,
+      roomId: targetRoomId,
       name: selectedFile.name,
-      mimeType: selectedFile.type || 'application/octet-stream',
-      lastModified: selectedFile.lastModified.toISOString(),
-      contentBase64: selectedFile.contentBase64
-    }
-    // 附上已提取的正文（如 docx），接收端无需自行解压即可预览。
-    // 按字节截断：信封同时装 contentBase64 与 text，正文过大就会顶穿服务端的请求体上限。
-    if (selectedFile.metadata.isExtractedText) {
-      const { text, truncated } = truncateEnvelopeText(selectedFile.content)
-      envelope.text = text
-      // 客户端截断必须上报：服务端的 textTruncated 只反映它自己那 1MB 的截断，
-      // 不报的话 256KB–1MB 区间两端都不会给用户任何提示（内容被静默丢掉）
-      if (truncated) envelope.textTruncatedByClient = true
-    }
+      mimeType: selectedFile.type,
+      lastModified: selectedFile.lastModified,
+      blob: selectedFile.blob,
+      contentBase64: selectedFile.contentBase64,
+      // docx 的提取正文没有裸 body 的位置可放，只能随信封一起走
+      extractedText: selectedFile.metadata.isExtractedText ? selectedFile.content : null
+    })
 
     // 发送方（学生）不持有接收端管理密钥：房间 ID 本身即能力凭据，故不发送 Authorization
-    const response = await fetch(`${baseUrl}/api/rooms/${encodeURIComponent(targetRoomId)}/uploads`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // 显式标志：服务端仅在此头存在时按 JSON 信封解析，
-        // 否则正文本身就是 JSON 的文件（.json/.ipynb）会被误判为信封
-        'X-Relay-Envelope': '1'
-      },
-      body: JSON.stringify(envelope)
-    })
+    const response = await fetch(url, init)
 
     const payload = await response.json().catch(() => null) as RelayUploadResponse | null
     if (!response.ok) {
