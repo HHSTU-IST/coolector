@@ -1,37 +1,42 @@
 import { ref, watch } from 'vue'
+import { parseRelayBaseUrl, RELAY_BASE_URL_REASON, type RelayBaseUrlReason } from '../../shared/relay-base-url.js'
 
 /** 构建期未配置时的回落地址（本机/局域网开发用；公网部署必须显式配置 VITE_RELAY_URL） */
 const FALLBACK_RELAY_URL = 'http://127.0.0.1:8787'
 
 /**
- * Relay 地址的合法形态：**http(s) 绝对地址**，唯一。
+ * 非法原因 → 可直接展示的错误文案。
  *
- * 原先还放行「同源绝对路径」（`/relay`，配 Vite dev 代理用），已于 2026-09-29 移除。
- * 理由：同一个值有三个判据 —— CI 门禁（`.github/workflows/deploy.yml` 的 `case` 块）、
- * 构建守卫（`scripts/check-no-secrets.mjs`）与本函数，只有这里认相对路径，于是出现
- * 「本地构建得过、CI 拒绝发布」的漂移。**改任一处须同时改另两处。**
+ * **判据本身不在这里**：`VITE_RELAY_URL`（前端构建期）与 `RELAY_PUBLIC_BASE_URL`（服务端运维项）
+ * 语义相同——都是「relay 的对外基址」——现已合并为 `shared/relay-base-url.js` 一份实现，
+ * 前后端共用。之所以还要这张表，是因为两端**措辞**不同（服务端打启动日志，这里给界面看）。
  *
- * 同域挂子路径的**部署形态仍然可行**，只是要写成绝对形式（`https://app.example.com/relay`）——
- * 下面的 `[^\s]+` 允许路径前缀，`resolveRelayUrl` 也按前缀拼接。
- *
- * 刻意拒绝两类会让「凭据打错地方」的值：
- * - `//evil.example` —— 协议相对地址，浏览器会把它解析成**外部主机**；
- * - `relay.example.com`（无 scheme）—— 会被当成页面相对路径，请求静默打到静态站自己身上。
+ * 唯一无法复用该模块的是 CI 门禁 `.github/workflows/deploy.yml` 的 shell `case` 块
+ * （语言不同）—— 改判据时它需一并核对。
  */
-const RELAY_URL_PATTERN = /^https?:\/\/[^\s]+$/iu
+const RELAY_URL_REASON_MESSAGES: Record<RelayBaseUrlReason, string> = {
+  empty: 'Relay 地址不能为空',
+  unparsable: 'Relay 地址必须是 http(s) 绝对地址（如 https://relay.example.com；同域子路径写成 https://app.example.com/relay）',
+  scheme: 'Relay 地址必须以 http:// 或 https:// 开头',
+  credentials: 'Relay 地址不能包含用户名或密码（如 https://user:pass@host）',
+  'query-or-hash': 'Relay 地址不能带查询串（?）或锚点（#）—— 后续拼接的路径会被吞掉'
+}
 
-/** 归一 Relay 地址：去首尾空白、查询串 / hash 与尾部斜杠（查询串会把后续拼接的路径吞进 query） */
-export const normalizeRelayUrl = (value: string) =>
-  value.trim().replace(/[?#][\s\S]*$/u, '').replace(/\/+$/u, '')
+/**
+ * 归一 Relay 地址：**只在形态合法时**返回归一值（去首尾空白与尾部斜杠、折叠点段、小写化
+ * scheme/host），否则返回空串。
+ *
+ * 与旧实现的关键区别：旧版对任何输入都无脑剥掉查询串与 hash —— 那是把非法值**悄悄改写成
+ * 合法值**（`https://a.example/?x=1` 被改成 `https://a.example` 后照样通过校验），判据形同虚设。
+ * 现在非法值一律交回 `validateRelayUrl` 报错，因此调用方必须**先校验、再归一**。
+ */
+export const normalizeRelayUrl = (value: string): string => parseRelayBaseUrl(value).value ?? ''
 
 /** 校验 Relay 地址形态。合法返回空串，否则返回可直接展示的错误文案。 */
 export const validateRelayUrl = (value: string): string => {
-  const normalized = normalizeRelayUrl(value)
-  if (!normalized) return 'Relay 地址不能为空'
-  if (!RELAY_URL_PATTERN.test(normalized)) {
-    return 'Relay 地址必须是 http(s) 绝对地址（如 https://relay.example.com；同域子路径写成 https://app.example.com/relay）'
-  }
-  return ''
+  const result = parseRelayBaseUrl(value)
+  if (result.ok || !result.reason) return ''
+  return RELAY_URL_REASON_MESSAGES[result.reason]
 }
 
 /**
@@ -91,8 +96,15 @@ export class UntrustedRelayUrlError extends Error {
  * 同源判定基于 `origin`（协议 + 主机 + 端口）——`http` 与 `https`、不同端口都视为跨源。
  */
 export const resolveRelayUrl = (target: string, baseUrl: string): string => {
-  const base = normalizeRelayUrl(baseUrl)
-  if (!base) throw new Error('未配置 Relay 地址')
+  // 变量名避开下面的 `parsedBase: URL`（那是解析 target 用的）
+  const baseResult = parseRelayBaseUrl(baseUrl)
+  // 「空」与「非法」必须分开报告：归一后两者都得到空串，若不在此区分，
+  // 一个写错的地址会被误报成「未配置」，用户按提示去填也永远填不对。
+  if (baseResult.reason === RELAY_BASE_URL_REASON.EMPTY) throw new Error('未配置 Relay 地址')
+  if (!baseResult.ok || baseResult.value === null) {
+    throw new UntrustedRelayUrlError(`配置的 Relay 地址不合法：${JSON.stringify(baseUrl)}`)
+  }
+  const base = baseResult.value
 
   // 反斜杠先归一为正斜杠：浏览器对 http(s) 会把 `\` 当 `/`，
   // 不归一的话 `/\evil.example` 这类写法可以绕过下面的「协议相对」判定。

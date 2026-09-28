@@ -5,6 +5,9 @@ import { basename } from 'node:path'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { BlockList, isIP } from 'node:net'
 import { StringDecoder } from 'node:string_decoder'
+// Relay 基址判据的**唯一**实现，与前端（src/utils/relay.ts）共用同一份。
+// 跨端共享是为了消除「同一个语义值、两套判据」的漂移，详见该模块头部说明。
+import { parseRelayBaseUrl } from '../shared/relay-base-url.js'
 
 /**
  * 解析正整数型环境变量。非法值**不静默回退**，而是返回 `ok:false` 让调用方 fail-closed 退出。
@@ -193,33 +196,16 @@ export function normalizeAllowedOrigins(raw) {
  * - 非法值 → `ok: false`，由调用方 fail-closed 退出（与 `parsePositiveInt` 同一套约定）
  * - 合法值 → 去掉尾部斜杠并保留可选路径前缀（反代常把 Relay 挂在子路径下）
  *
- * 刻意拒绝带用户名/密码、查询串或 hash 的值：凭据不该出现在配置的基址里，
- * 而查询串/hash 会让拼接出的资源地址语义错乱。
+ * 判定本身**不在本文件**：与前端 `VITE_RELAY_URL` 共用 `shared/relay-base-url.js`。
+ * 这两个值语义相同（都是「relay 的对外基址」），历史上各有一份实现且规则不同
+ * （前端用正则、还会静默剥掉查询串，服务端用 `new URL` 解析并拒绝查询串），
+ * 同一个地址可能「前端放行、服务端拒绝启动」或反之。现在只剩一处判据。
+ * 本函数只负责把共享结果映射成服务端惯用的返回形态，`raw` 供启动失败的日志使用。
  */
 export function parsePublicBaseUrl(raw) {
-  if (raw === undefined || raw === null || String(raw).trim() === '') {
-    return { ok: true, value: null }
-  }
-
-  const value = String(raw).trim()
-  const invalid = { ok: false, value: null, raw: value }
-
-  let parsed
-  try {
-    parsed = new URL(value)
-  } catch {
-    return invalid
-  }
-
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return invalid
-  if (parsed.username || parsed.password) return invalid
-  // 尾随的 `?` / `#` 解析后 search / hash 都是**空串**（falsy），只看解析结果会放行，
-  // 而保留原样的 `https://x/relay?` 会拼出 `.../relay?/api/x`（路径被吞进 query → 404）。
-  // 故按**原始输入**判定分隔符是否存在。
-  if (value.includes('?') || value.includes('#')) return invalid
-
-  // 返回规范化后的 href：避免「校验的串 ≠ 输出的串」（如 `http://x/../y` 实际是 `http://x/y`）
-  return { ok: true, value: parsed.href.replace(/\/+$/u, '') }
+  const result = parseRelayBaseUrl(raw)
+  if (!result.ok) return { ok: false, value: null, raw: result.raw }
+  return { ok: true, value: result.value }
 }
 
 /** 判断监听地址是否为回环地址（用于 fail-closed 鉴权启动检查） */

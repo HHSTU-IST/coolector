@@ -19,6 +19,18 @@
     前端直填 `http://127.0.0.1:8787` 即可，不必靠代理绕 CORS。
   - **同域挂子路径的部署形态不受影响**，只是地址要写成绝对形式
     （`VITE_RELAY_URL=https://app.example.com/relay`，反代把 `/relay/*` 重写到 relay 根路径）。
+- **`VITE_RELAY_URL` 与 `RELAY_PUBLIC_BASE_URL` 的判据合并为一份实现**：新增
+  `shared/relay-base-url.js`（纯 ESM、零依赖，浏览器与 Node 共用）。这两个值语义相同
+  （都是「relay 的对外基址」），此前却各有一份判据 —— 服务端用 `new URL` 解析并拒绝查询串，
+  前端用正则匹配并**静默剥掉**查询串，于是同一个地址可能「前端放行、服务端拒绝启动」或反之。
+  现在判定只有一处，`server/relay-utils.js` 与 `src/utils/relay.ts` 都退化为薄包装，
+  各自只保留措辞映射；守卫脚本 `scripts/check-no-secrets.mjs` 同步接入。
+  - 连带的语义收紧：`normalizeRelayUrl` 不再把非法值悄悄改写成合法值，非法一律返回空串，
+    调用方必须**先校验、再归一**（`useRelayReceiver.ts` 已按此调整顺序）。
+  - 顺带修掉一个真实缺口：发送方界面（`FileViewer.vue`）此前**只归一、不校验**，
+    写错的地址会被原样拼进请求 URL，打到静态站自己身上，表现为「上传成功」却谁也收不到。
+  - CI 门禁 `deploy.yml` 的 shell `case` 块因语言不同无法复用该模块，是唯一的人肉同步点
+    （已在两处注释里互相指名）。
 
 ## [1.0.1] - 2026-09-14
 

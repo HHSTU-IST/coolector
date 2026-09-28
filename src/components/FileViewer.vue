@@ -102,7 +102,7 @@ import { useFileStore } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
 import { formatDate, formatFileSize } from '../utils/format'
-import { DEFAULT_RELAY_URL, looksWeakRoomId, normalizeRelayUrl, validateRoomId } from '../utils/relay'
+import { DEFAULT_RELAY_URL, looksWeakRoomId, normalizeRelayUrl, validateRelayUrl, validateRoomId } from '../utils/relay'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -175,6 +175,15 @@ const uploadSelectedFileToRelay = async () => {
   if (!fileStore.selectedFile) {
     relayUploadError.value = true
     relayUploadMessage.value = '请先选择一个文件'
+    return
+  }
+
+  // 发送方这边原先只归一、不校验：写错的地址会被原样拼进请求 URL，
+  // 请求最终打到静态站自己身上而不是 relay，表现为「上传成功」却谁也收不到。
+  const relayUrlError = validateRelayUrl(relayUploadBaseUrl.value)
+  if (relayUrlError) {
+    relayUploadError.value = true
+    relayUploadMessage.value = relayUrlError
     return
   }
 

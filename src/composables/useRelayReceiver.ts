@@ -336,13 +336,16 @@ export function useRelayReceiver() {
     statusMessage.value = '正在创建房间并建立长连接...'
 
     try {
-      const baseUrl = normalizeRelayUrl(relayBaseUrl.value)
+      // 顺序要紧：**先校验原始输入，再归一**。归一对非法形态返回空串，
+      // 若先归一会把「带了查询串」这类明确的配置错误伪装成「地址没填」，提示失真。
       // 手填地址同样要校验：`relay.example.com` 这类无 scheme 的值会被当成页面相对路径，
       // 静默把请求打到静态站自己身上（构建期变量已在 relay.ts 模块加载期校验）
-      const relayUrlError = validateRelayUrl(baseUrl)
+      const relayUrlError = validateRelayUrl(relayBaseUrl.value)
       if (relayUrlError) {
         throw new Error(relayUrlError)
       }
+
+      const baseUrl = normalizeRelayUrl(relayBaseUrl.value)
 
       const targetRoomId = roomId.value.trim()
       const roomIdError = validateRoomId(targetRoomId, { allowEmpty: true })

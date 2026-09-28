@@ -46,10 +46,13 @@ jobs:
               uses: actions/checkout@v7
 
             # 变量存在时仍校验形态：非法值会在运行期被前端拒绝并回落，等于白发一版。
-            # 判据须与另两处**逐条一致**（改一处须同时改另两处）：
-            #   - 构建守卫 scripts/check-no-secrets.mjs 的 assertRelayUrlLooksSafe()
-            #   - 前端运行期 src/utils/relay.ts 的 RELAY_URL_PATTERN
-            # 三者都只接受 http(s) 绝对地址（同域子路径写成 https://app.example.com/relay 仍可，
+            #
+            # ⚠️ 这里是**唯一无法复用共享判据**的一处：前端运行期（src/utils/relay.ts）、
+            # 构建守卫（scripts/check-no-secrets.mjs）与服务端启动检查
+            # （server/relay-utils.js）现在都走 shared/relay-base-url.js 同一份实现，
+            # 而本步骤跑在 shell 里 import 不了 JS 模块。改共享判据的规则时，务必回来核对下面这段。
+            #
+            # 口径：只接受 http(s) 绝对地址（同域子路径写成 https://app.example.com/relay 仍可，
             # 裸相对路径 /relay 一律拒绝）。
             - name: Validate VITE_RELAY_URL
               env:

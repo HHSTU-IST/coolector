@@ -6,6 +6,7 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     globals: true,
-    include: ['src/**/*.test.ts', 'server/**/*.test.js']
+    // shared/ 是被前后端共同引用的判据模块，测试随实现同目录存放
+    include: ['src/**/*.test.ts', 'server/**/*.test.js', 'shared/**/*.test.js']
   }
 })

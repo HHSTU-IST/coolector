@@ -82,16 +82,31 @@ describe('resolveRelayUrl', () => {
   it('未配置 Relay 地址时报错', () => {
     expect(() => resolveRelayUrl('/api/x', '')).toThrow('未配置 Relay 地址')
   })
+
+  /**
+   * 「未配置」与「配置错」对应两种不同的用户动作：前者去填地址，后者去改地址。
+   * 归一后两者都得到空串，所以这里必须直接看判据结果来区分，不能只看归一值。
+   */
+  it('基址「空」与「形态非法」被区分：前者提示未配置，后者提示不合法', () => {
+    expect(() => resolveRelayUrl('/api/x', '   ')).toThrow('未配置 Relay 地址')
+    expect(() => resolveRelayUrl('/api/x', 'https://a.example/?x=1')).toThrow(UntrustedRelayUrlError)
+    expect(() => resolveRelayUrl('/api/x', 'https://a.example/?x=1')).toThrow(/不合法/u)
+  })
 })
 
 describe('normalizeRelayUrl', () => {
-  it('去掉首尾空白与尾部斜杠', () => {
+  it('合法地址归一：去首尾空白与尾部斜杠、折叠点段、小写化 scheme 与主机', () => {
     expect(normalizeRelayUrl('  http://a.example//  ')).toBe('http://a.example')
+    expect(normalizeRelayUrl('https://a.example/relay/')).toBe('https://a.example/relay')
+    expect(normalizeRelayUrl('HTTP://Relay.Example.COM')).toBe('http://relay.example.com')
   })
 
-  it('剥离查询串与 hash —— 否则后续拼接的路径会被吞进 query', () => {
-    expect(normalizeRelayUrl('https://a.example/relay?x=1#y')).toBe('https://a.example/relay')
-    expect(normalizeRelayUrl('https://a.example/?x=1')).toBe('https://a.example')
+  it('非法地址**不**被悄悄改写成合法值，而是返回空串（交回校验环节报错）', () => {
+    // 旧版会剥掉查询串后返回 `https://a.example`，让 validateRelayUrl 的判据形同虚设
+    expect(normalizeRelayUrl('https://a.example/relay?x=1#y')).toBe('')
+    expect(normalizeRelayUrl('https://a.example/?x=1')).toBe('')
+    expect(normalizeRelayUrl('relay.example.com')).toBe('')
+    expect(normalizeRelayUrl('   ')).toBe('')
   })
 })
 
@@ -100,8 +115,11 @@ describe('normalizeRelayUrl', () => {
  * 两类「凭据打错地方」的值必须被拒绝：协议相对地址（外部主机）、无 scheme 的裸域名
  * （会被当成页面相对路径，静默打到静态站自己身上）。
  *
- * 判据必须与 CI 门禁（`.github/workflows/deploy.yml`）和构建守卫
- * （`scripts/check-no-secrets.mjs`）**逐条一致**：三者都只接受 http(s) 绝对地址。
+ * 判定本身来自 `shared/relay-base-url.js`，与构建守卫（`scripts/check-no-secrets.mjs`）、
+ * 服务端启动检查（`server/relay-utils.js` 的 `parsePublicBaseUrl`）**共用同一份实现**；
+ * 这里断言的是「非法输入映射出的文案非空」，判定细节由 `shared/relay-base-url.test.js` 锁死。
+ * 唯一无法复用该模块的是 CI 门禁（`.github/workflows/deploy.yml`）的 shell `case` 块。
+ *
  * 曾经放行的同源相对路径 `/relay` 已移除，且**必须保持被拒绝** —— 若有人把它加回来，
  * 这里先失败，而不是等 CI 拒发版本时才发现。
  */
@@ -123,5 +141,12 @@ describe('validateRelayUrl', () => {
     expect(validateRelayUrl('javascript:alert(1)')).not.toBe('')
     expect(validateRelayUrl('data:text/html,x')).not.toBe('')
     expect(validateRelayUrl('   ')).not.toBe('')
+  })
+
+  it('拒绝带查询串 / hash / 凭据的地址（判定与服务端一致）', () => {
+    // 查询串会把后续拼接的路径吞进 query；基址里的凭据则会让同源判定失去意义
+    expect(validateRelayUrl('https://a.example/?x=1')).not.toBe('')
+    expect(validateRelayUrl('https://a.example/relay#')).not.toBe('')
+    expect(validateRelayUrl('https://user:pass@a.example')).not.toBe('')
   })
 })

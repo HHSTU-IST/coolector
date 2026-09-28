@@ -14,6 +14,7 @@ import { createReadStream, existsSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parseRelayBaseUrl } from '../shared/relay-base-url.js'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const DIST_DIR = join(ROOT, 'dist')
@@ -31,25 +32,25 @@ const MIN_SECRET_LENGTH = 8
 const SCAN_CHUNK_BYTES = 64 * 1024
 
 /**
- * 构建期注入的 Relay 地址合法形态。
+ * 构建期注入的 Relay 地址形态检查。
  *
  * 它不是密钥，所以不在密钥扫描范围内；但接收端**只会把凭据发往这一个源**，
  * 一个畸形的值（`//evil.example` 会指向外部主机、`relay.example.com` 会被浏览器
  * 当成页面自身路径）在构建期没有任何运行期校验能拦住 —— 只能在门禁里挡。
  *
- * 判据须与另两处**逐条一致**（改一处须同时改另两处）：
- * - CI 门禁：`.github/workflows/deploy.yml` 的 `Validate VITE_RELAY_URL` 步骤；
- * - 前端运行期：`src/utils/relay.ts` 的 `RELAY_URL_PATTERN`。
- * 三者都只接受 http(s) 绝对地址（同域子路径写成 `https://app.example.com/relay` 仍可）。
+ * 判据来自 `shared/relay-base-url.js`，与前端运行期、服务端启动检查**同一份实现**
+ * （同域子路径写成 `https://app.example.com/relay` 仍可，裸相对路径 `/relay` 一律拒绝）。
+ * 唯一的人肉同步点是 `.github/workflows/deploy.yml` 的 shell `case` 块 —— 它跑在 CI 的
+ * shell 里，无法 import 本模块。
  */
-const RELAY_URL_PATTERN = /^https?:\/\/[^\s/]+/iu
-
 function assertRelayUrlLooksSafe() {
   const value = (process.env.VITE_RELAY_URL ?? '').trim()
   if (!value) return
 
-  if (!RELAY_URL_PATTERN.test(value)) {
-    console.error(`[guard] ❌ VITE_RELAY_URL 必须是 http(s) 绝对地址，当前值为 ${JSON.stringify(value)}。`)
+  const result = parseRelayBaseUrl(value)
+  if (!result.ok) {
+    console.error(`[guard] ❌ VITE_RELAY_URL 必须是 http(s) 绝对地址，且不含凭据/查询串/hash。`)
+    console.error(`[guard]    当前值 ${JSON.stringify(value)}（原因码：${result.reason}）`)
     console.error('[guard]    例：VITE_RELAY_URL=https://relay.example.com')
     process.exit(1)
   }
