@@ -13,7 +13,17 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ATOMIC_INVARIANTS, checkAtomicInvariants } from '../scripts/check-atomic-invariants.mjs'
 
-/** 最小可编译的骨架：两个原子函数 + 一个允许写计数的具名函数 */
+/**
+ * 最小可编译的骨架：两个原子函数 + 一个允许写计数的具名函数
+ *
+ * @type {(options: {
+ *   quotaBody: string,
+ *   slotBody: string,
+ *   slotTag?: string,
+ *   slotName?: string,
+ *   extra?: string
+ * }) => string}
+ */
 const skeleton = ({ quotaBody, slotBody, slotTag = '@atomic', slotName = 'reserveUploadSlot', extra = '' }) => `
 const rooms = new Map()
 let totalStoredBytes = 0
@@ -48,6 +58,7 @@ async function persistUpload(upload, bytes) {
 ${extra}
 `
 
+/** @type {(source: string) => string[]} */
 const run = (source) => checkAtomicInvariants(source, 'fixture.js').problems
 
 describe('checkAtomicInvariants —— 基线', () => {

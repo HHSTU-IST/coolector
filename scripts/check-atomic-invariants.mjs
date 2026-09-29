@@ -50,12 +50,17 @@ const QUOTA_COUNTER_FIELDS = new Set(['storedBytes', 'pendingUploads', 'totalSto
  *
  * 用 `getLeadingCommentRanges` 而不是 `node.jsDoc`：后者只在 `setParentNodes` 为真时才有，
  * 且对「多段注释 / 注释与声明之间有空行」的行为更绕。
+ *
+ * @param {ts.SourceFile} sourceFile
+ * @param {ts.Node} node
+ * @returns {string}
  */
 function leadingComment(sourceFile, node) {
   const ranges = ts.getLeadingCommentRanges(sourceFile.text, node.getFullStart()) ?? []
   return ranges.map((range) => sourceFile.text.slice(range.pos, range.end)).join('\n')
 }
 
+/** @param {ts.Node} node */
 const isFunctionLike = (node) => (
   ts.isFunctionDeclaration(node)
   || ts.isFunctionExpression(node)
@@ -65,10 +70,17 @@ const isFunctionLike = (node) => (
   || ts.isSetAccessor(node)
 )
 
-/** 函数自身作用域内的 `await`（跳过嵌套函数体 —— 定义函数不让出控制权） */
+/**
+ * 函数自身作用域内的 `await`（跳过嵌套函数体 —— 定义函数不让出控制权）
+ *
+ * @param {ts.Node} root
+ * @returns {ts.Node[]}
+ */
 function ownScopeAwaits(root) {
+  /** @type {ts.Node[]} */
   const found = []
 
+  /** @param {ts.Node} node */
   const visit = (node) => {
     if (ts.isAwaitExpression(node)) found.push(node)
     if (node !== root && isFunctionLike(node)) return
@@ -79,7 +91,12 @@ function ownScopeAwaits(root) {
   return found
 }
 
-/** 一路向上找最近的**具名**函数（匿名箭头函数要回到定义它的那个具名函数） */
+/**
+ * 一路向上找最近的**具名**函数（匿名箭头函数要回到定义它的那个具名函数）
+ *
+ * @param {ts.Node} node
+ * @returns {string | null}
+ */
 function enclosingNamedFunction(node) {
   let current = node.parent
 
@@ -96,7 +113,12 @@ function enclosingNamedFunction(node) {
   return null
 }
 
-/** 赋值左侧是否为配额计数字段 */
+/**
+ * 赋值左侧是否为配额计数字段
+ *
+ * @param {ts.Expression} expression
+ * @returns {boolean}
+ */
 function isQuotaCounterTarget(expression) {
   if (ts.isPropertyAccessExpression(expression)) return QUOTA_COUNTER_FIELDS.has(expression.name.text)
   if (ts.isElementAccessExpression(expression)) {
@@ -107,6 +129,7 @@ function isQuotaCounterTarget(expression) {
   return false
 }
 
+/** @param {ts.SyntaxKind} kind */
 const isAssignmentOperator = (kind) => (
   kind === ts.SyntaxKind.EqualsToken
   || kind === ts.SyntaxKind.PlusEqualsToken
@@ -120,13 +143,16 @@ const isAssignmentOperator = (kind) => (
  */
 export function checkAtomicInvariants(source, fileName = 'relay-state.js') {
   const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext, true)
+  /** @type {string[]} */
   const problems = []
 
+  /** @param {ts.Node} node */
   const at = (node) => {
     const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
     return `${fileName}:${line + 1}:${character + 1}`
   }
 
+  /** @type {Map<string, ts.FunctionDeclaration>} */
   const declarations = new Map()
   for (const statement of sourceFile.statements) {
     if (ts.isFunctionDeclaration(statement) && statement.name) declarations.set(statement.name.text, statement)
@@ -158,6 +184,7 @@ export function checkAtomicInvariants(source, fileName = 'relay-state.js') {
   }
 
   // —— 检查 3：配额计数的写入点 ——
+  /** @param {ts.Node} node */
   const visit = (node) => {
     if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind) && isQuotaCounterTarget(node.left)) {
       const owner = enclosingNamedFunction(node)

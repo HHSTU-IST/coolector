@@ -12,10 +12,47 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+/**
+ * 模块命名空间。`relay-config` 在**模块加载时**读环境变量，故只能动态 import（见 `beforeAll`），
+ * 类型因此无法由初始化式推断 —— 在这里显式声明，否则全部约 47 处 `state.*` 都是隐式 `any`。
+ *
+ * @type {typeof import('./relay-state.js')}
+ */
 let state
+/** @type {string} */
 let uploadDir
 
 const failingRemove = () => Promise.reject(new Error('injected remove failure'))
+
+/**
+ * `Upload` 替身工厂：只传关心的字段，其余给中性默认值。
+ *
+ * 为什么要「完整」而不是只写用到的几个字段：`Upload` 是生产侧的真实契约，少写字段会让夹具在
+ * **契约新增必填项时静默失真**（测试照旧通过，但它已经不是一份合法输入）。集中在一处构造，
+ * 契约一变就只有这一处报错。
+ *
+ * 它在**调用时**才读 `uploadDir`（该变量由 `beforeAll` 赋值，模块求值期仍是 undefined），
+ * 因此放在模块顶层是安全的。
+ *
+ * @param {Partial<import('./relay-state.js').Upload>} [overrides]
+ * @returns {import('./relay-state.js').Upload}
+ */
+const makeUpload = (overrides = {}) => ({
+  id: 'u1',
+  roomId: 'r1',
+  name: 'a.md',
+  mimeType: 'text/markdown',
+  size: 10,
+  uploadedAt: new Date(0).toISOString(),
+  lastModified: new Date(0).toISOString(),
+  quotaBytes: 0,
+  text: null,
+  textTruncated: false,
+  previewText: null,
+  storagePath: join(uploadDir, 'secret', 'u1-a.md'),
+  storageFileName: 'u1-a.md',
+  ...overrides
+})
 
 beforeAll(async () => {
   uploadDir = await mkdtemp(join(tmpdir(), 'coolector-state-'))
@@ -79,15 +116,19 @@ describe('reserveUploadSlot', () => {
       try {
         fills.push(state.reserveUploadSlot(room))
       } catch (error) {
-        expect(error.statusCode).toBe(429)
-        expect(error.message).toMatch(/upload count limit/u)
+        // 生产代码抛的是带 statusCode 的 Error；`catch` 绑定在 strict 下为 unknown，显式收窄
+        const failure = /** @type {Error & { statusCode: number }} */ (error)
+        expect(failure.statusCode).toBe(429)
+        expect(failure.message).toMatch(/upload count limit/u)
         break
       }
       if (i > 5000) throw new Error('未能在合理次数内触顶')
     }
 
     // 释放一个槽位后应当可以再占
-    fills.pop()()
+    const release = fills.pop()
+    if (!release) throw new Error('未取到待释放的槽位')
+    release()
     expect(() => state.reserveUploadSlot(room)).not.toThrow()
   })
 })
@@ -121,21 +162,6 @@ describe('destroyRoom 的错误隔离', () => {
 })
 
 describe('uploadSummary', () => {
-  // 夹具必须在 beforeAll 之后构造：`uploadDir` 由 beforeAll 赋值，模块求值期还是 undefined
-  const makeUpload = () => ({
-    id: 'u1',
-    roomId: 'r1',
-    name: 'a.md',
-    mimeType: 'text/markdown',
-    size: 10,
-    uploadedAt: new Date(0).toISOString(),
-    lastModified: new Date(0).toISOString(),
-    previewText: null,
-    text: null,
-    storagePath: join(uploadDir, 'secret', 'u1-a.md'),
-    storageFileName: 'u1-a.md'
-  })
-
   it('不暴露服务端存储路径与文件名', () => {
     const summary = state.uploadSummary(makeUpload())
 
@@ -179,13 +205,16 @@ describe('uploadSummary', () => {
 describe('persistUpload', () => {
   it('接收 Buffer 并逐字节落盘', async () => {
     const { room } = state.createRoom('unit-persist-room')
-    const upload = { id: 'persist-1', roomId: room.id, name: 'raw.bin' }
+    const upload = makeUpload({ id: 'persist-1', roomId: room.id, name: 'raw.bin' })
     const bytes = Buffer.from([0x00, 0x80, 0xff, 0x0a])
 
     await state.persistUpload(upload, bytes)
 
-    expect(Buffer.from(await readFile(upload.storagePath)).equals(bytes)).toBe(true)
-    expect(upload.storageFileName).toBe('persist-1-raw.bin')
+    // `storagePath` / `storageFileName` 是 `persistUpload` 的**产物**（它写入而非读取），
+    // 而 `Upload` 上它们是可选字段 —— 这里收窄为必填，好让下面的读盘断言拿到确切的路径类型。
+    const persisted = /** @type {{ storagePath: string, storageFileName: string }} */ (upload)
+    expect(Buffer.from(await readFile(persisted.storagePath)).equals(bytes)).toBe(true)
+    expect(persisted.storageFileName).toBe('persist-1-raw.bin')
   })
 
   it('传 base64 字符串 fail-fast，不静默写出一份坏文件', async () => {
@@ -194,7 +223,11 @@ describe('persistUpload', () => {
     const { room } = state.createRoom('unit-persist-guard-room')
 
     await expect(
-      state.persistUpload({ id: 'persist-2', roomId: room.id, name: 'x.txt' }, 'aGk=')
+      state.persistUpload(
+        makeUpload({ id: 'persist-2', roomId: room.id, name: 'x.txt' }),
+        // 同样**故意违约**：`bytes` 声明为 Buffer，而这里要验的正是「收到 base64 字符串必须 fail-fast」
+        /** @type {any} */ ('aGk=')
+      )
     ).rejects.toThrowError(TypeError)
   })
 })
@@ -241,6 +274,7 @@ describe('serializeRoom / persistRoomMetadata（房间元数据持久化）', ()
 
     await state.persistRoomMetadata(room)
 
+    /** @type {{ uploads: { id: string }[] }} */
     const onDisk = JSON.parse(await readFile(join(uploadDir, room.id, state.ROOM_METADATA_FILENAME), 'utf8'))
     expect(onDisk.roomId).toBe(room.id)
     expect(onDisk.uploads[0].name).toBe('作业.md')
@@ -275,8 +309,10 @@ describe('serializeRoom / persistRoomMetadata（房间元数据持久化）', ()
 
   it('落盘内容始终是当前完整快照', async () => {
     const room = makeRoomWithUpload('unit-meta-snapshot')
+    // `Map.get` 的类型含 undefined；meta-1 是夹具刚写入的，此处断言其存在（取不到即夹具坏了）
+    const base = /** @type {import('./relay-state.js').Upload} */ (room.uploads.get('meta-1'))
     room.uploads.set('meta-2', {
-      ...room.uploads.get('meta-1'),
+      ...base,
       id: 'meta-2',
       name: 'second.md',
       storageFileName: 'meta-2-second.md'
@@ -284,6 +320,7 @@ describe('serializeRoom / persistRoomMetadata（房间元数据持久化）', ()
 
     await state.persistRoomMetadata(room)
 
+    /** @type {{ uploads: { id: string }[] }} */
     const onDisk = JSON.parse(await readFile(join(uploadDir, room.id, state.ROOM_METADATA_FILENAME), 'utf8'))
     expect(onDisk.uploads.map((item) => item.id).sort()).toEqual(['meta-1', 'meta-2'])
   })

@@ -70,8 +70,12 @@ describe('extractDocxText', () => {
   })
 
   it('非 Buffer 入参返回 null（fail-closed，不静默产出空正文）', () => {
-    expect(extractDocxText(undefined)).toBeNull()
-    expect(extractDocxText('<w:p><w:t>x</w:t></w:p>')).toBeNull()
+    // 这两行**故意违反** `extractDocxText` 声明的 `Buffer` 契约：该守卫服务的是
+    // 「上游把非字节值递进来」的运行时场景，而调用点的静态契约仍应保持 `Buffer`。
+    // 故用显式断言表达「此处刻意违约」，而不是把生产签名放宽成 `unknown` —— 后者会
+    // 让所有真实调用点一并失去检查，为了一行测试牺牲整个函数的检查力。
+    expect(extractDocxText(/** @type {any} */ (undefined))).toBeNull()
+    expect(extractDocxText(/** @type {any} */ ('<w:p><w:t>x</w:t></w:p>'))).toBeNull()
   })
 
   it('正文为空白段落时返回 null，交由调用方按二进制处理', () => {

@@ -62,9 +62,14 @@ function assertRelayUrlLooksSafe() {
  * 分块是为了不把超大文件整体读进内存；窗口重叠保证**跨块边界**的密钥也能被发现。
  * 原先这里是 `size > 20MB 则 continue` —— 那是 fail-open：实测一个 21MiB 含密钥的产物
  * 能让守卫静默通过（exit 0），且该文件连分母都不计入。
+ *
+ * @param {string} file
+ * @param {{ label: string, value: string }[]} needles
+ * @returns {Promise<Set<string>>} 命中的 needle 标签（label 而非 value —— value 是密钥本身，不得外泄）
  */
 async function scanForHits(file, needles) {
   const window = Math.max(0, Math.max(...needles.map((needle) => needle.value.length), 1) - 1)
+  /** @type {Set<string>} */
   const hits = new Set()
   let tail = ''
 
@@ -82,6 +87,10 @@ async function scanForHits(file, needles) {
   return hits
 }
 
+/**
+ * @param {string} path
+ * @returns {Promise<Map<string, string>>}
+ */
 async function parseEnvFile(path) {
   const map = new Map()
   if (!existsSync(path)) return map
@@ -104,6 +113,10 @@ async function parseEnvFile(path) {
   return map
 }
 
+/**
+ * @param {string} dir
+ * @returns {AsyncGenerator<string>}
+ */
 async function* walk(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name)

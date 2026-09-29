@@ -28,6 +28,10 @@ const CRC_TABLE = (() => {
   return table
 })()
 
+/**
+ * @param {Uint8Array} bytes 待校验的字节（`Buffer` 亦是 `Uint8Array`）
+ * @returns {number}
+ */
 function crc32(bytes) {
   let crc = 0xffffffff
 
