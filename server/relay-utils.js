@@ -442,8 +442,17 @@ export function parseTrustedProxies(raw) {
  *
  * - socket 地址**不在**可信代理网段内（默认情况）→ 用 socket 地址并忽略 `X-Forwarded-For`：
  *   该头由调用方任意伪造，直连时采信它等于把限流桶的分配权交给攻击者（可无限换桶绕过）。
- * - socket 地址命中可信代理 → 取 `X-Forwarded-For` 里**最左**的合法 IP（最左 = 最初的客户端），
- *   非法/缺失时回退到 socket 地址，绝不把任意字符串当 IP 用。
+ * - socket 地址命中可信代理 → 从 `X-Forwarded-For` 的**最右端向左**逐跳回退，跳过仍属可信网段的
+ *   跳，取第一个**不可信**的合法 IP；非法段跳过，全部跳尽（或全无可信跳之外的段）时回退 socket 地址。
+ *
+ *   ⚠️ 为何不能取**最左**值：多跳代理普遍采用「追加」语义（nginx 的
+ *   `$proxy_add_x_forwarded_for` 展开为 `$http_x_forwarded_for, $remote_addr`），最左段恰好是
+ *   客户端自己塞进去的、可任意伪造的那一段 —— 采信它等于把「换桶权」交给攻击者。而最右段一定
+ *   由链上某个可信代理写入（写的是它的直接对端），因此「从右往左跳过可信跳、停在第一个不可信
+ *   地址」得到的就是最靠近本服务、且已被可信代理见证过的真实来源。
+ *
+ *   前提：`RELAY_TRUSTED_PROXIES` 只覆盖**代理自身**网段，**不得包含客户端地址段** ——
+ *   否则真实客户端也会被当成可信跳一并跳过，退回到伪造值（见 `RELAY_DEPLOY.md` §4.1）。
  *
  * @param {import('node:net').BlockList} trustedProxies
  * @returns {(req: import('node:http').IncomingMessage) => string}
@@ -458,12 +467,20 @@ export function makeClientIpResolver(trustedProxies) {
       return socketAddress
     }
 
-    const forwarded = String(req.headers?.['x-forwarded-for'] ?? '')
+    const hops = String(req.headers?.['x-forwarded-for'] ?? '')
       .split(',')
       .map((part) => part.trim())
-      .find((part) => isIP(part) !== 0)
 
-    return forwarded ?? socketAddress
+    for (let index = hops.length - 1; index >= 0; index -= 1) {
+      const hop = hops[index]
+      const hopFamily = isIP(hop)
+      // 非法段无法充当分桶键（绝不把任意字符串当 IP 用）；仍属可信代理的跳继续左移
+      if (hopFamily === 0) continue
+      if (trustedProxies.check(hop, hopFamily === 4 ? 'ipv4' : 'ipv6')) continue
+      return hop
+    }
+
+    return socketAddress
   }
 }
 

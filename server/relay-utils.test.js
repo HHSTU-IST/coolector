@@ -508,13 +508,29 @@ describe('parseTrustedProxies / makeClientIpResolver', () => {
     expect(resolverFor('')(req('203.0.113.7', '1.2.3.4'))).toBe('203.0.113.7')
   })
 
-  it('socket 命中可信代理时取 XFF 最左的合法 IP（最左 = 最初的客户端）', () => {
+  it('socket 命中可信代理时从右往左取第一个不可信 IP（跳过可信跳）', () => {
     const resolve = resolverFor('10.0.0.0/8')
     expect(resolve(req('10.0.0.9', '203.0.113.7, 10.0.0.9'))).toBe('203.0.113.7')
     expect(resolve(req('10.0.0.9', 'not-an-ip, 203.0.113.7'))).toBe('203.0.113.7')
-    // 没有合法 XFF 时回退 socket 地址，绝不把任意字符串当 IP 用
+    // 没有可用 XFF 时回退 socket 地址，绝不把任意字符串当 IP 用
     expect(resolve(req('10.0.0.9', 'garbage'))).toBe('10.0.0.9')
     expect(resolve(req('10.0.0.9'))).toBe('10.0.0.9')
+  })
+
+  it('追加式 XFF 下取真实客户端：伪造的最左值换不掉桶', () => {
+    const resolve = resolverFor('10.0.0.0/8')
+    // 单代理追加形态：客户端伪造 9.9.9.9，代理在右侧追加它见证到的直接对端
+    expect(resolve(req('10.0.0.9', '9.9.9.9, 203.0.113.7'))).toBe('203.0.113.7')
+    // 多级可信代理链：连续跳过可信跳后停在真实客户端
+    expect(resolve(req('10.0.0.2', '9.9.9.9, 203.0.113.7, 10.0.0.1'))).toBe('203.0.113.7')
+    // 攻击者把可信网段内的地址也塞进 XFF：仍在最右侧的真实来源处停下
+    expect(resolve(req('10.0.0.9', '9.9.9.9, 203.0.113.7, 10.0.0.1, 10.0.0.2'))).toBe('203.0.113.7')
+  })
+
+  it('XFF 全是可信跳或全是非法段时回退 socket 地址', () => {
+    const resolve = resolverFor('10.0.0.0/8')
+    expect(resolve(req('10.0.0.9', '10.0.0.1, 10.0.0.2'))).toBe('10.0.0.9')
+    expect(resolve(req('10.0.0.9', ', , '))).toBe('10.0.0.9')
   })
 
   it('双栈监听下的 IPv4-mapped 地址也能命中 IPv4 网段', () => {

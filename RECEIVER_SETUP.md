@@ -165,7 +165,7 @@ ngrok 域名出现在**两个**地方，都必须是同一个值：
 | ngrok 立即报 `ERR_NGROK_9009`         | 免费档不支持在 HTTP 代理下运行；起隧道前清掉 `HTTP_PROXY`/`HTTPS_PROXY`（见 §1）                                                |
 | Web 隧道访问返回 403                  | Vite 默认拦截非 localhost 的 Host 头；已在 `vite.config.ts` 放行 ngrok 域名后缀，换用其他隧道域名需同步加                       |
 | 回调地址是 `http://` 导致混合内容被拦 | 接收端界面里填的 Relay 地址应是 `https://…`。服务端只返回相对路径、由前端按该地址解析，因此无需 `RELAY_TRUST_PROXY` 之类的开关  |
-| SSE 收不到事件                        | 穿透层缓冲了流；ngrok 实测**不缓冲**（上传→事件约 670ms），若套 Nginx 需关闭 `proxy_buffering`（见 `RELAY_DEPLOY.md` §4）         |
+| SSE 收不到事件                        | 穿透层缓冲了流；ngrok 实测**不缓冲**（约 670ms）。套 Nginx 通常无需关 `proxy_buffering`（见 `RELAY_DEPLOY.md` §4.1）              |
 
 ## 8. 附：双隧道形态需要 2 个域名
 

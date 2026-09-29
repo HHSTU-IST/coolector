@@ -91,6 +91,8 @@ const PUBLIC_BASE_URL = (() => {
 
 // 可信反向代理网段（IP / CIDR，逗号分隔）。只有来自这些网段的请求才会按 `X-Forwarded-For`
 // 分桶 —— 反代后 socket 地址恒为代理 IP，不声明它就等于全站共用一个限流桶。
+// 分桶取 XFF **最右端向左**第一个不可信地址（跳过落在本网段内的跳）；因此这里**只能填代理自身
+// 网段** —— 把客户端地址段也写进来，会让真实客户端被当作可信跳跳过、退回到可伪造的最左值。
 // 非法条目 fail-closed：静默忽略会让运维以为「已按客户端分桶」，实际仍在共用一个桶。
 const TRUSTED_PROXIES_RESULT = parseTrustedProxies(process.env.RELAY_TRUSTED_PROXIES)
 if (TRUSTED_PROXIES_RESULT.invalid.length > 0) {
