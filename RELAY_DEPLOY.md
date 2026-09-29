@@ -274,10 +274,14 @@ curl -s -D- -o /dev/null -H 'Origin: https://<org>.github.io' https://relay.exam
 > 推荐「子域」模式：`relay.example.com` 独立反代 relay，`app.example.com` 托管前端。
 > 同域挂子路径同样可行，但地址**必须写成绝对形式**：`VITE_RELAY_URL=https://app.example.com/relay`，
 > 反代把 `/relay/*` 重写到 relay 的根路径。relay 自身不感知前缀，前缀由反代剥掉。
-> **不能**写成裸相对路径 `/relay` —— 前端运行期校验、`pnpm guard:no-secret` 与服务端启动检查
-> 现已共用同一份判据（`shared/relay-base-url.js`），都只接受 http(s) 绝对地址，
-> 且不接受凭据 / 查询串 / hash。CI 门禁（`deploy.yml` 的 `Validate VITE_RELAY_URL`）跑在 shell 里、
-> 无法复用该模块，是唯一需人肉同步的一处，口径与它相同：相对写法会在发布链路上被直接拒绝。
+> **不能**写成裸相对路径 `/relay` —— 前端运行期校验、`pnpm guard:no-secret`、服务端启动检查
+> 与构建期门禁（`deploy.yml` 的 `Validate VITE_RELAY_URL` → `scripts/check-relay-url.mjs`）
+> 现已**共用同一份判据**（`shared/relay-base-url.js`），都只接受 http(s) 绝对地址，
+> 且不接受凭据 / 查询串 / hash。相对写法会在发布链路上被直接拒绝。
+>
+> 该门禁原先是 shell `case` 前缀匹配的独立副本（因语言不通无法复用共享模块），比共享判据**更宽**：
+> 带查询串 / hash / 凭据的值能过门禁、却被运行期判非法并回落到 `127.0.0.1`，
+> 表现为「流水线绿、发布成功、但站点谁也连不上」。现已改为 Node 脚本调用共享模块，副本已删除。
 
 ## 6. 安全清单（公网必做）
 

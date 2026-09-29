@@ -1,7 +1,7 @@
 {
   "name": "coolector",
   "private": true,
-  "version": "1.0.1",
+  "version": "2.0.0",
   "type": "module",
   "packageManager": "pnpm@11.21.0",
   "engines": {
@@ -21,7 +21,11 @@
     "test": "vitest run",
     "e2e": "pnpm build && node scripts/e2e-upload.mjs",
     "check:atomic": "node scripts/check-atomic-invariants.mjs",
-    "guard:no-secret": "node scripts/check-no-secrets.mjs"
+    "check:relay-url": "node scripts/check-relay-url.mjs",
+    "guard:no-secret": "node scripts/check-no-secrets.mjs",
+    "probe:chain": "node --env-file-if-exists=.env scripts/probes/tunnel-chain-probe.mjs",
+    "probe:sse": "node --env-file-if-exists=.env scripts/probes/tunnel-sse-probe.mjs",
+    "probe:xff": "node --env-file-if-exists=.env scripts/probes/tunnel-xff-probe.mjs"
   },
   "dependencies": {
     "pinia": "^3.0.4",
