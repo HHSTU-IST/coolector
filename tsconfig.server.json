@@ -19,12 +19,25 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["server/**/*.js", "shared/**/*.js"],
   /*
-   * 测试文件**暂不纳入**：relay-server.test.js / relay-utils.test.js 大量构造 mock 与匿名桩，
-   * 在 strict 下会报数百条「隐式 any」，且它们不决定任何运行时行为。
-   * 生产代码（约 1 995 行）在本配置下**已全量受检**；测试文件留作后续阶段
-   * （先给 mock 补类型，再删掉这条 exclude）。
+   * 纯 JS 类型门禁的**唯一**入口：覆盖 server/ + shared/ + scripts/，共 20 文件 / 7 618 行
+   * （行数为 2026-09-29 实测）。
+   *
+   * 口径：生产代码 3 153 行（server 非测试 2 993 + shared 160）早在门禁内；本批补上的是
+   * 测试 3 222 行与 scripts 1 243 行 —— 此前用 exclude 把它们挡在门外，理由记作
+   * 「数百条隐式 any，且不决定任何运行时行为」。
+   *
+   * 补类型时遵循两条，免得门禁退化成逐行 `@type` 的糊墙纸：
+   *
+   * ① **先定形状，再修点。** 给变量或返回类型一处 typedef，往往连带修好几十条：
+   *    relay-server.test.js 里仅 `RelayHarness` 一个 typedef 就消掉 145 条。
+   * ② **区分「有契约的形状」与「被断言的对象」。** `RelayHarness`、`UploadSummary` 由服务端
+   *    实现及其 `@returns` 定义，值得 typedef，且用类型层 `import()` 取而非手抄第二份
+   *    （手抄即「同一语义两个判据」，字段改名时两边漂移）。反过来，黑盒 HTTP 响应体的形状
+   *    **正是紧随其后的 `expect` 所要断言的东西**，给它写 typedef 等于把猜测固化成契约，
+   *    故只在 relay-server.test.js 保留 `readJson()` 这一个宽松边界。
+   *
+   * ⚠️ 后果（有意为之）：测试文件里的类型错误现在同样会挡住 `pnpm build` 与 CI。
    */
-  "exclude": ["server/**/*.test.js"]
+  "include": ["server/**/*.js", "shared/**/*.js", "scripts/**/*.mjs"]
 }

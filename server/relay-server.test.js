@@ -116,6 +116,16 @@ function splitEnv(env) {
  */
 
 /**
+ * 房间状态响应里 `uploads` 元素的形状。
+ *
+ * ⚠️ 这是**类型层**的 `import()`，不产生运行时依赖：本文件从不 import relay 的服务端模块，
+ * 而是把 relay 当子进程跑起来走真实 HTTP。之所以从这里取类型，是为了不再手写一份同形状的
+ * typedef —— 那属于「同一语义两个判据」（铁律 20 的同类问题），字段改名时两边会各自漂移。
+ *
+ * @typedef {ReturnType<typeof import('./relay-state.js').uploadSummary>} UploadSummary
+ */
+
+/**
  * 起一个真实 relay 进程；返回停止函数
  *
  * @param {Record<string, string | undefined>} [env]
@@ -174,7 +184,10 @@ async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
 /**
  * 组装上传请求体（JSON 信封）
  *
- * @param {{ name: string, mimeType?: string, content: string }} fields
+ * `content` 接受 `Buffer`：体积与配额类用例需要构造真二进制负载，而信封路径下
+ * `Buffer.from(content)` 对字符串与 Buffer 是同一条处理，故放宽度量而不必逐处 `toString()`。
+ *
+ * @param {{ name: string, mimeType?: string, content: string | Buffer }} fields
  * @returns {string}
  */
 function envelopeBody({ name, mimeType = 'text/markdown', content }) {
@@ -203,7 +216,7 @@ async function createRoom(baseUrl, roomId) {
     body: roomId ? JSON.stringify({ roomId }) : '{}'
   })
   expect(response.status).toBe(201)
-  return response.json()
+  return readJson(response)
 }
 
 /**
@@ -275,12 +288,15 @@ function requestWithHost(port, pathname, { method = 'GET', host, headers = {}, b
  * 它们的形状**正是被紧随其后的 `expect` 所断言的对象**。给它们编一套 typedef 只会得到一个
  * 未经任何验证的契约（假精确），反而掩盖「服务端改了形状而测试没跟上」这种真实的失效。
  *
- * 判据：某个响应若具有**稳定且被多处复用**的形状，就单独为它写 typedef（见 `createRoom`）。
+ * 判据：某个响应若具有**稳定且被多处复用**的形状，就单独为它写 typedef
+ * （本文件里成立的是 `createRoom` 的返回值与上面的 `UploadSummary`）。
+ *
+ * 不加 `async`：`response.json()` 本就是 Promise，再包一层会被 oxlint 判为多余的 async。
  *
  * @param {Response} response
  * @returns {Promise<any>}
  */
-async function readJson(response) {
+function readJson(response) {
   return response.json()
 }
 
@@ -387,8 +403,10 @@ describe('relay HTTP 层', () => {
       body: envelopeBody({ name, mimeType: 'application/octet-stream', content: 'binary-ish' })
     })
 
-    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
-    expect(state.uploads.map((item) => item.name)).toContain(name)
+    const state = await readJson(await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders }))
+    /** @type {UploadSummary[]} */
+    const uploads = state.uploads
+    expect(uploads.map((item) => item.name)).toContain(name)
   })
 
   it('裸 body 不会被误判为信封（.json 文件照常上传）', async () => {
@@ -407,7 +425,7 @@ describe('relay HTTP 层', () => {
     })
 
     expect(response.status).toBe(201)
-    const payload = await response.json()
+    const payload = await readJson(response)
     expect(payload.upload.size).toBe(Buffer.byteLength(jsonText))
     // 回读文件名与**落盘内容**：上一版只断言 status 与 size，正是这里让下面的百分号编码缺陷
     // 带着一条空转断言活过了六轮审计（断言了 201 却没断言存下来的到底是什么）。
@@ -422,9 +440,15 @@ describe('relay HTTP 层', () => {
     const CHINESE_NAME = '赵六-20230104.md'
     const PERCENT_ENCODED = encodeURIComponent(CHINESE_NAME)
 
+    /**
+     * @param {string} roomId
+     * @returns {Promise<string[]>}
+     */
     async function uploadedNames(roomId) {
-      const state = await (await fetch(`${relay.baseUrl}/api/rooms/${roomId}`, { headers: authHeaders })).json()
-      return state.uploads.map((item) => item.name)
+      const state = await readJson(await fetch(`${relay.baseUrl}/api/rooms/${roomId}`, { headers: authHeaders }))
+      /** @type {UploadSummary[]} */
+      const uploads = state.uploads
+      return uploads.map((item) => item.name)
     }
 
     it('?name=<百分号编码> 还原为正确的中文文件名', async () => {
@@ -438,7 +462,7 @@ describe('relay HTTP 层', () => {
       })
 
       expect(response.status).toBe(201)
-      const payload = await response.json()
+      const payload = await readJson(response)
       expect(payload.upload.name).toBe(CHINESE_NAME)
       expect(payload.upload.size).toBe(Buffer.byteLength(body))
       expect(await uploadedNames(room.roomId)).toContain(CHINESE_NAME)
@@ -454,7 +478,7 @@ describe('relay HTTP 层', () => {
       })
 
       expect(response.status).toBe(201)
-      expect((await response.json()).upload.name).toBe(CHINESE_NAME)
+      expect((await readJson(response)).upload.name).toBe(CHINESE_NAME)
     })
 
     it('请求头里的原始 UTF-8 字节（curl 直发）仍按 latin1 还原', async () => {
@@ -485,7 +509,7 @@ describe('relay HTTP 层', () => {
       })
 
       expect(response.status).toBe(201)
-      expect((await response.json()).upload.name).toBe(literal)
+      expect((await readJson(response)).upload.name).toBe(literal)
     })
 
     it('?name= 优先于请求头，且能表达「名字里本来就含 %XX」', async () => {
@@ -503,7 +527,7 @@ describe('relay HTTP 层', () => {
 
       expect(response.status).toBe(201)
       // 残留的头不会顶掉显式指定的名字 —— 这也正是「字面量 %XX」的逃生口
-      expect((await response.json()).upload.name).toBe(literal)
+      expect((await readJson(response)).upload.name).toBe(literal)
     })
 
     it('下载头按 RFC 6266 单次编码，不再二次编码', async () => {
@@ -511,14 +535,14 @@ describe('relay HTTP 层', () => {
 
       // 走**请求头**的百分号编码通道：这条守的是「上传 → 落盘 → 下载头」整条链。
       // 若改用 `?name=`，服务端拿到的本来就是 URLSearchParams 解好的值，缺陷会被绕过去。
-      const created = await (await fetch(
+      const created = await readJson(await fetch(
         `${relay.baseUrl}/api/rooms/${room.roomId}/uploads`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'text/markdown', 'X-Relay-Filename': PERCENT_ENCODED },
           body: '# 作业正文'
         }
-      )).json()
+      ))
 
       const download = await fetch(
         `${relay.baseUrl}/api/rooms/${room.roomId}/uploads/${created.upload.id}?download=1`,
@@ -608,7 +632,7 @@ describe('relay HTTP 层', () => {
       )
 
       expect(response.status).toBe(201)
-      const { upload: summary } = await response.json()
+      const { upload: summary } = await readJson(response)
       expect(summary.size).toBe(bytes.length)
 
       const download = await fetch(resolveUrl(relay.baseUrl, summary.downloadUrl), { headers: authHeaders })
@@ -639,7 +663,7 @@ describe('relay HTTP 层', () => {
       expect(summary.size).toBe(Buffer.byteLength(text))
 
       // 正文仍可从 details 端点取回 —— 接收端走的就是这条
-      const details = await (await fetch(resolveUrl(relay.baseUrl, summary.detailsUrl), { headers: authHeaders })).json()
+      const details = await readJson(await fetch(resolveUrl(relay.baseUrl, summary.detailsUrl), { headers: authHeaders }))
       expect(Buffer.byteLength(details.upload.contentText, 'utf8')).toBeLessThanOrEqual(1024 * 1024)
     })
   })
@@ -668,13 +692,13 @@ describe('relay HTTP 层', () => {
     )
 
     expect(response.status).toBe(201)
-    const { upload: summary } = await response.json()
+    const { upload: summary } = await readJson(response)
     expect(summary.name).toBe(name)
     expect(summary.size).toBe(docx.length)
     // 请求体就是文件字节，服务端不做任何 base64 往返
     expect(summary.contentText).toBeNull()
 
-    const details = await (await fetch(resolveUrl(relay.baseUrl, summary.detailsUrl), { headers: authHeaders })).json()
+    const details = await readJson(await fetch(resolveUrl(relay.baseUrl, summary.detailsUrl), { headers: authHeaders }))
     expect(details.upload.contentText).toBe('DOCX 服务端提取哨兵\n第二段：梯度下降实验')
 
     const download = await fetch(resolveUrl(relay.baseUrl, summary.downloadUrl), { headers: authHeaders })
@@ -691,7 +715,7 @@ describe('relay HTTP 层', () => {
     })
 
     expect(response.status).toBe(201)
-    expect((await response.json()).upload.size).toBe(0)
+    expect((await readJson(response)).upload.size).toBe(0)
   })
 
   it('超过单文件上限返回可读的 413', async () => {
@@ -704,7 +728,7 @@ describe('relay HTTP 层', () => {
     })
 
     expect(response.status).toBe(413)
-    expect((await response.json()).error).toMatch(/size limit/iu)
+    expect((await readJson(response)).error).toMatch(/size limit/iu)
   })
 
   it('带提取正文的 docx 不被体积口径误判（信封同时装 base64 与 text）', async () => {
@@ -728,7 +752,7 @@ describe('relay HTTP 层', () => {
     })
 
     expect(response.status).toBe(201)
-    const payload = await response.json()
+    const payload = await readJson(response)
     expect(payload.upload.size).toBe(10 * 1024 * 1024)
     expect(payload.upload.textTruncated).toBe(false)
   })
@@ -751,13 +775,13 @@ describe('relay HTTP 层', () => {
     })
 
     expect(response.status).toBe(201)
-    const payload = await response.json()
+    const payload = await readJson(response)
     expect(payload.upload.textTruncated).toBe(true)
 
     // 截断后的正文从 details 端点读回（201 只回元信息）。这条是接收端真正走的那条路。
     const details = await fetch(resolveUrl(relay.baseUrl, payload.upload.detailsUrl), { headers: authHeaders })
     expect(details.status).toBe(200)
-    const { upload: detail } = await details.json()
+    const { upload: detail } = await readJson(details)
     expect(Buffer.byteLength(detail.contentText, 'utf8')).toBeLessThanOrEqual(limit)
   })
 
@@ -775,7 +799,7 @@ describe('relay HTTP 层', () => {
     })
 
     expect(upload.status).toBe(201)
-    const { upload: summary } = await upload.json()
+    const { upload: summary } = await readJson(upload)
     expect(summary.mimeType).toBe('application/octet-stream')
 
     // 过去畸形/超长 mimeType 会让下载响应头非法或溢出，该文件永久不可下载
@@ -815,6 +839,7 @@ describe('房间配额隔离', () => {
       mimeType: 'application/octet-stream',
       content: Buffer.alloc(600 * 1024, 0x43)
     })
+    /** @type {(roomId: string) => Promise<Response>} */
     const send = (roomId) => fetch(`${relay.baseUrl}/api/rooms/${roomId}/uploads`, {
       method: 'POST',
       headers: ENVELOPE_HEADERS,
@@ -825,7 +850,7 @@ describe('房间配额隔离', () => {
     expect((await send(crowded.roomId)).status).toBe(201)
     const second = await send(crowded.roomId)
     expect(second.status).toBe(507)
-    expect((await second.json()).error).toMatch(/Room storage quota/iu)
+    expect((await readJson(second)).error).toMatch(/Room storage quota/iu)
 
     // 关键回归：另一个房间仍可正常上传 —— 免凭据发送方不能再造成跨房间拒绝服务
     const other = await send(neighbour.roomId)
@@ -834,6 +859,11 @@ describe('房间配额隔离', () => {
 }, 60000)
 
 describe('配置校验 fail-closed', () => {
+  /**
+   * 以给定环境变量启动 relay 子进程，等它退出后取回退出码与完整输出。
+   *
+   * @type {(env: Record<string, string | undefined>) => Promise<{ code: number | null, output: string }>}
+   */
   const spawnWithEnv = (env) => new Promise((resolve) => {
     const child = spawn(process.execPath, ['server/relay-server.js'], {
       cwd: ROOT,
@@ -915,11 +945,11 @@ describe('元数据上限与配额计量', () => {
     })
 
     expect(response.status).toBe(201)
-    const payload = await response.json()
+    const payload = await readJson(response)
     expect(Buffer.byteLength(payload.upload.name, 'utf8')).toBeLessThanOrEqual(255)
     expect(payload.upload.name.endsWith('.md')).toBe(true)
 
-    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+    const state = await readJson(await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders }))
     // 关键回归：配额必须被真实占用，而不是恒为 0
     expect(state.storedBytes).toBeGreaterThan(0)
     expect(state.storedBytes).toBeLessThanOrEqual(2 * 1024 * 1024)
@@ -952,6 +982,7 @@ describe('元数据上限与配额计量', () => {
 
   it('房间上传条数上限返回 429（而非误报"配额已满"）', async () => {
     const room = await createRoom(relay.baseUrl, 'metadata-room-3')
+    /** @type {(index: number) => Promise<Response>} */
     const send = (index) => fetch(`${relay.baseUrl}/api/rooms/${room.roomId}/uploads`, {
       method: 'POST',
       headers: ENVELOPE_HEADERS,
@@ -964,7 +995,7 @@ describe('元数据上限与配额计量', () => {
 
     const overflow = await send(4)
     expect(overflow.status).toBe(429)
-    expect((await overflow.json()).error).toMatch(/upload count limit/iu)
+    expect((await readJson(overflow)).error).toMatch(/upload count limit/iu)
   })
 
   it('并发上传不能击穿条数上限（与字节配额同型的竞态）', async () => {
@@ -978,7 +1009,7 @@ describe('元数据上限与配额计量', () => {
     )))
 
     const accepted = results.filter((response) => response.status === 201).length
-    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+    const state = await readJson(await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders }))
 
     expect(accepted).toBeLessThanOrEqual(3)
     expect(state.uploadCount).toBeLessThanOrEqual(3)
@@ -1017,7 +1048,7 @@ describe('配额并发安全', () => {
     )))
 
     const accepted = results.filter((response) => response.status === 201).length
-    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+    const state = await readJson(await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders }))
 
     // 预占配额后，并发请求必须有一部分被 507 拒绝，而不是全部落盘（过去 16 个全落盘）
     expect(accepted).toBeGreaterThan(0)
@@ -1064,7 +1095,7 @@ describe('上传字节限流', () => {
     // 第三次会超出 4MB 窗口额度
     const limited = await send()
     expect(limited.status).toBe(429)
-    expect((await limited.json()).error).toMatch(/rate exceeded/iu)
+    expect((await readJson(limited)).error).toMatch(/rate exceeded/iu)
 
     // 同窗口内的读请求不应被误伤
     expect((await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).status).toBe(200)
@@ -1075,6 +1106,7 @@ describe('上传字节限流', () => {
 describe('限流分桶与可信代理', () => {
   const BUDGET = 5
 
+  /** @type {(baseUrl: string, forwardedFor: string) => Promise<Response>} */
   const createWithXff = (baseUrl, forwardedFor) => fetch(`${baseUrl}/api/rooms`, {
     method: 'POST',
     headers: { ...authHeaders, 'Content-Type': 'application/json', 'X-Forwarded-For': forwardedFor },
@@ -1129,7 +1161,7 @@ describe('建房上限与按房间字节限流', () => {
         body: JSON.stringify({ roomId: 'cap-room-overflow' })
       })
       expect(blocked.status).toBe(429)
-      expect((await blocked.json()).error).toMatch(/room count limit/iu)
+      expect((await readJson(blocked)).error).toMatch(/room count limit/iu)
 
       // 上限只约束「新增」：重进自己那个房间仍然 201
       const reenter = await fetch(`${relay.baseUrl}/api/rooms`, {
@@ -1166,6 +1198,7 @@ describe('建房上限与按房间字节限流', () => {
         mimeType: 'application/octet-stream',
         content: Buffer.alloc(1024 * 1024, 0x45)
       })
+      /** @type {(roomId: string) => Promise<Response>} */
       const send = (roomId) => fetch(`${relay.baseUrl}/api/rooms/${roomId}/uploads`, {
         method: 'POST',
         headers: ENVELOPE_HEADERS,
@@ -1177,7 +1210,7 @@ describe('建房上限与按房间字节限流', () => {
       // 第二次就越过 2MB 的房间窗口额度（单次请求体约 1.4MB）
       const limited = await send(roomA.roomId)
       expect(limited.status).toBe(429)
-      expect((await limited.json()).error).toMatch(/per room per window/iu)
+      expect((await readJson(limited)).error).toMatch(/per room per window/iu)
 
       // 另一个房间完全不受影响 —— 这正是房间维度的意义
       expect((await send(roomB.roomId)).status).toBe(201)
@@ -1211,7 +1244,7 @@ describe('房间生命周期', () => {
       method: 'POST',
       headers: authHeaders
     })
-    const { ticket } = await ticketResponse.json()
+    const { ticket } = await readJson(ticketResponse)
 
     // 保持一条 SSE 长连接
     const controller = new AbortController()
@@ -1220,6 +1253,7 @@ describe('房间生命周期', () => {
     })
     expect(stream.status).toBe(200)
 
+    if (!stream.body) throw new Error('SSE 响应没有可读的 body')
     const reader = stream.body.getReader()
     void reader.read()
 
@@ -1268,7 +1302,7 @@ describe('启动恢复的归属门控', () => {
       expect(existsSync(join(uploadDir, 'loose.txt'))).toBe(true)
 
       // 匿名根路由不再暴露用量与上限（信息暴露收敛）
-      const root = await (await fetch(`${relay.baseUrl}/`)).json()
+      const root = await readJson(await fetch(`${relay.baseUrl}/`))
       expect(root.storageUsedBytes).toBeUndefined()
       expect(root.storageLimitBytes).toBeUndefined()
 
@@ -1365,8 +1399,8 @@ describe('details 端点契约', () => {
       body: envelopeBody({ name: 'details.md', content })
     })
 
-    const state = await (await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
-    const details = await (await fetch(resolveUrl(relay.baseUrl, state.uploads[0].detailsUrl), { headers: authHeaders })).json()
+    const state = await readJson(await fetch(`${relay.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders }))
+    const details = await readJson(await fetch(resolveUrl(relay.baseUrl, state.uploads[0].detailsUrl), { headers: authHeaders }))
 
     // 只保留 `upload.contentBase64` 一处（顶层重复副本已删除）
     expect(Buffer.from(details.upload.contentBase64, 'base64').toString('utf8')).toBe(content)
@@ -1428,7 +1462,7 @@ describe('重启后恢复房间与作业（房间元数据持久化）', () => {
       body: envelopeBody({ name: 'raw.bin', mimeType: 'application/octet-stream', content: binaryBytes })
     })
 
-    const before = await (await fetch(`${first.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+    const before = await readJson(await fetch(`${first.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders }))
     expect(before.uploadCount).toBe(2)
     const storedBefore = before.storedBytes
     expect(storedBefore).toBeGreaterThan(0)
@@ -1438,22 +1472,28 @@ describe('重启后恢复房间与作业（房间元数据持久化）', () => {
 
     const second = await startRelay({ MAX_FILE_BYTES: String(1024 * 1024) }, { uploadDir })
     try {
-      const after = await (await fetch(`${second.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders })).json()
+      const after = await readJson(await fetch(`${second.baseUrl}/api/rooms/${room.roomId}`, { headers: authHeaders }))
       expect(after.uploadCount).toBe(2)
       // 配额逐字节复原 —— 否则重启会「凭空」放出磁盘额度
       expect(after.storedBytes).toBe(storedBefore)
 
-      const textUpload = after.uploads.find((item) => item.name === '作业.md')
-      const binaryUpload = after.uploads.find((item) => item.name === 'raw.bin')
+      /** @type {UploadSummary[]} */
+      const restoredUploads = after.uploads
+      const textUpload = restoredUploads.find((item) => item.name === '作业.md')
+      const binaryUpload = restoredUploads.find((item) => item.name === 'raw.bin')
       expect(textUpload).toBeTruthy()
       expect(binaryUpload).toBeTruthy()
+      // `toBeTruthy` 不做类型收窄，故补一次显式判断：元数据没恢复时给出可读的失败原因
+      if (textUpload === undefined || binaryUpload === undefined) {
+        throw new Error('重启后未从 room.json 恢复上传元数据')
+      }
 
       // 正文：重启后 `upload.text` 为空，details 端点从落盘字节按需推导
-      const textDetails = await (await fetch(resolveUrl(second.baseUrl, textUpload.detailsUrl), { headers: authHeaders })).json()
+      const textDetails = await readJson(await fetch(resolveUrl(second.baseUrl, textUpload.detailsUrl), { headers: authHeaders }))
       expect(textDetails.upload.contentText).toBe(textContent)
 
       // 非文本类推导结果应为 null，而不是空串
-      const binaryDetails = await (await fetch(resolveUrl(second.baseUrl, binaryUpload.detailsUrl), { headers: authHeaders })).json()
+      const binaryDetails = await readJson(await fetch(resolveUrl(second.baseUrl, binaryUpload.detailsUrl), { headers: authHeaders }))
       expect(binaryDetails.upload.contentText).toBeNull()
 
       // 原件字节保真：下载拿到的必须与上传的逐字节一致
@@ -1526,8 +1566,17 @@ describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
       res.end(String(req.headers.host ?? ''))
     })
 
-    await new Promise((resolve) => { echo.listen(0, '127.0.0.1', resolve) })
-    const echoPort = echo.address().port
+    const echoPort = await new Promise((resolve, reject) => {
+      echo.listen(0, '127.0.0.1', () => {
+        const address = echo.address()
+        // 只监听 TCP，地址必然是 AddressInfo；显式收窄而不是断言成 AddressInfo
+        if (address === null || typeof address === 'string') {
+          reject(new Error('未能从回显服务器取到 TCP 端口'))
+          return
+        }
+        resolve(address.port)
+      })
+    })
 
     try {
       const { text } = await requestWithHost(echoPort, '/', { host: 'evil.example' })
@@ -1582,7 +1631,7 @@ describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
       method: 'POST',
       headers: authHeaders
     })
-    const { ticket } = await ticketResponse.json()
+    const { ticket } = await readJson(ticketResponse)
 
     // 接收端先连上 —— 它就是会被骗着把凭据发出去的一方
     const framePromise = readSseEvent(
@@ -1603,6 +1652,7 @@ describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
     expect(frame).not.toContain('evil.example')
 
     const dataLine = frame.split('\n').find((line) => line.startsWith('data: '))
+    if (dataLine === undefined) throw new Error('SSE 帧里没有 data: 行')
     const payload = JSON.parse(dataLine.slice('data: '.length))
     expect(payload.data.downloadUrl).toMatch(/^\/api\/rooms\//u)
     expect(payload.data.upload.detailsUrl).toMatch(/^\/api\/rooms\//u)

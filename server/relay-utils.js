@@ -454,6 +454,11 @@ export function parseTrustedProxies(raw) {
  *   前提：`RELAY_TRUSTED_PROXIES` 只覆盖**代理自身**网段，**不得包含客户端地址段** ——
  *   否则真实客户端也会被当成可信跳一并跳过，退回到伪造值（见 `RELAY_DEPLOY.md` §4.1）。
  *
+ *   前提二：多跳拓扑下该声明必须覆盖**链上每一跳**（含本函数的 socket 对端 —— 上面第一条判断
+ *   就是「对端可不可信」，不可信时根本不看 XFF）。只声明直接对端会在三层链上停在最内层见证的
+ *   那一跳，退化成「全站单桶」；实测其读数与正确配置一致，只有「同伪造值、异源地址」的对照
+ *   组能区分（`RELAY_DEPLOY.md` §4.1 三层表）。
+ *
  * @param {import('node:net').BlockList} trustedProxies
  * @returns {(req: import('node:http').IncomingMessage) => string}
  */
