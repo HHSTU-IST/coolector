@@ -55,7 +55,7 @@
               class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
               {{ connectionState === 'connected' ? '重新连接' : '建立长连接' }}
             </button>
-            <button type="button" @click="disconnect" :disabled="!eventSource"
+            <button type="button" @click="disconnect" :disabled="!stream"
               class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60">
               断开连接
             </button>
@@ -134,7 +134,7 @@ const {
   statusMessage,
   roomState,
   recentEvents,
-  eventSource,
+  stream,
   storageUsageRatio,
   storageUsageLabel,
   connect,

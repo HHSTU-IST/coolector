@@ -16,6 +16,8 @@
  * 精确反转义 —— 文件名里本来就含 `%XX` 时，写双重编码（`note%2520f.md`）即可表达字面量。
  */
 
+import { NGROK_SKIP_HEADER } from './relay'
+
 /**
  * base64 → Blob。
  *
@@ -78,7 +80,9 @@ export const buildRelayUploadRequest = (input: RelayUploadInput): RelayUploadReq
         // 一并带上真实 Content-Type 是为了让请求自描述，也便于反代与抓包排查。
         'Content-Type': mimeType,
         'X-Relay-Mime-Type': mimeType,
-        'X-Relay-Last-Modified': input.lastModified.toISOString()
+        'X-Relay-Last-Modified': input.lastModified.toISOString(),
+        // 上传是 POST，当前 ngrok 策略下不会被插页；统一携带是为了不依赖那条策略细节
+        ...NGROK_SKIP_HEADER
       },
       body: blob
     }

@@ -171,10 +171,30 @@ watch(relayToken, (value) => {
   }
 })
 
+/**
+ * 让请求穿过 ngrok 免费档的浏览器 interstitial 警告页。
+ *
+ * ngrok 会对**浏览器形态的 GET** 注入一张 HTML 警告页（响应 `Ngrok-Error-Code: ERR_NGROK_6024`、
+ * `Content-Type: text/plain`）。该响应**不带 CORS 头**，浏览器因此把它报成 CORS 失败，界面上
+ * 只会看到 `Failed to fetch` —— 一个既不含状态码也不含原因的字符串。官方的跳过头就是它，值任意。
+ *
+ * 为什么**每个**请求都带，而不是只加在 GET 上：插页判定跟随 `User-Agent`（实测与请求方法、
+ * `Sec-Fetch-*`、`Accept` 都无关），GET 中招、POST 未中招只是当前策略的表现。统一携带更抗
+ * ngrok 的策略变更，代价是请求进入 CORS 预检 —— 服务端已放行该头且 `Access-Control-Max-Age`
+ * 为 24h，等于每类请求只多一次 OPTIONS。
+ *
+ * ⚠️ **与 `server/relay-utils.js` 的 `makeCorsHeaders` 互为前提**：服务端若不在
+ * `Access-Control-Allow-Headers` 里放行它，预检会被 **relay 自己**拒掉，症状是
+ * `Request header field ngrok-skip-browser-warning is not allowed by Access-Control-Allow-Headers`。
+ * 两处必须同改。
+ */
+export const NGROK_SKIP_HEADER: Record<string, string> = { 'ngrok-skip-browser-warning': '1' }
+
 /** 组装带鉴权头的请求头；未配置密钥时不带 Authorization（服务端未设 RELAY_TOKEN 时才允许） */
 export const withAuth = (headers: Record<string, string> = {}): Record<string, string> => {
-  if (!relayToken.value) return { ...headers }
-  return { ...headers, Authorization: `Bearer ${relayToken.value}` }
+  const merged: Record<string, string> = { ...headers, ...NGROK_SKIP_HEADER }
+  if (relayToken.value) merged.Authorization = `Bearer ${relayToken.value}`
+  return merged
 }
 
 /**

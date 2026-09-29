@@ -417,7 +417,11 @@ export function makeCorsHeaders(allowedOrigins) {
       // 这里必须写断言：TS 不跨闭包边界收窄外层 const，若不写会认为 origin 仍是 `string | undefined`。
       'Access-Control-Allow-Origin': allowAll ? '*' : /** @type {string} */ (origin),
       'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Envelope, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified'
+      // `ngrok-skip-browser-warning` 必须在**允许清单**里，否则带它的跨源请求预检会被
+      // **本服务**拒掉（症状：`Request header field ngrok-skip-browser-warning is not allowed
+      // by Access-Control-Allow-Headers in preflight response`）——这与 ngrok 无关，是纯 CORS。
+      // 前端在 `src/utils/relay.ts` 的 `NGROK_SKIP_HEADER` 发送它，两处互为前提：改一处必须改另一处。
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Relay-Envelope, X-Relay-Filename, X-Relay-Mime-Type, X-Relay-Last-Modified, ngrok-skip-browser-warning'
     }
 
     if (!allowAll) {

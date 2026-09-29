@@ -10,6 +10,7 @@ import { formatFileSize } from '../utils/format'
 import { binaryPlaceholder } from '../utils/relay-content'
 import {
   DEFAULT_RELAY_URL,
+  NGROK_SKIP_HEADER,
   looksWeakRoomId,
   normalizeRelayUrl,
   relayToken,
@@ -19,6 +20,8 @@ import {
   validateRoomId,
   withAuth
 } from '../utils/relay'
+import { openRelayEventStream } from '../utils/relay-sse'
+import type { RelaySseConnection } from '../utils/relay-sse'
 import type {
   LogEntry, RelayEventEnvelope, RelayRoomResponse, RelayUploadSummary,
   RoomSnapshot, UploadCreatedData
@@ -67,7 +70,8 @@ export function useRelayReceiver() {
   const statusMessage = ref('尚未建立连接')
   const roomState = ref<RoomSnapshot | null>(null)
   const recentEvents = ref<LogEntry[]>([])
-  const eventSource = ref<EventSource | null>(null)
+  /** 当前 SSE 连接；`null` 表示没有活动连接（模板据此禁用「断开连接」按钮） */
+  const stream = ref<RelaySseConnection | null>(null)
   const stateUrl = ref('')
   const reconnectAttempts = ref(0)
   let manualDisconnect = false
@@ -146,8 +150,8 @@ export function useRelayReceiver() {
     }
   }
 
-  const parseEvent = <T,>(event: MessageEvent<string>) => {
-    return JSON.parse(event.data) as RelayEventEnvelope<T>
+  const parseEvent = <T,>(data: string) => {
+    return JSON.parse(data) as RelayEventEnvelope<T>
   }
 
   const pushEventLog = (type: string, message: string, createdAt = new Date().toISOString()) => {
@@ -173,7 +177,7 @@ export function useRelayReceiver() {
     }
   }
 
-  /** 断线后指数退避重连，达上限即停，避免硬错误无限重试（EventSource CLOSED 不自动重连） */
+  /** 断线后指数退避重连，达上限即停，避免硬错误无限重试（SSE 流本身不做自动重连） */
   const scheduleReconnect = () => {
     if (manualDisconnect || reconnectTimer !== null) return
 
@@ -196,21 +200,21 @@ export function useRelayReceiver() {
     }, delay)
   }
 
-  const closeEventSource = () => {
-    if (eventSource.value) {
-      eventSource.value.close()
-      eventSource.value = null
+  const closeStream = () => {
+    if (stream.value) {
+      stream.value.close()
+      stream.value = null
     }
   }
 
-  const handleRoomCreated = (event: MessageEvent<string>) => {
-    const payload = parseEvent<{ roomId: string; createdAt: string }>(event)
+  const handleRoomCreated = (data: string) => {
+    const payload = parseEvent<{ roomId: string; createdAt: string }>(data)
     pushEventLog(payload.type, `房间 ${payload.data.roomId} 已就绪`, payload.createdAt)
     void refreshRoomState()
   }
 
-  const handleReceiverReady = (event: MessageEvent<string>) => {
-    const payload = parseEvent<{ roomId: string; message: string }>(event)
+  const handleReceiverReady = (data: string) => {
+    const payload = parseEvent<{ roomId: string; message: string }>(data)
     pushEventLog(payload.type, payload.data.message, payload.createdAt)
     void refreshRoomState()
   }
@@ -284,8 +288,8 @@ export function useRelayReceiver() {
     void refreshRoomState()
   }
 
-  const handleUploadCreated = async (event: MessageEvent<string>) => {
-    const payload = parseEvent<UploadCreatedData>(event)
+  const handleUploadCreated = async (data: string) => {
+    const payload = parseEvent<UploadCreatedData>(data)
     const { upload, roomId: uploadRoomId } = payload.data
 
     try {
@@ -330,7 +334,7 @@ export function useRelayReceiver() {
       manualDisconnect = false
     }
     clearReconnectTimer()
-    closeEventSource()
+    closeStream()
 
     connectionState.value = 'connecting'
     statusMessage.value = '正在创建房间并建立长连接...'
@@ -361,34 +365,30 @@ export function useRelayReceiver() {
 
       await refreshRoomState()
 
-      // SSE 无法自定义请求头：改用一次性短时效票据，避免长期 token 进 URL（日志/Referer/历史）
+      // SSE 的凭据走一次性短时效票据（避免长期 token 进 URL：日志 / Referer / 浏览器历史）。
+      // 额外携带的 NGROK_SKIP_HEADER 是换掉 EventSource 的直接原因 —— 原生 EventSource
+      // **无法设置任何请求头**，在 ngrok 免费隧道下会被浏览器警告页拦成 CORS 失败。
       const streamUrl = await buildStreamUrl(room)
-      const source = new EventSource(streamUrl)
-      eventSource.value = source
-
-      source.addEventListener('open', () => {
-        reconnectAttempts.value = 0
-        connectionState.value = 'connected'
-        statusMessage.value = `已连接到 ${room.roomId}`
-        pushEventLog('open', `已连接到 ${room.roomId}`)
+      stream.value = openRelayEventStream(streamUrl, NGROK_SKIP_HEADER, {
+        onOpen: () => {
+          reconnectAttempts.value = 0
+          connectionState.value = 'connected'
+          statusMessage.value = `已连接到 ${room.roomId}`
+          pushEventLog('open', `已连接到 ${room.roomId}`)
+        },
+        onEvent: ({ type, data }) => {
+          // 未知类型静默忽略：服务端将来新增事件时，旧前端不该因此报错或断连
+          if (type === 'receiver.ready') handleReceiverReady(data)
+          else if (type === 'room.created') handleRoomCreated(data)
+          else if (type === 'upload.created') void handleUploadCreated(data)
+        },
+        // 与原生 EventSource 不同，这里**不自动重连**：统一走 scheduleReconnect，
+        // 以复用它的手动断开守卫与重试上限（原生会自己无限重试，正是要避开的行为）
+        onError: () => {
+          stream.value = null
+          scheduleReconnect()
+        }
       })
-
-      source.addEventListener('receiver.ready', (event) => {
-        handleReceiverReady(event as MessageEvent<string>)
-      })
-
-      source.addEventListener('room.created', (event) => {
-        handleRoomCreated(event as MessageEvent<string>)
-      })
-
-      source.addEventListener('upload.created', (event) => {
-        void handleUploadCreated(event as MessageEvent<string>)
-      })
-
-      // EventSource CLOSED 不自动重连，统一走 scheduleReconnect（内置手动断开守卫与重试上限）
-      source.onerror = () => {
-        scheduleReconnect()
-      }
     } catch (error) {
       connectionState.value = 'error'
       statusMessage.value = error instanceof Error ? error.message : '建立连接失败'
@@ -399,7 +399,7 @@ export function useRelayReceiver() {
   const disconnect = () => {
     manualDisconnect = true
     clearReconnectTimer()
-    closeEventSource()
+    closeStream()
     connectionState.value = 'idle'
     statusMessage.value = '连接已断开'
   }
@@ -407,7 +407,7 @@ export function useRelayReceiver() {
   onBeforeUnmount(() => {
     manualDisconnect = true
     clearReconnectTimer()
-    closeEventSource()
+    closeStream()
   })
 
   return {
@@ -421,7 +421,7 @@ export function useRelayReceiver() {
     statusMessage,
     roomState,
     recentEvents,
-    eventSource,
+    stream,
     storageUsageRatio,
     storageUsageLabel,
     connect,
