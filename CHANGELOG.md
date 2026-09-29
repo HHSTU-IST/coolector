@@ -198,6 +198,18 @@
     写错的地址会被原样拼进请求 URL，打到静态站自己身上，表现为「上传成功」却谁也收不到。
   - CI 门禁 `deploy.yml` 的 shell `case` 块因语言不同无法复用该模块，是唯一的人肉同步点
     （已在两处注释里互相指名）。
+- **内网穿透的落地形态收敛为 ngrok 单一工具**，文档不再把 cloudflared 列为备选：`RECEIVER_SETUP.md`
+  重写为「Pages 前端 + 单条 Relay 隧道」一条路径。这不是偏好问题而是**免费档的硬约束** ——
+  ngrok 免费档每账号只有 1 个域名（同时只能 1 条 HTTP 隧道），而 Relay 只提供 API、不托管前端
+  静态产物 ⇒ 双隧道形态（本机前端也暴露到公网）在免费档下结构上不成立，已移到文档 §8 并注明
+  需 2 个域名（付费档 / 自有域名 / frp / Tailscale）。连带改动：`vite.config.ts` 的 `allowedHosts`
+  由 `.trycloudflare.com` 改为 ngrok 的域名后缀；`.env.example` 中「前端页面来自穿透域名」的
+  说法改为 Pages 域。
+  - 排错表补两条实测结论：① `ERR_NGROK_9009` —— 免费档不允许在 HTTP 代理下运行，起隧道前须清
+    `HTTP_PROXY` / `HTTPS_PROXY`；② 「域名变更后线上产物连不上」—— 域名是**构建期内联**的，
+    须同步仓库变量并重跑 `deploy.yml`。
+  - ngrok 免费档的浏览器 interstitial 警告页只注入 HTML 导航流量，程序化访问（`fetch` /
+    `EventSource`）不受影响，故前端与 SSE 均无需附加跳过头。
 
 ### Removed
 
@@ -214,6 +226,10 @@
   随之删除的还有 `RELAY_KEEP_ORPHAN_UPLOADS` 旋钮（不再有「保留无主目录」这回事）与
   `measureDirectoryBytes`（不再需要按目录求和来估算配额，配额由元数据里的 `quotaBytes` 复原）。
   行为变化：`UPLOAD_DIR` 下无法识别的目录从「被回收」变为「被跳过 + 告警」，需人工清理。
+- **`scripts/receiver.mjs`（内网穿透一键编排）**。它的职责是「自动开两条隧道、把随机前端地址写进
+  `.env`」—— 前提是前端也经隧道暴露。ngrok 免费档只有 1 个域名，该前提已不成立（见上方 Changed 节），
+  脚本剩下的能力与文档 §4 的两条命令等价。引用一并清理：README 的目录树、`.env.example` 的说明、
+  `.gitignore` 里的 `scripts/.receiver-runtime.json`。
 
 ## [1.0.1] - 2026-09-14
 

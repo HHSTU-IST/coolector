@@ -230,9 +230,10 @@ server/
 ├── *.test.js           # 纯函数单测 + 真实进程 HTTP 集成测试
 └── start.js            # web + relay 双进程编排
 scripts/
-├── e2e-upload.mjs      # 真实浏览器端到端回归（G3 门禁）
-├── check-no-secrets.mjs# 构建产物密钥泄露守卫
-└── receiver.mjs        # 内网穿透一键编排（本机当接收端）
+├── e2e-upload.mjs              # 真实浏览器端到端回归（G3 门禁）
+├── check-no-secrets.mjs        # 构建产物密钥泄露守卫
+├── check-atomic-invariants.mjs # 并发不变量 AST 静态检查
+└── lib/                        # e2e 夹具（docx 生成器等）
 src/
 ├── components/          # Vue 组件
 │   ├── FileUploader.vue    # 文件上传组件

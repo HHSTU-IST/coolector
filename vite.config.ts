@@ -40,8 +40,12 @@ export default defineConfig({
     plugins: [vue(), injectContentSecurityPolicy()],
     base: './',
     server: {
-        // 放行 cloudflared quick tunnel 的 Host（否则隧道访问被 Vite 403 拦截）
-        allowedHosts: ['.trycloudflare.com']
+        // 放行 ngrok 隧道的 Host（否则经隧道访问 dev server 会被 Vite 403 拦截）。
+        // ngrok 免费档的开发域名是 `*.ngrok-free.dev`（旧账号可能仍是 `*.ngrok-free.app`），
+        // 付费静态域名是 `*.ngrok.app`，旧版为 `*.ngrok.io` —— 一并列出。
+        // 注意：本项目推荐的形态（Pages 前端 + 单条 Relay 隧道）不经过 dev server，
+        // 这里的白名单只在「把 5174 也单独穿透」时才起作用（见 RECEIVER_SETUP.md §8）。
+        allowedHosts: ['.ngrok-free.dev', '.ngrok-free.app', '.ngrok.app', '.ngrok.io']
         // 这里原有一个 `/relay` → 127.0.0.1:8787 的同源 dev 代理，随「VITE_RELAY_URL
         // 只认 http(s) 绝对地址」一并移除：它服务的那个值（`/relay`）已被三处判据一致拒绝。
         // 本机开发因此改为直连（前端填 http://127.0.0.1:8787，属跨源调用）：
