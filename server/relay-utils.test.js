@@ -26,6 +26,18 @@ import {
   truncateUtf8
 } from './relay-utils.js'
 
+/**
+ * `IncomingMessage` 替身。
+ *
+ * `makeAuthorizer` / `makeCorsHeaders` 实际只读 `headers` 与 `url`，而 `IncomingMessage` 是个庞大的类
+ * （socket / method / 一堆事件方法）。这里集中做一次「只喂了这几个字段」的断言，好过在每个调用点各写
+ * 一次 —— 那也正是这类替身最容易在类型收紧时集体失真的地方。
+ *
+ * @param {{ headers?: Record<string, string | undefined>, url?: string }} [init]
+ * @returns {import('node:http').IncomingMessage}
+ */
+const makeReq = ({ headers = {}, url = '/' } = {}) => /** @type {any} */ ({ headers, url })
+
 describe('parsePublicBaseUrl', () => {
   it('未设置 / 空白视为「不配置基址」，合法且值为 null', () => {
     for (const raw of [undefined, null, '', '   ']) {
@@ -405,42 +417,44 @@ describe('deriveUploadText', () => {
   })
 
   it('非 Buffer 入参返回 null（fail-closed）', () => {
-    expect(deriveUploadText('纯文本', 'text/plain', 'a.txt')).toBeNull()
-    expect(deriveUploadText(undefined, 'text/plain', 'a.txt')).toBeNull()
+    // **故意违约**：`bytes` 声明为 Buffer，而这里验的正是运行时守卫本身。用断言表达「刻意违约」，
+    // 而不是把生产签名放宽成 unknown —— 后者会让所有真实调用点一并失去检查。
+    expect(deriveUploadText(/** @type {any} */ ('纯文本'), 'text/plain', 'a.txt')).toBeNull()
+    expect(deriveUploadText(/** @type {any} */ (undefined), 'text/plain', 'a.txt')).toBeNull()
   })
 })
 
 describe('makeAuthorizer', () => {
   it('未配置 token 时全放行', () => {
     const auth = makeAuthorizer('')
-    expect(auth({ headers: {}, url: '/' })).toBe(true)
+    expect(auth(makeReq())).toBe(true)
   })
 
   it('Bearer 头放行', () => {
     const auth = makeAuthorizer('secret')
-    expect(auth({ headers: { authorization: 'Bearer secret' }, url: '/' })).toBe(true)
+    expect(auth(makeReq({ headers: { authorization: 'Bearer secret' } }))).toBe(true)
   })
 
   it('拒绝 ?token= 查询参数（长期密钥不得进 URL）', () => {
     const auth = makeAuthorizer('secret')
-    expect(auth({ headers: {}, url: '/api/rooms/x/events?token=secret' })).toBe(false)
-    expect(auth({ headers: {}, url: '/api/rooms?token=secret' })).toBe(false)
+    expect(auth(makeReq({ url: '/api/rooms/x/events?token=secret' }))).toBe(false)
+    expect(auth(makeReq({ url: '/api/rooms?token=secret' }))).toBe(false)
   })
 
   it('拒绝裸 token，必须是 Bearer 形式', () => {
     const auth = makeAuthorizer('secret')
-    expect(auth({ headers: { authorization: 'secret' }, url: '/' })).toBe(false)
+    expect(auth(makeReq({ headers: { authorization: 'secret' } }))).toBe(false)
   })
 
   it('错误 token 拒绝', () => {
     const auth = makeAuthorizer('secret')
-    expect(auth({ headers: { authorization: 'Bearer wrong' }, url: '/' })).toBe(false)
+    expect(auth(makeReq({ headers: { authorization: 'Bearer wrong' } }))).toBe(false)
   })
 
   it('长度不同的凭据直接拒绝且不抛异常（恒定时间比较的前置条件）', () => {
     const auth = makeAuthorizer('secret')
-    expect(auth({ headers: { authorization: 'Bearer s' }, url: '/' })).toBe(false)
-    expect(auth({ headers: { authorization: '' }, url: '/' })).toBe(false)
+    expect(auth(makeReq({ headers: { authorization: 'Bearer s' } }))).toBe(false)
+    expect(auth(makeReq({ headers: { authorization: '' } }))).toBe(false)
   })
 })
 
@@ -461,26 +475,26 @@ describe('digestName', () => {
 describe('makeCorsHeaders', () => {
   it('* 白名单返回任意来源', () => {
     const cors = makeCorsHeaders(['*'])
-    const headers = cors({ headers: { origin: 'https://x.com' } })
+    const headers = cors(makeReq({ headers: { origin: 'https://x.com' } }))
     expect(headers['Access-Control-Allow-Origin']).toBe('*')
   })
 
   it('非白名单来源返回空对象', () => {
     const cors = makeCorsHeaders(['https://ok.com'])
-    expect(cors({ headers: { origin: 'https://evil.com' } })).toEqual({})
+    expect(cors(makeReq({ headers: { origin: 'https://evil.com' } }))).toEqual({})
   })
 
   it('白名单来源返回该来源并带 Vary', () => {
     const cors = makeCorsHeaders(['https://ok.com'])
-    const headers = cors({ headers: { origin: 'https://ok.com' } })
+    const headers = cors(makeReq({ headers: { origin: 'https://ok.com' } }))
     expect(headers['Access-Control-Allow-Origin']).toBe('https://ok.com')
     expect(headers.Vary).toBe('Origin')
   })
 
   it('空白名单（未配置）不给任何来源 —— 默认不放开跨源', () => {
     const cors = makeCorsHeaders([])
-    expect(cors({ headers: { origin: 'https://x.com' } })).toEqual({})
-    expect(cors({ headers: {} })).toEqual({})
+    expect(cors(makeReq({ headers: { origin: 'https://x.com' } }))).toEqual({})
+    expect(cors(makeReq())).toEqual({})
   })
 })
 
@@ -491,11 +505,20 @@ describe('makeCorsHeaders', () => {
  * 单个滥用者足以让全班 429；而直连时若采信 X-Forwarded-For，攻击者可以随便换桶绕过限流。
  */
 describe('parseTrustedProxies / makeClientIpResolver', () => {
-  const req = (remoteAddress, forwardedFor) => ({
+  /**
+   * @param {string} remoteAddress
+   * @param {string} [forwardedFor]
+   * @returns {import('node:http').IncomingMessage}
+   */
+  const req = (remoteAddress, forwardedFor) => /** @type {any} */ ({
     socket: { remoteAddress },
     headers: forwardedFor === undefined ? {} : { 'x-forwarded-for': forwardedFor }
   })
 
+  /**
+   * @param {string} raw
+   * @returns {(req: import('node:http').IncomingMessage) => string}
+   */
   const resolverFor = (raw) => makeClientIpResolver(parseTrustedProxies(raw).list)
 
   it('接受 IP 与 CIDR（含 IPv6），非法条目上报而非静默忽略', () => {

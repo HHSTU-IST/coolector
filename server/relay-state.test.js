@@ -25,6 +25,12 @@ let uploadDir
 const failingRemove = () => Promise.reject(new Error('injected remove failure'))
 
 /**
+ * `room.json` 的落盘形态 —— 只声明本文件实际读取的字段（完整输出见生产侧的 `serializeRoom`）。
+ *
+ * @typedef {{ roomId: string, uploads: { id: string, name: string }[] }} RoomMetadataOnDisk
+ */
+
+/**
  * `Upload` 替身工厂：只传关心的字段，其余给中性默认值。
  *
  * 为什么要「完整」而不是只写用到的几个字段：`Upload` 是生产侧的真实契约，少写字段会让夹具在
@@ -274,7 +280,7 @@ describe('serializeRoom / persistRoomMetadata（房间元数据持久化）', ()
 
     await state.persistRoomMetadata(room)
 
-    /** @type {{ uploads: { id: string }[] }} */
+    /** @type {RoomMetadataOnDisk} */
     const onDisk = JSON.parse(await readFile(join(uploadDir, room.id, state.ROOM_METADATA_FILENAME), 'utf8'))
     expect(onDisk.roomId).toBe(room.id)
     expect(onDisk.uploads[0].name).toBe('作业.md')
@@ -320,7 +326,7 @@ describe('serializeRoom / persistRoomMetadata（房间元数据持久化）', ()
 
     await state.persistRoomMetadata(room)
 
-    /** @type {{ uploads: { id: string }[] }} */
+    /** @type {RoomMetadataOnDisk} */
     const onDisk = JSON.parse(await readFile(join(uploadDir, room.id, state.ROOM_METADATA_FILENAME), 'utf8'))
     expect(onDisk.uploads.map((item) => item.id).sort()).toEqual(['meta-1', 'meta-2'])
   })

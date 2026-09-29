@@ -46,21 +46,36 @@ const RELAY_TOKEN = 'e2e-token-not-for-production'
  */
 const DOCX_SENTINEL = 'DOCX 服务端提取哨兵'
 
+/** @type {{ name: string, ok: boolean, detail: string }[]} */
 const results = []
 let failed = 0
 
+/**
+ * @param {string} name
+ * @param {unknown} ok
+ * @param {string} [detail]
+ */
 function check(name, ok, detail = '') {
   results.push({ name, ok: Boolean(ok), detail })
   if (!ok) failed += 1
 }
 
+/** @param {string} message */
 function log(message) {
   process.stdout.write(`${message}\n`)
 }
 
-/** 轮询等待条件成立，避免依赖固定 sleep 造成偶发失败 */
+/**
+ * 轮询等待条件成立，避免依赖固定 sleep 造成偶发失败
+ *
+ * @template T
+ * @param {() => T | Promise<T>} fn
+ * @param {{ timeout?: number, interval?: number, label?: string }} [options]
+ * @returns {Promise<T>}
+ */
 async function waitFor(fn, { timeout = 20000, interval = 150, label = 'condition' } = {}) {
   const deadline = Date.now() + timeout
+  /** @type {unknown} */
   let lastError = null
 
   while (Date.now() < deadline) {
@@ -75,17 +90,23 @@ async function waitFor(fn, { timeout = 20000, interval = 150, label = 'condition
     })
   }
 
-  throw new Error(`等待超时（${label}）${lastError ? `：${lastError.message}` : ''}`)
+  throw new Error(`等待超时（${label}）${lastError instanceof Error ? `：${lastError.message}` : ''}`)
 }
 
+/** @returns {Promise<number>} */
 function getFreePort() {
   return new Promise((ok, fail) => {
     const probe = createServer()
     probe.on('error', fail)
     probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address()
+      const address = probe.address()
+      // 只监听 TCP，地址必然是 AddressInfo；显式收窄而不是断言，避免将来改成 unix socket 时静默拿到 undefined
+      if (address === null || typeof address === 'string') {
+        fail(new Error('未能从探测服务器取到 TCP 端口'))
+        return
+      }
       probe.close(() => {
-        ok(port)
+        ok(address.port)
       })
     })
   })
@@ -108,13 +129,17 @@ function resolveChromiumExecutable() {
     // playwright 未安装对应版本浏览器，继续走缓存扫描
   }
 
+  // 候选根目录。`.filter(Boolean)` 会一并收掉空串，但 TS 不推断 `Boolean` 的类型谓词，
+  // 故写成等价的显式谓词：`!== ''` 保住 `Boolean` 的语义，类型谓词让 `roots` 收窄成 `string[]`。
   const roots = [
     process.env.PLAYWRIGHT_BROWSERS_PATH,
     process.platform === 'win32' && process.env.LOCALAPPDATA
       ? join(process.env.LOCALAPPDATA, 'ms-playwright')
       : null,
     join(process.env.HOME ?? process.env.USERPROFILE ?? '', '.cache', 'ms-playwright')
-  ].filter(Boolean)
+  ].filter(/** @type {(root: string | null | undefined) => root is string} */ (
+    (root) => typeof root === 'string' && root !== ''
+  ))
 
   for (const root of roots) {
     if (!existsSync(root)) continue
@@ -139,6 +164,7 @@ function resolveChromiumExecutable() {
   return null
 }
 
+/** @type {Record<string, string>} 扩展名 → MIME（按扩展名查表，故不能是字面量收窄类型） */
 const MIME_BY_EXTENSION = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -154,7 +180,12 @@ const MIME_BY_EXTENSION = {
   '.map': 'application/json; charset=utf-8'
 }
 
-/** 起一个只服务 dist/ 的最小静态服务器（模块脚本必须是正确 MIME，否则浏览器拒绝执行） */
+/**
+ * 起一个只服务 dist/ 的最小静态服务器（模块脚本必须是正确 MIME，否则浏览器拒绝执行）
+ *
+ * @param {string} root
+ * @returns {Promise<{ server: import('node:http').Server, port: number }>}
+ */
 async function startStaticServer(root) {
   const rootPath = resolve(root)
 
@@ -181,14 +212,28 @@ async function startStaticServer(root) {
     }
   })
 
-  await new Promise((ok) => {
+  // 等监听就绪。显式标注 `Promise<void>` 才能无参调用 `resolve()`（否则 TS 要求给 resolve 参数）
+  /** @type {Promise<void>} */
+  const listening = new Promise((ok) => {
     server.listen(0, '127.0.0.1', () => {
       ok()
     })
   })
-  return { server, port: server.address().port }
+  await listening
+
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('静态服务器未能获得 TCP 端口')
+  return { server, port: address.port }
 }
 
+/**
+ * @param {{ port: number, uploadDir: string }} options
+ * @returns {Promise<{
+ *   child: import('node:child_process').ChildProcess,
+ *   baseUrl: string,
+ *   logs: string[]
+ * }>}
+ */
 async function startRelay({ port, uploadDir }) {
   const child = spawn(process.execPath, ['server/relay-server.js'], {
     cwd: ROOT,
@@ -206,6 +251,7 @@ async function startRelay({ port, uploadDir }) {
     stdio: ['ignore', 'pipe', 'pipe']
   })
 
+  /** @type {string[]} */
   const logs = []
   child.stdout.on('data', (chunk) => logs.push(chunk.toString()))
   child.stderr.on('data', (chunk) => logs.push(chunk.toString()))
@@ -219,7 +265,11 @@ async function startRelay({ port, uploadDir }) {
   return { child, baseUrl, logs }
 }
 
-/** 构造测试夹具；返回 [name, mimeType, buffer] 列表 */
+/**
+ * 构造测试夹具
+ *
+ * @returns {[string, string, Buffer][]} `[name, mimeType, buffer]` 三元组列表
+ */
 function buildFixtures() {
   const encoder = new TextEncoder()
 
@@ -300,15 +350,20 @@ async function main() {
      * 静态站自己身上 —— 而静态站的 SPA 回退会返回 200，界面上看起来只像「网络抖动」。
      * 只断言「页面没报错」是抓不住这类回归的。
      */
+    /** @type {{ who: string, origin: string, url: string }[]} */
     const apiRequests = []
-    for (const [who, page] of [['发送方', sender], ['接收端', receiver]]) {
+    /** @type {[string, import('playwright').Page][]} */
+    const watchedPages = [['发送方', sender], ['接收端', receiver]]
+    for (const [who, page] of watchedPages) {
       page.on('request', (request) => {
         const url = new URL(request.url())
         if (url.pathname.startsWith('/api/')) apiRequests.push({ who, origin: url.origin, url: request.url() })
       })
     }
 
+    /** @type {string[]} */
     const senderPageErrors = []
+    /** @type {string[]} */
     const senderConsoleErrors = []
     sender.on('pageerror', (error) => senderPageErrors.push(String(error)))
     sender.on('console', (message) => {
@@ -327,6 +382,7 @@ async function main() {
     )
     await receiver.locator('#upload button[type="submit"]').click()
     const roomResponse = await roomResponsePromise
+    /** @type {{ roomId: string }} */
     const room = await roomResponse.json()
 
     check('接收端建房返回 201', roomResponse.status() === 201, `HTTP ${roomResponse.status()}`)
@@ -472,14 +528,18 @@ async function main() {
     }
 
     // ── 5. 体积口径：8.5MB 文件已在第 2 步上传成功，这里确认服务端确实落盘 ──
-    const bigUpload = fixtures.at(-1)[0]
-    const roomState = await (await fetch(`${relayBaseUrl}/api/rooms/${room.roomId}`, {
-      headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
-    })).json()
+    // 用下标而非 `.at(-1)`：后者恒返回 `T | undefined`，而这里夹具必然非空（见 buildFixtures）
+    const bigUpload = fixtures[fixtures.length - 1][0]
+    // `Response.json()` 经 undici-types 返回 `unknown`（不是 `any`），故在读取处显式给出形状
+    const roomState = /** @type {{ uploads?: { name: string, size: number, downloadUrl: string }[] }} */ (
+      await (await fetch(`${relayBaseUrl}/api/rooms/${room.roomId}`, {
+        headers: { Authorization: `Bearer ${RELAY_TOKEN}` }
+      })).json()
+    )
     const bigEntry = (roomState.uploads ?? []).find((item) => item.name === bigUpload)
     check(
       '8.5MB 文件确实落盘（旧实现在约 7.86MB 处失败）',
-      Boolean(bigEntry) && bigEntry.size > 8_000_000,
+      bigEntry !== undefined && bigEntry.size > 8_000_000,
       `size=${bigEntry?.size ?? 'missing'}`
     )
 
@@ -489,10 +549,14 @@ async function main() {
     // 的情况下同样会通过，而那正是要防的事故。
     const docxName = '李四-20230102.docx'
     const docxEntry = (roomState.uploads ?? []).find((item) => item.name === docxName)
-    const docxFixture = fixtures.find(([name]) => name === docxName)[2]
-    const docxDownloadUrl = String(docxEntry?.downloadUrl ?? '').startsWith('http')
-      ? String(docxEntry.downloadUrl)
-      : new URL(String(docxEntry?.downloadUrl ?? '/'), relayBaseUrl).toString()
+    const docxFixtureEntry = fixtures.find(([name]) => name === docxName)
+    if (!docxFixtureEntry) throw new Error(`夹具缺少 ${docxName}`)
+    const docxFixture = docxFixtureEntry[2]
+    // 取一次原始值再分支：原先在真分支里重读 `docxEntry.downloadUrl`，可选链无法把该次读取一并收窄
+    const docxDownloadRaw = String(docxEntry?.downloadUrl ?? '/')
+    const docxDownloadUrl = docxDownloadRaw.startsWith('http')
+      ? docxDownloadRaw
+      : new URL(docxDownloadRaw, relayBaseUrl).toString()
     const docxDownload = await fetch(docxDownloadUrl, { headers: { Authorization: `Bearer ${RELAY_TOKEN}` } })
     const docxBytes = Buffer.from(await docxDownload.arrayBuffer())
     check(

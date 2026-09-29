@@ -23,17 +23,28 @@ import { DOCX_MIME, buildDocx } from '../scripts/lib/docx-fixture.mjs'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const TOKEN = 'integration-test-token'
 
+/** @returns {Promise<number>} */
 function getFreePort() {
   return new Promise((resolve, reject) => {
     const probe = createServer()
     probe.on('error', reject)
     probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address()
-      probe.close(() => resolve(port))
+      const address = probe.address()
+      // 只监听 TCP，地址必然是 AddressInfo；显式收窄而不是断言成 AddressInfo
+      if (address === null || typeof address === 'string') {
+        reject(new Error('未能从探测服务器取到 TCP 端口'))
+        return
+      }
+      probe.close(() => resolve(address.port))
     })
   })
 }
 
+/**
+ * @param {string} baseUrl
+ * @param {number} [timeoutMs]
+ * @returns {Promise<void>}
+ */
 async function waitForHealth(baseUrl, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs
 
@@ -91,7 +102,26 @@ function splitEnv(env) {
   return { opEnv, tuning }
 }
 
-/** 起一个真实 relay 进程；返回停止函数 */
+/**
+ * 一个**已启动**的 relay 进程及其配套设施。集中在这里定义，是为了让 `let relay`（在 `beforeAll`
+ * 里赋值）能拿到类型 —— 否则该变量在闭包内被赋值、在用例中被读取，TS 只能当隐式 `any` 处理，
+ * 本文件 122 处 `relay.*` 会一并失去检查。
+ *
+ * @typedef {object} RelayHarness
+ * @property {string} baseUrl
+ * @property {number} port
+ * @property {string} uploadDir
+ * @property {string[]} logs
+ * @property {(options?: { keepUploadDir?: boolean }) => Promise<void>} stop
+ */
+
+/**
+ * 起一个真实 relay 进程；返回停止函数
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @param {{ uploadDir?: string }} [options]
+ * @returns {Promise<RelayHarness>}
+ */
 async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
   const port = await getFreePort()
   const uploadDir = fixedUploadDir ?? (await mkdtemp(join(tmpdir(), 'coolector-it-')))
@@ -117,6 +147,7 @@ async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
     stdio: ['ignore', 'pipe', 'pipe']
   })
 
+  /** @type {string[]} */
   const logs = []
   child.stdout.on('data', (chunk) => logs.push(chunk.toString()))
   child.stderr.on('data', (chunk) => logs.push(chunk.toString()))
@@ -140,7 +171,12 @@ async function startRelay(env = {}, { uploadDir: fixedUploadDir } = {}) {
   }
 }
 
-/** 组装上传请求体（JSON 信封） */
+/**
+ * 组装上传请求体（JSON 信封）
+ *
+ * @param {{ name: string, mimeType?: string, content: string }} fields
+ * @returns {string}
+ */
 function envelopeBody({ name, mimeType = 'text/markdown', content }) {
   return JSON.stringify({
     name,
@@ -153,6 +189,13 @@ function envelopeBody({ name, mimeType = 'text/markdown', content }) {
 const ENVELOPE_HEADERS = { 'Content-Type': 'application/json', 'X-Relay-Envelope': '1' }
 const authHeaders = { Authorization: `Bearer ${TOKEN}` }
 
+/**
+ * 建房并返回服务端生成的房间信息。
+ *
+ * @param {string} baseUrl
+ * @param {string} [roomId] 留空则由服务端生成完整 UUID
+ * @returns {Promise<{ roomId: string }>}
+ */
 async function createRoom(baseUrl, roomId) {
   const response = await fetch(`${baseUrl}/api/rooms`, {
     method: 'POST',
@@ -167,6 +210,10 @@ async function createRoom(baseUrl, roomId) {
  * 服务端默认只返回**相对路径**（F-001 修复：绝不用请求头拼绝对地址），
  * 而 Node 的 `fetch` 要求绝对地址 —— 这里按 harness 的 baseUrl 拼接。
  * 语义与前端 `resolveRelayUrl` 一致（相对路径拼到配置的 Relay 地址上）。
+ *
+ * @param {string} baseUrl
+ * @param {string} target
+ * @returns {string}
  */
 function resolveUrl(baseUrl, target) {
   return target.startsWith('/') ? `${baseUrl}${target}` : target
@@ -178,6 +225,15 @@ function resolveUrl(baseUrl, target) {
  * 为什么不能直接用 `fetch`：`Host` 是 fetch 规范的 forbidden header name，undici 会
  * 静默忽略它 —— 那样这个用例就成了空转（永远测不到真实攻击面）。
  * `node:http` 则允许显式覆盖，能真实复现 F-001。
+ *
+ * @param {number} port
+ * @param {string} pathname
+ * @param {{ method?: string, host?: string, headers?: Record<string, string | number>, body?: string }} [options]
+ * @returns {Promise<{
+ *   status: number | undefined,
+ *   headers: import('node:http').IncomingHttpHeaders,
+ *   text: string
+ * }>}
  */
 function requestWithHost(port, pathname, { method = 'GET', host, headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -193,6 +249,7 @@ function requestWithHost(port, pathname, { method = 'GET', host, headers = {}, b
         ...(payload ? { 'Content-Length': payload.length } : {})
       }
     }, (res) => {
+      /** @type {Buffer[]} */
       const chunks = []
       res.on('data', (chunk) => chunks.push(chunk))
       res.on('end', () => resolve({
@@ -208,13 +265,40 @@ function requestWithHost(port, pathname, { method = 'GET', host, headers = {}, b
   })
 }
 
-/** 读取 SSE 流直到收到指定事件类型，返回该事件的原始帧文本 */
+/**
+ * 读 JSON 响应体。
+ *
+ * `Response.json()` 经 `undici-types` 返回 **`unknown`（不是 `any`）**，而本文件有近 40 处读取点。
+ * 这里统一做一次「采信服务端形状」的收窄，比在每处各写一次断言少得多噪音。
+ *
+ * ⚠️ 这是本文件**唯一**的类型宽松点，且是刻意保留的：这些响应是黑盒 HTTP 的产物，
+ * 它们的形状**正是被紧随其后的 `expect` 所断言的对象**。给它们编一套 typedef 只会得到一个
+ * 未经任何验证的契约（假精确），反而掩盖「服务端改了形状而测试没跟上」这种真实的失效。
+ *
+ * 判据：某个响应若具有**稳定且被多处复用**的形状，就单独为它写 typedef（见 `createRoom`）。
+ *
+ * @param {Response} response
+ * @returns {Promise<any>}
+ */
+async function readJson(response) {
+  return response.json()
+}
+
+/**
+ * 读取 SSE 流直到收到指定事件类型，返回该事件的原始帧文本
+ *
+ * @param {string} streamUrl
+ * @param {string} eventName
+ * @param {number} [timeoutMs]
+ * @returns {Promise<string>}
+ */
 async function readSseEvent(streamUrl, eventName, timeoutMs = 10000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const response = await fetch(streamUrl, { signal: controller.signal })
+    if (!response.body) throw new Error('SSE 响应没有可读的 body')
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -241,6 +325,7 @@ async function readSseEvent(streamUrl, eventName, timeoutMs = 10000) {
 }
 
 describe('relay HTTP 层', () => {
+  /** @type {RelayHarness} */
   let relay
 
   beforeAll(async () => {
@@ -702,6 +787,7 @@ describe('relay HTTP 层', () => {
 }, 60000)
 
 describe('房间配额隔离', () => {
+  /** @type {RelayHarness} */
   let relay
   const ROOM_QUOTA = 1024 * 1024
 
@@ -801,6 +887,7 @@ describe('配置校验 fail-closed', () => {
 }, 60000)
 
 describe('元数据上限与配额计量', () => {
+  /** @type {RelayHarness} */
   let relay
 
   beforeAll(async () => {
@@ -900,6 +987,7 @@ describe('元数据上限与配额计量', () => {
 }, 60000)
 
 describe('配额并发安全', () => {
+  /** @type {RelayHarness} */
   let relay
   const ROOM_QUOTA = 1024 * 1024
 
@@ -940,6 +1028,7 @@ describe('配额并发安全', () => {
 }, 60000)
 
 describe('上传字节限流', () => {
+  /** @type {RelayHarness} */
   let relay
 
   beforeAll(async () => {
@@ -1099,6 +1188,7 @@ describe('建房上限与按房间字节限流', () => {
 }, 90000)
 
 describe('房间生命周期', () => {
+  /** @type {RelayHarness} */
   let relay
 
   beforeAll(async () => {
@@ -1147,6 +1237,7 @@ describe('房间生命周期', () => {
 }, 60000)
 
 describe('启动恢复的归属门控', () => {
+  /** @type {string} */
   let uploadDir
 
   beforeAll(async () => {
@@ -1201,6 +1292,7 @@ describe('启动恢复的归属门控', () => {
 // 生产代码里的注入开关已删除。
 
 describe('在途上传与房间删除的交界', () => {
+  /** @type {RelayHarness} */
   let relay
 
   beforeAll(async () => {
@@ -1252,6 +1344,7 @@ describe('在途上传与房间删除的交界', () => {
 }, 60000)
 
 describe('details 端点契约', () => {
+  /** @type {RelayHarness} */
   let relay
 
   beforeAll(async () => {
@@ -1306,6 +1399,7 @@ describe('details 端点契约', () => {
 }, 60000)
 
 describe('重启后恢复房间与作业（房间元数据持久化）', () => {
+  /** @type {string} */
   let uploadDir
 
   beforeAll(async () => {
@@ -1397,7 +1491,9 @@ describe('重启后恢复房间与作业（房间元数据持久化）', () => {
 }, 60000)
 
 describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
+  /** @type {RelayHarness} */
   let relay
+  /** @type {number} F-001 用例用 `node:http` 直连，需要端口号（fetch 无法伪造 Host） */
   let port
 
   beforeAll(async () => {
@@ -1536,6 +1632,7 @@ describe('对外 URL 不得受请求头影响（F-001 回归）', () => {
 }, 60000)
 
 describe('RELAY_PUBLIC_BASE_URL：唯一允许产生绝对 URL 的来源', () => {
+  /** @type {RelayHarness} */
   let relay
 
   beforeAll(async () => {
