@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { isLoopbackHost } from './relay-utils.js'
+import { isBindableHost, isLoopbackHost, parsePositiveInt } from './relay-utils.js'
 
 // 先把根 .env 读进本进程：relay 子进程原本靠 --env-file 拿到令牌，
 // 但编排器需要提前知道 RELAY_TOKEN 是否已配置，才能决定 relay 该绑到哪个地址。
@@ -22,9 +22,32 @@ const hasRelayToken = Boolean((process.env.RELAY_TOKEN ?? '').trim())
 const requestedRelayHost = process.env.RELAY_HOST ?? process.env.HOST ?? null
 const relayHostForcedLoopback = !hasRelayToken && Boolean(requestedRelayHost) && !isLoopbackHost(requestedRelayHost)
 
+// ── 唯一需要在本文件校验 env 的两项：它们会被拼进一条 shell 命令行 ──────────────
+//
+// `pnpm exec vite --host <host> --port <port>` 是一条交给 shell 解析的**字符串**。
+// Node 的 `shell: true` 只做拼接、不做转义（DEP0190 警告讲的就是这件事），因此这两个值
+// 直接落进 shell 语法：`APP_PORT=5174 & calc` 会执行第二条命令。
+//
+// 选择「白名单校验」而不是「加引号」，是因为合法字面量可穷举、而正确转义跨 shell 不通用
+// （cmd 的 `^` 与 sh 的 `\` 不共享语义，嵌套引号在 `cmd /c "..."` 里还会被剥一层）。
+//
+// ⚠️ 本文件**只需**校验这两项：HOST / PORT / RELAY_* 都是通过 `env` 传给
+// `server/relay-server.js` 子进程的，不经 shell，由 relay-config.js 自行 fail-closed 校验。
+const appPortResult = parsePositiveInt(process.env.APP_PORT, { fallback: 5174, max: 65535 })
+if (!appPortResult.ok) {
+  console.error(`[start] 拒绝启动：APP_PORT 必须是 1–65535 之间的整数，当前值为 ${JSON.stringify(appPortResult.raw)}。`)
+  process.exit(1)
+}
+
+const appHost = (process.env.APP_HOST ?? '0.0.0.0').trim()
+if (!isBindableHost(appHost)) {
+  console.error(`[start] 拒绝启动：APP_HOST 必须是主机名或 IP 字面量（如 0.0.0.0 / 127.0.0.1 / ::1），当前值为 ${JSON.stringify(process.env.APP_HOST ?? '')}。`)
+  process.exit(1)
+}
+
 const config = {
-  appHost: process.env.APP_HOST ?? '0.0.0.0',
-  appPort: process.env.APP_PORT ?? '5174',
+  appHost,
+  appPort: appPortResult.value,
   relayHost: hasRelayToken ? (requestedRelayHost ?? '0.0.0.0') : '127.0.0.1',
   relayPort: process.env.PORT ?? process.env.RELAY_PORT ?? '8787'
 }
@@ -54,6 +77,8 @@ function killProcessTree(child) {
 /**
  * @param {string} name 子进程显示名（日志用）
  * @param {string} command
+ *   ⚠️ 传 `shell: true` 时，这里必须是**整条命令**、`args` 必须为空数组。
+ *   同时给 args 会触发 Node 的 DEP0190 弃用警告（只拼接、不转义），且高版本将转为硬错误。
  * @param {string[]} args
  * @param {Record<string, string>} [env] 追加到当前进程环境之上
  * @param {import('node:child_process').SpawnOptions} [options]
@@ -112,11 +137,14 @@ if (!hasRelayToken) {
   console.log('[start] 需要对公网提供服务时，请在 .env 中设置 RELAY_TOKEN，relay 将自动监听 0.0.0.0。')
 }
 
-// Windows 下 pnpm 实际是 pnpm.cmd，需经 shell 解析才能启动
+// Windows 下 pnpm 实际是 pnpm.cmd，需经 shell 解析才能启动。
+// 因此命令必须传成**一整个字符串**（见 startProcess 的说明）：单字符串走的是 Node 自带的
+// `cmd.exe /d /s /c "<命令>"` 路径、引号由 Node 处理；一旦改成 args 数组，Node 退化为纯拼接，
+// 既抛 DEP0190，也让上面两道白名单校验失去意义。
 startProcess(
   'web app',
-  'pnpm',
-  ['exec', 'vite', '--host', config.appHost, '--port', config.appPort],
+  `pnpm exec vite --host ${config.appHost} --port ${config.appPort}`,
+  [],
   {},
   { shell: process.platform === 'win32' }
 )
@@ -135,7 +163,11 @@ if (existsSync('.env')) {
 const devAllowedOrigins = process.env.RELAY_ALLOWED_ORIGINS?.trim()
   || `http://localhost:${config.appPort},http://127.0.0.1:${config.appPort}`
 
-startProcess('relay server', 'node', relayArgs, {
+// ⚠️ 用 process.execPath 而不是 PATH 里的 `node`：父子必须是同一个解释器。
+// 本机同时装着受管 node 22 与系统 node 24 时，`node` 解析到哪一个取决于 PATH 顺序，
+// 会静默出现「编排器跑 24、relay 跑 22」的错配——只在两边行为有差异时才暴露。
+// 这条路径不经 shell，args 数组正常转义，无需额外校验。
+startProcess('relay server', process.execPath, relayArgs, {
   HOST: config.relayHost,
   PORT: config.relayPort,
   RELAY_ALLOWED_ORIGINS: devAllowedOrigins

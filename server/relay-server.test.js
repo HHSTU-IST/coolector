@@ -916,6 +916,69 @@ describe('配置校验 fail-closed', () => {
   }, 20000)
 }, 60000)
 
+describe('监听失败 fail-closed', () => {
+  /**
+   * 端口被占用是**最常见的启动失败**：`server/start.js` 被强杀时来不及回收进程树，
+   * 上一次的 relay 会留成孤儿继续占着端口。这里复现它，断言的是**提示内容**与退出码 ——
+   * 在给 `listen` 注册 error 处理器之前，这里只会抛出一屏 `at Server.setupListenHandle`
+   * 堆栈，看不出「是谁占的、怎么放掉」。
+   */
+  it('端口被占用时退出码为 1，并提示如何定位与结束占用者（而不是抛未处理事件堆栈）', async () => {
+    // 由测试进程自己占住端口，再让 relay 去绑同一个端口
+    const holder = createServer()
+    const port = await new Promise((resolve, reject) => {
+      holder.once('error', reject)
+      holder.listen(0, '127.0.0.1', () => {
+        const address = holder.address()
+        // 只监听 TCP，地址必然是 AddressInfo
+        if (address === null || typeof address === 'string') {
+          reject(new Error('未能从占位服务器取到 TCP 端口'))
+          return
+        }
+        resolve(address.port)
+      })
+    })
+
+    const child = spawn(process.execPath, ['server/relay-server.js'], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        HOST: '127.0.0.1',
+        PORT: String(port),
+        RELAY_TOKEN: TOKEN
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+
+    let output = ''
+    child.stdout.on('data', (chunk) => { output += chunk.toString() })
+    child.stderr.on('data', (chunk) => { output += chunk.toString() })
+
+    const code = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM')
+        resolve(null)
+      }, 15000)
+
+      child.once('exit', (exitCode) => {
+        clearTimeout(timer)
+        resolve(exitCode)
+      })
+    })
+
+    await new Promise((resolve) => { holder.close(resolve) })
+
+    // ⚠️ 退出码必须是 1：start.js 靠子进程退出码决定是否连带停掉 web app，
+    // 标成 0 会让「启动失败」在 CI 与脚本里完全不可见。
+    expect(code).toBe(1)
+    expect(output).toMatch(/EADDRINUSE/u)
+    // 提示里必须带上本平台可用的定位命令
+    expect(output).toMatch(process.platform === 'win32' ? /netstat -ano/u : /lsof -i/u)
+    // 关键回归：不能再把 Node 的未处理事件堆栈直接甩出来
+    expect(output).not.toMatch(/setupListenHandle/u)
+  }, 30000)
+})
+
 describe('元数据上限与配额计量', () => {
   /** @type {RelayHarness} */
   let relay

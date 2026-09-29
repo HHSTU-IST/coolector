@@ -638,6 +638,45 @@ if (ALLOWED_ORIGINS.length === 0) {
 
 await restoreRooms()
 
+/**
+ * 把 `listen` 的 bind 失败翻译成**可操作的**提示。
+ *
+ * 不注册本处理器时，Node 会把 `'error'` 当未处理事件抛出、打印一屏堆栈后以 1 退出 ——
+ * 其中最常遇到的一种（端口被上一次留存的进程占着）恰恰看不出「是谁占的、怎么放掉」，
+ * 而 Windows 上孤儿进程是常态：编排器被强杀时 `server/start.js` 的进程树回收来不及执行。
+ *
+ * 退出码必须保持 1：`server/start.js` 依据子进程退出码决定是否连带停掉 web app，
+ * 失败被标成 0 会让启动失败在 CI 与脚本里完全不可见。
+ *
+ * @param {Error} error
+ * @returns {void}
+ */
+function reportListenFailure(error) {
+  const code = /** @type {NodeJS.ErrnoException} */ (error).code ?? ''
+
+  console.error(`[relay] 无法监听 ${HOST}:${PORT}（${code || error.message}）。`)
+
+  if (code === 'EADDRINUSE') {
+    console.error('[relay] 该端口已被占用 —— 通常是上一次启动留下的、未随终端一起退出的 relay 进程。')
+    if (process.platform === 'win32') {
+      console.error(`[relay] 定位占用者：netstat -ano | findstr :${PORT}`)
+      console.error('[relay] 结束占用者：taskkill /PID <上面最后一列的 PID> /F')
+    } else {
+      console.error(`[relay] 定位占用者：lsof -i :${PORT}`)
+      console.error('[relay] 结束占用者：kill <上面最后一列的 PID>')
+    }
+    console.error('[relay] 也可以改用别的端口：在 .env 里设置 PORT=<端口>。')
+  } else if (code === 'EACCES') {
+    console.error('[relay] 端口被拒绝绑定。监听 1024 以下的端口需要特权，请改用高位端口。')
+  } else if (code === 'EADDRNOTAVAIL') {
+    console.error(`[relay] ${HOST} 不是本机可绑定的地址。请检查 .env 里的 HOST（可用 0.0.0.0 监听全部网卡）。`)
+  }
+
+  process.exit(1)
+}
+
+server.on('error', reportListenFailure)
+
 server.listen(PORT, HOST, () => {
   console.log(`Relay server listening on http://${HOST}:${PORT}`)
 })

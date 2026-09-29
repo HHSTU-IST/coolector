@@ -366,6 +366,33 @@ export function isLoopbackHost(host) {
 }
 
 /**
+ * 判断监听地址是否具备「主机名 / IP 字面量」的形态。
+ *
+ * 存在的理由是**拼接**：`server/start.js` 要把地址拼进一条经 `sh`（Windows 上是 `cmd`）
+ * 解析的命令行（`pnpm exec vite --host <host>`）。此时 `.env` 里的值就是 shell 语法的一部分 ——
+ * `APP_HOST='0.0.0.0 & calc'` 会被当成第二条命令执行。Node 的 `shell: true` 只做拼接、
+ * 不做转义（这正是 DEP0190 警告的内容），转义责任在调用方，而**白名单比转义更难写错**。
+ *
+ * 白名单按「合法取值」而非「危险字符」来定：IPv4 / IPv6（可带方括号）/ 主机名。常见取值
+ * `0.0.0.0`、`127.0.0.1`、`::`、`::1`、`[::1]`、`localhost` 全在集合内，而空格、`&`、`|`、
+ * `;`、`$`、反引号、`%`、引号、重定向符、通配符、`/`、`=`、换行一个都不在。
+ *
+ * ⚠️ 这里判的是**形态**，不是「本机是否真能绑上」—— 后者只有 `listen` 知道，由
+ * `relay-server.js` 的 bind 失败提示负责。不要把本函数当可用性校验用。
+ *
+ * 空值一律拒绝（而非当作「监听全部网卡」）：监听地址必须是**显式决定**的，
+ * 与 `RELAY_ALLOWED_ORIGINS` 默认不放开跨源是同一个理由。
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isBindableHost(value) {
+  const host = String(value ?? '').trim()
+  if (host.length === 0 || host.length > 253) return false
+  return /^[A-Za-z0-9._:[\]-]+$/u.test(host)
+}
+
+/**
  * 按白名单生成 CORS 头工厂；来源不在白名单时返回空对象，浏览器会自行拦截。
  *
  * `@returns` 里必须显式写出 `req` 的类型：工厂返回的是内联箭头函数，签名只能从这里推断，

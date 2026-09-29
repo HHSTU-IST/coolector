@@ -7,6 +7,7 @@ import {
   decodeUploadFileName,
   deriveUploadText,
   digestName,
+  isBindableHost,
   isLoopbackHost,
   isTextMimeType,
   isWeakRoomId,
@@ -571,6 +572,48 @@ describe('isLoopbackHost', () => {
   it('非回环返回 false', () => {
     expect(isLoopbackHost('0.0.0.0')).toBe(false)
     expect(isLoopbackHost('::')).toBe(false)
+  })
+})
+
+describe('isBindableHost', () => {
+  // 这个函数只在「值会被拼进 shell 命令行」时被调用（server/start.js 的 vite 命令），
+  // 所以下面的用例分两类：合法的常见取值必须放行，任何能被 shell 当语法解释的字符必须拒绝。
+  it('放行常见的主机名与 IP 字面量', () => {
+    for (const host of ['0.0.0.0', '127.0.0.1', '::', '::1', '[::1]', 'localhost', 'relay.example.com', 'my-host.local']) {
+      expect(isBindableHost(host)).toBe(true)
+    }
+  })
+
+  it('拒绝所有含 shell 元字符的值 —— 否则 .env 里的一行就能执行第二条命令', () => {
+    for (const host of [
+      '0.0.0.0 & calc',
+      '0.0.0.0;ls',
+      '0.0.0.0|ls',
+      '0.0.0.0$(id)',
+      '0.0.0.0`id`',
+      '0.0.0.0%PATH%',
+      '"0.0.0.0"',
+      "'0.0.0.0'",
+      '0.0.0.0>out',
+      '0.0.0.0*',
+      '0.0.0.0\n& calc',
+      '../etc/passwd',
+      'host=1'
+    ]) {
+      expect(isBindableHost(host)).toBe(false)
+    }
+  })
+
+  it('拒绝空值 —— 监听地址必须是显式决定，空串不当作「监听全部网卡」', () => {
+    expect(isBindableHost('')).toBe(false)
+    expect(isBindableHost('   ')).toBe(false)
+    expect(isBindableHost(undefined)).toBe(false)
+    expect(isBindableHost(null)).toBe(false)
+  })
+
+  it('拒绝超长值（DNS 名上限 253）', () => {
+    expect(isBindableHost('a'.repeat(253))).toBe(true)
+    expect(isBindableHost('a'.repeat(254))).toBe(false)
   })
 })
 
