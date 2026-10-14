@@ -36,7 +36,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^26.6.3",
     "@vitejs/plugin-vue": "^6.0.10",
-    "@vue/test-utils": "^2.5.0",
+    "@vue/test-utils": "^2.5.1",
     "@vue/tsconfig": "^0.9.1",
     "autoprefixer": "^10.6.1",
     "happy-dom": "^20.13.2",
