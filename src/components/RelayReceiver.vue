@@ -40,6 +40,11 @@
             <p class="mt-1 text-xs text-gray-500">
               密钥不再随页面分发，只保存在本机 localStorage。若 Relay 未配置 RELAY_TOKEN 可留空。
             </p>
+            <!-- 沙箱页面（CSP sandbox 缺 allow-same-origin）下 localStorage 抛 SecurityError，
+                 密钥只在内存里 ⇒ 刷新即失。不提示的话，用户会反复遇到「填过却鉴权失败」。 -->
+            <p v-if="!relayTokenStorageAvailable" class="mt-1 text-xs text-amber-600">
+              当前页面无法本地保存密钥（浏览器沙箱限制），刷新后需重新填写。
+            </p>
           </div>
 
           <div>
@@ -122,6 +127,7 @@
 
 <script setup lang="ts">
 import { useRelayReceiver } from '../composables/useRelayReceiver'
+import { relayTokenStorageAvailable } from '../utils/relay'
 
 const {
   relayToken,

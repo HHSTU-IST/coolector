@@ -235,3 +235,44 @@ describe('useRelayReceiver 的事件流', () => {
     wrapper.unmount()
   })
 })
+
+/**
+ * 401 有两种完全不同的成因，服务端回的是同一个状态码：密钥**没填**（或页面刷新后丢失）
+ * 与密钥**填错**。合成一句「请检查是否一致」会让人反复核对一个压根没填进去的值 ——
+ * 2026-10-24 在沙箱托管页上实测到的正是这一类：storage 不可用 ⇒ 刷新后密钥为空。
+ */
+describe('建房 401 的文案区分', () => {
+  /** 让建房请求恒定返回 401，其余请求不参与 */
+  const stubUnauthorized = () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'unauthorized' }, 401)))
+  }
+
+  const connectWithToken = async (token: string) => {
+    relayToken.value = token
+    const wrapper = mount(defineComponent({
+      setup() {
+        api = useRelayReceiver()
+        return () => null
+      }
+    }))
+    api.relayBaseUrl.value = BASE
+    await api.connect()
+    return wrapper
+  }
+
+  it('密钥为空（含纯空白）时提示「未填写」', async () => {
+    stubUnauthorized()
+    const wrapper = await connectWithToken('   ')
+    expect(api.statusMessage.value).toMatch(/未填写接收端密钥/u)
+    wrapper.unmount()
+  })
+
+  /** 判别力对照：上一条不是因为「反正都连不上所以文案无所谓」而通过 */
+  it('密钥填了但不一致时提示「不一致」', async () => {
+    stubUnauthorized()
+    const wrapper = await connectWithToken('definitely-wrong-token')
+    expect(api.statusMessage.value).toMatch(/不一致/u)
+    expect(api.statusMessage.value).not.toMatch(/未填写/u)
+    wrapper.unmount()
+  })
+})

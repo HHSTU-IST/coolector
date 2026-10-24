@@ -159,6 +159,24 @@ const readStoredToken = (): string => {
 /** 接收端管理密钥；由用户在界面上填写并持久化在 localStorage，不来自构建产物 */
 export const relayToken = ref(readStoredToken())
 
+/**
+ * 本地存储是否可用。**模块加载期探测一次**，界面据此说明「密钥会不会被保存」。
+ *
+ * 不成立的典型场景是托管页面带 `Content-Security-Policy: sandbox` 且缺 `allow-same-origin`
+ * （已实测 shippage.ai）—— 文档处于 opaque origin，`localStorage` 直接抛 `SecurityError`。
+ * 那种页面上密钥只能活在内存里：**刷新即失**，若不告知用户，他会反复遇到「明明填过却鉴权失败」。
+ */
+export const relayTokenStorageAvailable = (() => {
+  const probeKey = `${TOKEN_STORAGE_KEY}.probe`
+  try {
+    globalThis.localStorage?.setItem(probeKey, '1')
+    globalThis.localStorage?.removeItem(probeKey)
+    return true
+  } catch {
+    return false
+  }
+})()
+
 watch(relayToken, (value) => {
   try {
     if (value) {
@@ -190,10 +208,17 @@ watch(relayToken, (value) => {
  */
 export const NGROK_SKIP_HEADER: Record<string, string> = { 'ngrok-skip-browser-warning': '1' }
 
-/** 组装带鉴权头的请求头；未配置密钥时不带 Authorization（服务端未设 RELAY_TOKEN 时才允许） */
+/**
+ * 组装带鉴权头的请求头；未配置密钥时不带 Authorization（服务端未设 RELAY_TOKEN 时才允许）
+ *
+ * 密钥先 `trim()` 再使用：从文档/聊天里复制密钥极易带上首尾空格或换行，而服务端是**恒定时间
+ * 全串比较**，多一个空格就是 401 —— 界面上只看到「鉴权失败」，用户无从判断是真错还是多了空白。
+ * trim 后为空则**不发** Authorization，与「未配置」走同一路径。
+ */
 export const withAuth = (headers: Record<string, string> = {}): Record<string, string> => {
   const merged: Record<string, string> = { ...headers, ...NGROK_SKIP_HEADER }
-  if (relayToken.value) merged.Authorization = `Bearer ${relayToken.value}`
+  const token = relayToken.value.trim()
+  if (token) merged.Authorization = `Bearer ${token}`
   return merged
 }
 

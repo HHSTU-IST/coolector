@@ -118,7 +118,11 @@ export function useRelayReceiver() {
 
     if (!response.ok) {
       if (response.status === 401) {
-        throw new Error('鉴权失败：请检查接收端密钥是否与 Relay 的 RELAY_TOKEN 一致')
+        // 区分「没填」与「填错」：两者服务端都回 401，但处置完全不同 —— 前者是忘了填
+        // （或页面刷新后丢失），后者才是密钥本身不对。合成一条文案只会让人反复核对一个正确的值。
+        throw new Error(relayToken.value.trim()
+          ? '鉴权失败：接收端密钥与 Relay 的 RELAY_TOKEN 不一致（区分大小写，勿含空格或换行）'
+          : '鉴权失败：未填写接收端密钥 —— 该 Relay 已启用 RELAY_TOKEN，接收端必须填写后才能建房')
       }
       const payload = await response.json().catch(() => null) as { error?: string } | null
       throw new Error(payload?.error ?? `房间创建失败（HTTP ${response.status}）`)

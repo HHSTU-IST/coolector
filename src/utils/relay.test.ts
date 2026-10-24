@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest'
-import { normalizeRelayUrl, resolveRelayUrl, UntrustedRelayUrlError, validateRelayUrl } from './relay'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  normalizeRelayUrl,
+  relayToken,
+  resolveRelayUrl,
+  UntrustedRelayUrlError,
+  validateRelayUrl,
+  withAuth
+} from './relay'
 
 const BASE = 'http://127.0.0.1:8787'
 
@@ -158,5 +165,34 @@ describe('validateRelayUrl', () => {
     expect(validateRelayUrl('https://a.example/?x=1')).not.toBe('')
     expect(validateRelayUrl('https://a.example/relay#')).not.toBe('')
     expect(validateRelayUrl('https://user:pass@a.example')).not.toBe('')
+  })
+})
+
+/**
+ * 密钥是**恒定时间全串比较**：手抄时带进一个空格就是 401，而界面上只看到「鉴权失败」，
+ * 用户无从判断是真错还是多了空白。故发送前 trim。
+ */
+describe('withAuth', () => {
+  afterEach(() => {
+    relayToken.value = ''
+  })
+
+  it('密钥首尾空白被剥离（含换行 —— 从聊天/文档复制时最常见）', () => {
+    relayToken.value = '  tok\nen  '
+    expect(withAuth().Authorization).toBe('Bearer tok\nen')
+  })
+
+  it('密钥全为空白时不发 Authorization（与「未配置」同一路径）', () => {
+    relayToken.value = '   '
+    expect(withAuth().Authorization).toBeUndefined()
+  })
+
+  it('未配置密钥时不发 Authorization', () => {
+    expect(withAuth().Authorization).toBeUndefined()
+  })
+
+  it('每个请求都带 ngrok 跳过头 —— 与是否鉴权无关（隧道下 GET 会被插页拦掉）', () => {
+    relayToken.value = 'x'
+    expect(withAuth()['ngrok-skip-browser-warning']).toBe('1')
   })
 })
