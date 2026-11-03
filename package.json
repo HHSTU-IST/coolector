@@ -28,7 +28,7 @@
     "probe:xff": "node --env-file-if-exists=.env scripts/probes/tunnel-xff-probe.mjs"
   },
   "dependencies": {
-    "pinia": "^3.0.4",
+    "pinia": "^4.1.0",
     "vue": "^3.5.44"
   },
   "devDependencies": {
