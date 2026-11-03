@@ -267,6 +267,14 @@ const RATE_LIMIT_MAX = pick('RATE_LIMIT_MAX')
 // 否则一份被改过的元数据就能塞进任意长度的预览串。
 const PREVIEW_TEXT_CHARS = 4096
 
+// SSE 接收端「未 flush 的写缓冲」上限（字节）。纯模块常量。
+// 一个卡住 / 极慢的接收端会让 `res.writableLength` 只增不减：每条 upload.created 都往
+// 这条永不排空的流上再压一帧，缓冲便随事件数线性膨胀 —— 这是一条现成的内存耗尽 DoS 通路。
+// 越过本上限即判定该接收端「太慢」，主动断开它：事件随即落回**有界**的离线队列（见
+// MAX_QUEUE_EVENTS），等它带 Last-Event-ID 重连时再重放 —— 内存占用被钉死在本值 + 队列，
+// 不再随断线时长无界增长。
+const SSE_MAX_BUFFERED_BYTES = 1024 * 1024
+
 
 export {
   requirePositiveInt,
@@ -290,6 +298,7 @@ export {
   MAX_UPLOAD_NAME_BYTES,
   ROOM_CLEANUP_INTERVAL_MS,
   PREVIEW_TEXT_CHARS,
+  SSE_MAX_BUFFERED_BYTES,
   PUBLIC_BASE_URL,
   STREAM_TICKET_TTL_MS,
   RATE_LIMIT_WINDOW_MS,

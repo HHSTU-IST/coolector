@@ -9,7 +9,7 @@ import { basename, join } from 'node:path'
 import { normalizeIsoDate, sanitizeMimeType, sanitizeRoomId, sanitizeStorageFileName } from './relay-utils.js'
 import {
   MAX_QUEUE_EVENTS, MAX_ROOM_UPLOAD_BYTES,
-  MAX_ROOM_UPLOADS, MAX_TOTAL_UPLOAD_BYTES, PREVIEW_TEXT_CHARS, ROOM_MAX_LIFETIME_MS, ROOM_TTL_MS, UPLOAD_DIR
+  MAX_ROOM_UPLOADS, MAX_TOTAL_UPLOAD_BYTES, PREVIEW_TEXT_CHARS, ROOM_MAX_LIFETIME_MS, ROOM_TTL_MS, SSE_MAX_BUFFERED_BYTES, UPLOAD_DIR
 } from './relay-config.js'
 import { HttpError, auditLog, nowIso, relayUrl, writeSseFrame } from './relay-http.js'
 
@@ -320,13 +320,27 @@ function dispatchEvent(room, eventName, data) {
   room.updatedAt = event.createdAt
   room.lastActivity = Date.now()
 
-  if (room.receiver && room.receiver.res.writable) {
-    try {
-      writeSseFrame(room.receiver.res, eventName, event)
-      room.stats.eventsDelivered += 1
-      return event
-    } catch {
+  const receiver = room.receiver
+  if (receiver && receiver.res.writable) {
+    // 背压上界：慢/卡住的接收端会让未 flush 的写缓冲只增不减，越过阈值即判定「太慢」并断开，
+    // 让本事件落回**有界**离线队列，等其带 Last-Event-ID 重连时重放——否则内存随事件数无界膨胀。
+    if (receiver.res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+      auditLog('receiver_too_slow', {
+        roomId: room.id,
+        eventType: eventName,
+        bufferedBytes: receiver.res.writableLength
+      })
       closeReceiver(room)
+    } else {
+      try {
+        writeSseFrame(receiver.res, eventName, event)
+        room.stats.eventsDelivered += 1
+        return event
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        auditLog('receiver_push_failed', { roomId: room.id, eventType: eventName, message })
+        closeReceiver(room)
+      }
     }
   }
 
@@ -366,6 +380,46 @@ const ROOM_METADATA_VERSION = 1
 const UPLOAD_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/u
 const MAX_PERSISTED_NAME_CHARS = 512
 const MAX_STORAGE_FILE_NAME_CHARS = 200
+
+/**
+ * 启动恢复的并发上限。恢复是 I/O 密集的（逐目录读 `room.json`、逐上传 `stat` 其正文文件）：
+ * 完全串行会让重启时间随作业数线性拉长；而无上限的 `Promise.all` 又可能瞬时打开成千上万个
+ * 文件描述符（触发 EMFILE）。取一个中等并发度，兼顾「快」与「不把 FD 打满」。
+ */
+const RESTORE_CONCURRENCY = 32
+
+
+/**
+ * 以固定并发度遍历 items，对每项调用异步 mapper，返回**与输入同序**的结果数组。
+ *
+ * 采用「工作池抢占共享游标」而非一次性 `Promise.all`：同时在跑的 mapper 数被 `limit` 钉死，
+ * 结果仍按输入下标回填，因此调用方可以依赖顺序（告警目录清单等须与磁盘枚举顺序一致）。
+ * `cursor++` 跨 worker 安全：JS 单线程，自增与读取之间不会被其它任务插入。
+ *
+ * @template T
+ * @template R
+ * @param {T[]} items
+ * @param {number} limit 同时进行的 mapper 上限（≥1）
+ * @param {(item: T, index: number) => Promise<R>} mapper
+ * @returns {Promise<R[]>}
+ */
+async function mapWithConcurrency(items, limit, mapper) {
+  /** @type {R[]} */
+  const results = new Array(items.length)
+  let cursor = 0
+
+  const workerCount = Math.max(1, Math.min(limit, items.length))
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const index = cursor++
+      if (index >= items.length) break
+      results[index] = await mapper(items[index], index)
+    }
+  })
+
+  await Promise.all(workers)
+  return results
+}
 
 
 /**
@@ -460,6 +514,30 @@ function isSafeStorageFileName(fileName) {
 
 
 /**
+ * 房间元数据的**前向迁移缝**：把自报版本落后于 `ROOM_METADATA_VERSION` 的历史文件就地升到当前版本。
+ *
+ * 为什么要有这条缝：`readRoomMetadata` 若对任何「非当前版本」一律整份丢弃，等于「一改元数据格式，
+ * 所有存量房间目录都在下次重启时凭空蒸发、作业全部读不回」。有了逐级升版，新增可选字段这类**向后
+ * 兼容**的演进只需在此追加一个 `parsed.version === <旧值>` 分支补齐默认字段，存量文件即可继续被识别，
+ * 而写路径（serializeRoom）始终直接写最新版本，读侧只需负责「升上来」。
+ *
+ * 迁移只做**无损**动作（补默认值、改名），绝不猜测语义；任何需要正文或无法自证正确的转换都返回 `null`，
+ * 交回上层「跳过 + 告警、绝不删目录」的既定处置。当前 `ROOM_METADATA_VERSION = 1`，尚无任何历史版本，
+ * 因此没有可执行的升版步骤 —— 一旦把版本 bump 到 2，就在这里加一步「v1→v2 的无损字段补齐」，
+ * 把 `parsed.version` 置为 2 后返回。
+ *
+ * @param {Record<string, unknown>} parsed 已通过 generator/roomId 校验、且 version < ROOM_METADATA_VERSION
+ * @returns {Record<string, unknown> | null} 升不动时返回 null（调用方据此跳过该目录）
+ */
+function migrateRoomMetadata(parsed) {
+  // 逐级升版：尚无 (version → version+1) 步骤 —— version=1 是首个版本，没有更早格式可迁移。
+  // 保留按 parsed.version 分支的骨架：未来 bump 到 2 时，此处 `if (parsed.version === 1) { …; parsed.version = 2; return parsed }`。
+  if (typeof parsed.version !== 'number') return null
+  return null
+}
+
+
+/**
  * 读取并校验房间元数据。
  *
  * 返回 `null` 覆盖三种情况，**且都绝不删除目录**：文件不存在（外来目录 / 老版本遗留）、
@@ -468,7 +546,7 @@ function isSafeStorageFileName(fileName) {
  *
  * @param {string} roomDir
  * @param {string} roomId 目录名；必须与元数据内的 roomId 一致，否则视为不属于本程序
- * @returns {Promise<{ createdAt?: unknown, updatedAt?: unknown, uploads: unknown[] } | null>}
+ * @returns {Promise<{ version?: unknown, createdAt?: unknown, updatedAt?: unknown, uploads: unknown[] } | null>}
  */
 async function readRoomMetadata(roomDir, roomId) {
   let parsed
@@ -480,8 +558,19 @@ async function readRoomMetadata(roomDir, roomId) {
 
   if (!parsed || typeof parsed !== 'object') return null
   if (parsed.generator !== ROOM_METADATA_GENERATOR) return null
-  if (parsed.version !== ROOM_METADATA_VERSION) return null
   if (parsed.roomId !== roomId) return null
+
+  // 版本号分级：先坐实它是整数，再区分「比本程序新」与「比本程序旧」
+  if (typeof parsed.version !== 'number' || !Number.isInteger(parsed.version)) return null
+  // 比本程序还新：无法理解其字段语义，保守跳过（绝不按不确定的格式猜测、更不删目录）
+  if (parsed.version > ROOM_METADATA_VERSION) return null
+  // 落后于当前版本：走前向迁移缝就地升版；升不动（暂无对应步骤）即跳过
+  if (parsed.version < ROOM_METADATA_VERSION) {
+    const migrated = migrateRoomMetadata(parsed)
+    if (!migrated) return null
+    parsed = migrated
+  }
+
   if (!Array.isArray(parsed.uploads)) return null
 
   return parsed
@@ -696,10 +785,14 @@ async function restoreRooms() {
   let restoredBytes = 0
   let skippedUploads = 0
   let strayFiles = 0
-  /** 名称不是合法房间 ID、或没有有效元数据的目录 */
-  const unrecognized = []
+  /** 「目录名不合法」与「元数据无效」两类无法识别的目录，按枚举下标合并后再排序，复刻旧扫描顺序 */
+  const unrecognizedMarks = []
 
+  // —— 同步分类：散落文件、非法目录名先就地判定；名称合法的目录留待并发读元数据 ——
+  const roomCandidates = []
+  let index = 0
   for (const entry of entries) {
+    const entryIndex = index++
     if (!entry.isDirectory()) {
       strayFiles += 1
       continue
@@ -707,40 +800,74 @@ async function restoreRooms() {
 
     const roomId = sanitizeRoomId(entry.name)
     if (!roomId || roomId !== entry.name) {
-      unrecognized.push(entry.name)
+      unrecognizedMarks.push({ index: entryIndex, name: entry.name })
       continue
     }
 
-    const roomDir = join(UPLOAD_DIR, entry.name)
-    const metadata = await readRoomMetadata(roomDir, roomId)
-    if (!metadata) {
-      unrecognized.push(entry.name)
+    roomCandidates.push({ index: entryIndex, name: entry.name, roomId })
+  }
+
+  // —— 第一层并发：各候选目录读 room.json（readFile）。结果与候选同序，便于稳定分区 ——
+  const metadataResults = await mapWithConcurrency(roomCandidates, RESTORE_CONCURRENCY, async (candidate) => {
+    const roomDir = join(UPLOAD_DIR, candidate.name)
+    const metadata = await readRoomMetadata(roomDir, candidate.roomId)
+    return { ...candidate, roomDir, metadata }
+  })
+
+  // 元数据无效的目录计入 unrecognized（读是异步的，不能在第一层直接 push，否则丢序）
+  /** @type {{ room: Room, roomDir: string, roomId: string, uploads: unknown[] }[]} */
+  const validRooms = []
+  for (const result of metadataResults) {
+    if (!result.metadata) {
+      unrecognizedMarks.push({ index: result.index, name: result.name })
       continue
     }
-
-    const room = makeRoom(roomId, {
-      createdAt: normalizeIsoDate(metadata.createdAt, nowIso()),
-      updatedAt: normalizeIsoDate(metadata.updatedAt, nowIso())
+    const room = makeRoom(result.roomId, {
+      createdAt: normalizeIsoDate(result.metadata.createdAt, nowIso()),
+      updatedAt: normalizeIsoDate(result.metadata.updatedAt, nowIso())
     })
+    validRooms.push({ room, roomDir: result.roomDir, roomId: result.roomId, uploads: result.metadata.uploads })
+  }
 
-    for (const item of metadata.uploads) {
-      const upload = await restoreUpload(roomDir, roomId, item)
-      if (!upload) {
-        skippedUploads += 1
-        continue
-      }
+  // —— 第二层并发：把所有房间的上传恢复任务摊平成**一个**全局列表统一限流，
+  //    使并发 stat 数受 RESTORE_CONCURRENCY 约束（而非「房间数 × 每房间上传数」的乘积）。——
+  /** @type {{ room: Room, roomDir: string, roomId: string, item: unknown }[]} */
+  const uploadTasks = []
+  for (const vr of validRooms) {
+    for (const item of vr.uploads) {
+      uploadTasks.push({ room: vr.room, roomDir: vr.roomDir, roomId: vr.roomId, item })
+    }
+  }
 
-      room.uploads.set(upload.id, upload)
-      room.storedBytes += upload.quotaBytes
-      totalStoredBytes += upload.quotaBytes
-      restoredBytes += upload.quotaBytes
-      restoredUploads += 1
+  const uploadResults = await mapWithConcurrency(uploadTasks, RESTORE_CONCURRENCY, async (task) => {
+    const upload = await restoreUpload(task.roomDir, task.roomId, task.item)
+    return { room: task.room, upload }
+  })
+
+  // 串行归并：配额累加、计数与 Map 插入都在此完成，与旧的嵌套顺序循环逐字等价
+  for (const { room, upload } of uploadResults) {
+    if (!upload) {
+      skippedUploads += 1
+      continue
     }
 
-    room.stats.uploads = room.uploads.size
-    rooms.set(roomId, room)
+    room.uploads.set(upload.id, upload)
+    room.storedBytes += upload.quotaBytes
+    totalStoredBytes += upload.quotaBytes
+    restoredBytes += upload.quotaBytes
+    restoredUploads += 1
+  }
+
+  // 组装房间：按 validRooms 原序入 map，与旧循环遇到有效目录时的 rooms.set 顺序一致
+  for (const vr of validRooms) {
+    vr.room.stats.uploads = vr.room.uploads.size
+    rooms.set(vr.roomId, vr.room)
     restoredRooms += 1
   }
+
+  const unrecognized = unrecognizedMarks
+    .sort((a, b) => a.index - b.index)
+    .map((mark) => mark.name)
 
   if (restoredUploads > 0) {
     auditLog('rooms_restored', { rooms: restoredRooms, uploads: restoredUploads, bytes: restoredBytes })

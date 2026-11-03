@@ -29,8 +29,25 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
+            # 发布同样要过 CI 的门禁：一个从未跑过这些检查就打了 tag 的版本，正是配额 TOCTOU
+            # 或密钥泄露「一路绿灯直达用户」的路径。build 会顺带做 vue-tsc 类型检查，故不重复列。
+            - name: Check concurrency invariants
+              run: pnpm check:atomic
+
+            - name: Unit test
+              run: pnpm test
+
             - name: Build project
               run: pnpm build
+              env:
+                # canary：**公开的**非密钥值，只为让密钥守卫有可核对的目标；
+                # 与下面的 guard 步骤必须注入同一个值（口径与 ci.yml 完全一致）。
+                VITE_RELAY_TOKEN: coolector-canary-${{ github.run_id }}-${{ github.run_attempt }}
+
+            - name: Guard against secret leakage in build output
+              run: pnpm guard:no-secret
+              env:
+                VITE_RELAY_TOKEN: coolector-canary-${{ github.run_id }}-${{ github.run_attempt }}
 
             - name: Create Release
               uses: softprops/action-gh-release@v3

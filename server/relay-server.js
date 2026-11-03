@@ -17,7 +17,7 @@ import {
 import {
   ALLOWED_ORIGINS, HOST, MAX_FILE_BYTES, MAX_ROOMS, MAX_ROOM_BYTES_PER_WINDOW, MAX_TEXT_BYTES,
   MAX_UPLOAD_BYTES_PER_WINDOW, MAX_UPLOAD_NAME_BYTES, PORT, PREVIEW_TEXT_CHARS, RELAY_TOKEN,
-  ROOM_CLEANUP_INTERVAL_MS, RATE_LIMIT_WINDOW_MS, STREAM_TICKET_TTL_MS
+  ROOM_CLEANUP_INTERVAL_MS, RATE_LIMIT_WINDOW_MS, SSE_MAX_BUFFERED_BYTES, STREAM_TICKET_TTL_MS
 } from './relay-config.js'
 import {
   HttpError, auditLog, corsHeaders, isAuthorized, isPublicUpload,
@@ -54,6 +54,28 @@ function requireStoragePath(upload) {
 }
 
 /**
+ * 把「未包装的运行时异常」映射到语义正确的 HTTP 状态码。
+ *
+ * `HttpError` 在调用处已单独处理；这里只兜住漏网的错误，而它们**绝大多数是服务端故障**：
+ * 落盘写失败、按需读正文时文件已不在磁盘、权限/空间不足、内部不变量被破坏。过去统统回 400，
+ * 会把运维故障伪装成客户端错误 —— 分类错误直接把排查带偏（客户端还会朝"重试提交"的方向走，
+ * 而真正坏的是磁盘）。细节仍只进审计日志，绝不外泄给客户端。
+ *
+ * @param {unknown} error
+ * @returns {number}
+ */
+function statusForServerFault(error) {
+  const code = error instanceof Error ? /** @type {NodeJS.ErrnoException} */ (error).code : undefined
+  // ENOENT/目录类型不符：元数据还在、正文已不在磁盘 → 资源确实取不到，404 比 400 准确
+  if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return 404
+  // 容量/配额类磁盘错误：存储不足，507 贴合本服务的配额语义
+  if (code === 'ENOSPC' || code === 'EDQUOT') return 507
+  // 文件描述符耗尽等瞬时过载 → 503 提示客户端稍后重试
+  if (code === 'EMFILE' || code === 'ENFILE') return 503
+  return 500
+}
+
+/**
  * @param {import('node:http').IncomingMessage} req
  * @param {Buffer} bodyBuffer 请求体原始字节
  * @param {import('node:http').IncomingHttpHeaders} headers
@@ -77,7 +99,16 @@ function parseUploadMetadata(req, bodyBuffer, headers, query) {
       throw new HttpError(400, 'Invalid JSON body')
     }
 
-    const fileName = raw.name ?? raw.fileName
+    if (raw === null || typeof raw !== 'object') {
+      // 例如正文恰为 `null`/标量：`raw.name` 会抛 TypeError，应归为 400 而非 500
+      throw new HttpError(400, 'Invalid JSON body')
+    }
+
+    const fileName = typeof raw.name === 'string'
+      ? raw.name
+      : typeof raw.fileName === 'string'
+        ? raw.fileName
+        : null
     if (!fileName) {
       throw new HttpError(400, 'Missing file name')
     }
@@ -162,7 +193,8 @@ async function handleCreateRoom(req, res) {
       const parsed = JSON.parse(body.toString('utf8'))
       requestedId = sanitizeRoomId(parsed.roomId ?? parsed.id)
     } catch {
-      throw new Error('Invalid JSON body')
+      // 客户端提交了非法 JSON：是 400（客户端错误），不能被顶层按服务端故障归类成 500
+      throw new HttpError(400, 'Invalid JSON body')
     }
   }
 
@@ -426,7 +458,8 @@ function handleEvents(req, res, room) {
     }
   })
 
-  while (room.queue.length > 0 && res.writable) {
+  while (room.queue.length > 0 && res.writable && res.writableLength <= SSE_MAX_BUFFERED_BYTES) {
+    // 背压上界内的部分先重放；超出即停，未发的仍留在队列里，等接收端下一次重连再续
     const event = room.queue.shift()
     // 上面的 length > 0 已保证非空；这行只为把类型从 `… | undefined` 收窄，不改变运行时行为
     if (!event) break
@@ -600,8 +633,11 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    // 任何未包装的异常一律脱敏，细节只落审计日志
-    writeJson(res, 400, { error: 'Bad request' }, corsHeaders(req))
+    // 未包装的异常默认是**服务端故障**：按 errno code 归类到语义正确的状态码，
+    // 而不是统统伪装成 400 客户端错误（细节只进上面那条审计日志，不外泄）
+    const statusCode = statusForServerFault(error)
+    const safeMessage = statusCode === 404 ? 'Resource not found' : 'Internal server error'
+    writeJson(res, statusCode, { error: safeMessage }, corsHeaders(req))
   }
 })
 

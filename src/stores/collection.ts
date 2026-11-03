@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { extractStudentId, normalizeComparableName } from '../utils/filename'
 
 export interface CollectionItem {
@@ -14,9 +14,37 @@ export interface CollectionItem {
 /** 允许走子串包含匹配的最短长度，避免单字或 2–3 字的名单条目误匹配 */
 const FUZZY_MIN_LENGTH = 4
 
+/** 名单里每条预计算好的匹配字段，避免「每个上传文件 × 每条名单」反复归一化 */
+interface RosterEntry {
+    item: CollectionItem
+    candidateName: string
+    candidateStudentId: string | null
+}
+
 export const useCollectionStore = defineStore('collection', () => {
     const collectionList = ref<CollectionItem[]>([])
     const isLoading = ref(false)
+
+    /**
+     * 反应式派生的名册索引：把原先 checkFileStatus 每次都对整份名单跑
+     * normalizeComparableName + 两次正则抽取的 O(N×M) 开销，降为「名单变动时一次性 O(N)」。
+     * 刻意用 computed 从 collectionList.value 派生，而非只在 loadCollectionList 里手工建 ——
+     * 否则任何直接给 collectionList 赋值的用法（测试就是这么写的）都会读到空索引而漏配。
+     */
+    const rosterIndex = computed<RosterEntry[]>(() => collectionList.value
+        .map(item => ({
+            item,
+            candidateName: normalizeComparableName(item.filePattern),
+            candidateStudentId: extractStudentId(item.filePattern)
+        }))
+        .filter(entry => entry.candidateName.length > 0))
+
+    /**
+     * 文件名 → 匹配结果的记忆化。依赖只来自「名单内容 + 文件名」，故名单引用一变即失效：
+     * 下面按 rosterIndex.value 的引用变化同步清空，不依赖 watch 的异步 flush，杜绝脏读。
+     */
+    const matchCache = new Map<string, CollectionItem | null>()
+    let cacheRosterRef: RosterEntry[] | null = null
 
     const loadCollectionList = async (file: File) => {
         isLoading.value = true
@@ -51,34 +79,42 @@ export const useCollectionStore = defineStore('collection', () => {
 
     /** 分级匹配：完全相等 > 学号相等 > 子串包含，避免名单里「张」误匹配所有含张的文件名 */
     const checkFileStatus = (fileName: string): CollectionItem | null => {
+        // 名单引用一变（loadCollectionList / clearCollection / 直接赋值）即失效，同步判定不依赖 watch flush
+        const roster = rosterIndex.value
+        if (roster !== cacheRosterRef) {
+            matchCache.clear()
+            cacheRosterRef = roster
+        } else if (matchCache.has(fileName)) {
+            return matchCache.get(fileName) ?? null
+        }
+
         const targetName = normalizeComparableName(fileName)
         if (!targetName) return null
 
         const targetStudentId = extractStudentId(fileName)
         let fuzzyMatch: CollectionItem | null = null
 
-        for (const item of collectionList.value) {
-            const candidateName = normalizeComparableName(item.filePattern)
-            if (!candidateName) continue
-
-            if (candidateName === targetName) {
-                return item
+        for (const entry of roster) {
+            if (entry.candidateName === targetName) {
+                matchCache.set(fileName, entry.item)
+                return entry.item
             }
 
-            const candidateStudentId = extractStudentId(item.filePattern)
-            if (targetStudentId && candidateStudentId === targetStudentId) {
-                return item
+            if (targetStudentId && entry.candidateStudentId === targetStudentId) {
+                matchCache.set(fileName, entry.item)
+                return entry.item
             }
 
-            const [shorter, longer] = candidateName.length <= targetName.length
-                ? [candidateName, targetName]
-                : [targetName, candidateName]
+            const [shorter, longer] = entry.candidateName.length <= targetName.length
+                ? [entry.candidateName, targetName]
+                : [targetName, entry.candidateName]
 
             if (shorter.length >= FUZZY_MIN_LENGTH && longer.includes(shorter)) {
-                fuzzyMatch ??= item
+                fuzzyMatch ??= entry.item
             }
         }
 
+        matchCache.set(fileName, fuzzyMatch)
         return fuzzyMatch
     }
 

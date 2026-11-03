@@ -23,9 +23,23 @@ import {
 import { openRelayEventStream } from '../utils/relay-sse'
 import type { RelaySseConnection } from '../utils/relay-sse'
 import type {
-  LogEntry, RelayEventEnvelope, RelayRoomResponse, RelayUploadSummary,
-  RoomSnapshot, UploadCreatedData
+  LogEntry, RelayEventEnvelope, RelayRoomResponse, RelayUploadSummary, RoomSnapshot
 } from '../utils/relay-types'
+import {
+  parseEventEnvelope, parseRoomResponse, parseRoomSnapshot,
+  parseStreamTicket, parseUploadCreatedData, parseUploadDetailsResponse
+} from '../utils/relay-validate'
+
+/**
+ * 控制面请求（建房 / 换票 / 房间状态）都是小的 JSON 往返。给它们一个墙钟超时，
+ * 是为了修掉一个可复现的死角：Relay 挂起（TCP 连上但不回响应）时，此前没有任何超时，
+ * `connect()` 会永远停在 `'connecting'`、提交按钮长期禁用，用户无从自愈。
+ * 有界失败远好过无限挂起。
+ */
+const CONTROL_TIMEOUT_MS = 15000
+
+/** 按需拉正文可能传较大文件、且走公网，超时放宽；但仍是有界失败而非无限挂起。 */
+const DETAILS_TIMEOUT_MS = 60000
 
 export function useRelayReceiver() {
 
@@ -76,6 +90,12 @@ export function useRelayReceiver() {
   const reconnectAttempts = ref(0)
   let manualDisconnect = false
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * 连接世代号：每次 connect()/disconnect 递增。并发或交叠的 connect（如重连定时器与用户手动
+   * 点击同时触发）据此判定「我还是最新的那次吗」——陈旧尝试在跨越 await 后一律静默退出，
+   * 不再改写 connectionState/statusMessage/stream，也不为已被取代的连接触发重连。
+   */
+  let connectGen = 0
 
   const statusLabel = computed(() => {
     switch (connectionState.value) {
@@ -113,6 +133,7 @@ export function useRelayReceiver() {
     const response = await fetch(`${baseUrl}/api/rooms`, {
       method: 'POST',
       headers: withAuth({ 'Content-Type': 'application/json' }),
+      signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
       body
     })
 
@@ -128,7 +149,7 @@ export function useRelayReceiver() {
       throw new Error(payload?.error ?? `房间创建失败（HTTP ${response.status}）`)
     }
 
-    return response.json() as Promise<RelayRoomResponse>
+    return parseRoomResponse(await response.json())
   }
 
   /**
@@ -141,9 +162,12 @@ export function useRelayReceiver() {
     if (!stateUrl.value) return
 
     try {
-      const response = await fetch(toRelayRequestUrl(stateUrl.value), { headers: withAuth() })
-      if (!response.ok) return
-      roomState.value = await response.json() as RoomSnapshot
+      const response = await fetch(toRelayRequestUrl(stateUrl.value), { headers: withAuth(), signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) })
+      if (!response.ok) {
+        pushEventLog('warn', `刷新房间状态失败（HTTP ${response.status}）`)
+        return
+      }
+      roomState.value = parseRoomSnapshot(await response.json())
     } catch (error) {
       // 调用方是 `void refreshRoomState()`，这里必须自己收口，否则会变成未处理拒绝。
       // 网络抖动保持静默（与原先一致）；「地址被拒绝」是安全事件，必须显式告知用户。
@@ -154,8 +178,8 @@ export function useRelayReceiver() {
     }
   }
 
-  const parseEvent = <T,>(data: string) => {
-    return JSON.parse(data) as RelayEventEnvelope<T>
+  const parseEvent = <T,>(data: string): RelayEventEnvelope<T> => {
+    return parseEventEnvelope<T>(JSON.parse(data))
   }
 
   const pushEventLog = (type: string, message: string, createdAt = new Date().toISOString()) => {
@@ -168,6 +192,15 @@ export function useRelayReceiver() {
       },
       ...recentEvents.value
     ].slice(0, 6)
+  }
+
+  /**
+   * 记录一条被跳过的畸形 SSE 帧。
+   * 单帧坏（JSON.parse 抛错 / 字段缺失）不该撕裂整条连接，也不该留下未处理拒绝 —— 就地吞掉并告知用户。
+   */
+  const noteBadFrame = (type: string, error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    pushEventLog('error', `忽略畸形事件（${type}）：${message}`)
   }
 
   const MAX_RECONNECT_ATTEMPTS = 8
@@ -251,13 +284,12 @@ export function useRelayReceiver() {
       return upload
     }
 
-    const response = await fetch(toRelayRequestUrl(upload.detailsUrl), { headers: withAuth() })
+    const response = await fetch(toRelayRequestUrl(upload.detailsUrl), { headers: withAuth(), signal: AbortSignal.timeout(DETAILS_TIMEOUT_MS) })
     if (!response.ok) {
       throw new Error(`拉取文件正文失败（HTTP ${response.status}）`)
     }
 
-    const payload = await response.json() as { upload: RelayUploadSummary }
-    return payload.upload
+    return parseUploadDetailsResponse(await response.json())
   }
 
   /**
@@ -293,8 +325,8 @@ export function useRelayReceiver() {
   }
 
   const handleUploadCreated = async (data: string) => {
-    const payload = parseEvent<UploadCreatedData>(data)
-    const { upload, roomId: uploadRoomId } = payload.data
+    const payload = parseEvent<unknown>(data)
+    const { upload, roomId: uploadRoomId } = parseUploadCreatedData(payload.data)
 
     try {
       const full = await fetchUploadDetails(upload)
@@ -321,17 +353,22 @@ export function useRelayReceiver() {
 
     const response = await fetch(toRelayRequestUrl(room.streamTicketUrl), {
       method: 'POST',
-      headers: withAuth()
+      headers: withAuth(),
+      signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS)
     })
     if (!response.ok) {
       throw new Error(`获取流票据失败（HTTP ${response.status}）`)
     }
 
-    const payload = await response.json() as { ticket: string }
-    return `${streamUrl}?ticket=${encodeURIComponent(payload.ticket)}`
+    const ticket = parseStreamTicket(await response.json())
+    return `${streamUrl}?ticket=${encodeURIComponent(ticket)}`
   }
 
   const connect = async (isReconnect = false) => {
+    // 本次尝试的世代号：跨越任一 await 后若已被更新的 connect/disconnect 取代，则静默退出。
+    const gen = ++connectGen
+    const isStale = () => gen !== connectGen
+
     // 首次连接重置计数与手动断开标记；重连复用已有参数
     if (!isReconnect) {
       reconnectAttempts.value = 0
@@ -363,44 +400,70 @@ export function useRelayReceiver() {
       }
 
       const room = await ensureRoom(baseUrl, targetRoomId)
+      if (isStale()) return
       stateUrl.value = room.stateUrl
       roomId.value = room.roomId
       serverWeakRoomId.value = room.weakRoomId ?? null
 
       await refreshRoomState()
+      if (isStale()) return
 
       // SSE 的凭据走一次性短时效票据（避免长期 token 进 URL：日志 / Referer / 浏览器历史）。
       // 额外携带的 NGROK_SKIP_HEADER 是换掉 EventSource 的直接原因 —— 原生 EventSource
       // **无法设置任何请求头**，在 ngrok 免费隧道下会被浏览器警告页拦成 CORS 失败。
       const streamUrl = await buildStreamUrl(room)
+      if (isStale()) return
       stream.value = openRelayEventStream(streamUrl, NGROK_SKIP_HEADER, {
         onOpen: () => {
+          if (isStale()) return
           reconnectAttempts.value = 0
           connectionState.value = 'connected'
           statusMessage.value = `已连接到 ${room.roomId}`
           pushEventLog('open', `已连接到 ${room.roomId}`)
         },
         onEvent: ({ type, data }) => {
-          // 未知类型静默忽略：服务端将来新增事件时，旧前端不该因此报错或断连
-          if (type === 'receiver.ready') handleReceiverReady(data)
-          else if (type === 'room.created') handleRoomCreated(data)
-          else if (type === 'upload.created') void handleUploadCreated(data)
+          if (isStale()) return
+          // 逐事件隔离：单帧畸形绝不能冒泡到 relay-sse 的读循环——那里任何 throw 都会被当作连接
+          // 故障走 fail()→onError→重连，一条坏帧就会拆掉整条流，还会连带把这一帧对应的上传静默丢弃。
+          // 这里就地吞掉并记日志，保住连接与后续事件。未知类型仍静默忽略。
+          try {
+            if (type === 'receiver.ready') handleReceiverReady(data)
+            else if (type === 'room.created') handleRoomCreated(data)
+            else if (type === 'upload.created') {
+              // async handler 里的同步抛错（parseEvent / 字段缺失）会变成 rejected promise，
+              // 不接住就是未处理拒绝；就地收口并告知用户。
+              handleUploadCreated(data).catch((error) => noteBadFrame(type, error))
+            }
+          } catch (error) {
+            noteBadFrame(type, error)
+          }
         },
         // 与原生 EventSource 不同，这里**不自动重连**：统一走 scheduleReconnect，
         // 以复用它的手动断开守卫与重试上限（原生会自己无限重试，正是要避开的行为）
         onError: () => {
+          if (isStale()) return
           stream.value = null
           scheduleReconnect()
         }
       })
     } catch (error) {
+      // 已被更新的连接取代时，本次尝试的失败不再改写全局状态——否则会把新尝试刚置好的
+      // 'connecting'/'connected' 覆盖成陈旧尝试的错误，制造「闪断」假象。
+      if (isStale()) return
       connectionState.value = 'error'
-      statusMessage.value = error instanceof Error ? error.message : '建立连接失败'
+      if (error instanceof DOMException && error.name === 'TimeoutError') {
+        statusMessage.value = `连接超时：Relay 在 ${Math.round(CONTROL_TIMEOUT_MS / 1000)} 秒内未响应，请检查 Relay 地址与网络`
+      } else {
+        statusMessage.value = error instanceof Error ? error.message : '建立连接失败'
+      }
       pushEventLog('error', statusMessage.value)
     }
   }
 
   const disconnect = () => {
+    // 递增世代号：让任何仍在 await 中的 connect 尝试在恢复后立即判定为陈旧并退出，
+    // 不再于用户主动断开之后偷偷开出一条新流。
+    connectGen += 1
     manualDisconnect = true
     clearReconnectTimer()
     closeStream()
@@ -409,6 +472,7 @@ export function useRelayReceiver() {
   }
 
   onBeforeUnmount(() => {
+    connectGen += 1
     manualDisconnect = true
     clearReconnectTimer()
     closeStream()

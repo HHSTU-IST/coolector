@@ -234,6 +234,26 @@ describe('useRelayReceiver 的事件流', () => {
 
     wrapper.unmount()
   })
+
+  it('畸形 SSE 帧被就地跳过而不撕裂连接（逐事件隔离）', async () => {
+    const { wrapper } = await connectReceiver()
+
+    // 直接推一帧 data 为非法 JSON 的 receiver.ready：parseEvent 会抛错。
+    // 旧实现里这会冒泡到 relay-sse 的读循环 → fail() → onError → 重连，一条坏帧拆掉整条流；
+    // 逐事件隔离后就地吞掉并记日志，连接必须存活。
+    streamBody.push('event: receiver.ready\ndata: {"id":"x","type":"receiver.ready","createdAt":"2020-01-01T00:00:00.000Z","data":\n\n')
+    await flush()
+
+    expect(api.stream.value, '一条畸形帧不应拆除整条 SSE 连接').toBeTruthy()
+    expect(api.recentEvents.value.some((entry) => entry.message.includes('忽略畸形事件'))).toBe(true)
+
+    // 判别力对照：连接仍在，后续正常帧应照常处理 —— 不能是「直接断了所以没报错」蒙混过关
+    emit('receiver.ready', { roomId: ROOM_ID, message: '恢复后仍可达' })
+    await flush()
+    expect(api.recentEvents.value.some((entry) => entry.message.includes('恢复后仍可达'))).toBe(true)
+
+    wrapper.unmount()
+  })
 })
 
 /**

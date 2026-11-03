@@ -114,6 +114,10 @@ const isRelayUploading = ref(false)
 const relayUploadMessage = ref('')
 const relayUploadError = ref(false)
 
+// 发送方上传此前没有任何超时：Relay 挂起时界面会永远停在「正在通过 HTTP 上传…」，用户只能刷新。
+// 上传是大字节传输，给一个宽而**有限**的墙钟超时（120s）——有界失败远好过无限挂起。
+const RELAY_UPLOAD_TIMEOUT_MS = 120000
+
 /** 房间号偏弱时给出非阻断提示（房间号会被分享给发送方，过易猜则可能被灌文件） */
 const roomIdHint = computed(() => {
   const id = relayUploadRoomId.value.trim()
@@ -202,7 +206,7 @@ const uploadSelectedFileToRelay = async () => {
     })
 
     // 发送方（学生）不持有接收端管理密钥：房间 ID 本身即能力凭据，故不发送 Authorization
-    const response = await fetch(url, init)
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(RELAY_UPLOAD_TIMEOUT_MS) })
 
     const payload = await response.json().catch(() => null) as RelayUploadResponse | null
     if (!response.ok) {
@@ -225,7 +229,11 @@ const uploadSelectedFileToRelay = async () => {
     relayUploadMessage.value = `已发送到房间 ${targetRoomId}，接收端会实时收到该文件`
   } catch (error) {
     relayUploadError.value = true
-    relayUploadMessage.value = error instanceof Error ? error.message : 'HTTP 上传失败'
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      relayUploadMessage.value = `上传超时：Relay 在 ${Math.round(RELAY_UPLOAD_TIMEOUT_MS / 1000)} 秒内未响应，请检查 Relay 地址与网络后重试`
+    } else {
+      relayUploadMessage.value = error instanceof Error ? error.message : 'HTTP 上传失败'
+    }
   } finally {
     isRelayUploading.value = false
   }
