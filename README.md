@@ -2,7 +2,7 @@
 
 ![typescript](https://img.shields.io/badge/typescript-6.0+-blue.svg)
 ![vue](https://img.shields.io/badge/vue-3.5+-brightgreen.svg)
-![pinia](https://img.shields.io/badge/pinia-3.0+-ff6b6b.svg)
+![pinia](https://img.shields.io/badge/pinia-4.x-ff6b6b.svg)
 ![vite](https://img.shields.io/badge/vite-8.0+-yellow.svg)
 ![tailwind](https://img.shields.io/badge/tailwind-4.0+-38bdf8.svg)
 
@@ -30,7 +30,7 @@ Coolector 是一个现代化的文件收集器。
 
 - **前端框架**: Vue.js 3.5 (Composition API)
 - **编程语言**: TypeScript 6.0+
-- **状态管理**: Pinia 3.0+
+- **状态管理**: Pinia 4.x
 - **构建工具**: Vite 8.0+
 - **样式框架**: Tailwind CSS 4.0+
 - **UI 组件**: 自定义组件 + Tailwind 工具类

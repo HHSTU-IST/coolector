@@ -88,7 +88,7 @@
               </div>
               <div>
                 <p class="text-gray-500">存储用量</p>
-                <p class="font-medium" :class="storageUsageRatio >= 0.9 ? 'text-red-600' : 'text-gray-900'">
+                <p class="font-medium" :class="storageUsageRatio >= SIZE_WARN_RATIO ? 'text-red-600' : 'text-gray-900'">
                   {{ storageUsageLabel }}
                 </p>
               </div>
@@ -128,6 +128,7 @@
 <script setup lang="ts">
 import { useRelayReceiver } from '../composables/useRelayReceiver'
 import { relayTokenStorageAvailable } from '../utils/relay'
+import { SIZE_WARN_RATIO } from '../utils/limits'
 
 const {
   relayToken,

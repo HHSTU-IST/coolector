@@ -41,6 +41,9 @@ const CONTROL_TIMEOUT_MS = 15000
 /** 按需拉正文可能传较大文件、且走公网，超时放宽；但仍是有界失败而非无限挂起。 */
 const DETAILS_TIMEOUT_MS = 60000
 
+/** 接收端「最近事件」列表的滚动长度：只保留最近若干条供 UI 展示（曾是 pushEventLog 里的裸魔法数）。 */
+const MAX_RECENT_EVENTS = 6
+
 export function useRelayReceiver() {
 
   const fileStore = useFileStore()
@@ -191,7 +194,7 @@ export function useRelayReceiver() {
         createdAt
       },
       ...recentEvents.value
-    ].slice(0, 6)
+    ].slice(0, MAX_RECENT_EVENTS)
   }
 
   /**

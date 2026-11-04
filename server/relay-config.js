@@ -236,16 +236,36 @@ const MAX_TEXT_BYTES = Math.max(
   256 * 1024
 )
 
-// 请求体上限：contentBase64 相比原始字节膨胀约 4/3，**再加上信封里同时携带的 text**，
-// 最后留 JSON 字段与头部开销余量。
-// 过去只算 base64 膨胀，导致带提取正文的 docx 有效上限掉到约 8.55MB（名义 10MB）。
-const MAX_BODY_BYTES = pickDerived('MAX_BODY_BYTES')
-  ?? (Math.ceil((MAX_FILE_BYTES * 4) / 3) + MAX_TEXT_BYTES + 128 * 1024)
+/**
+ * 请求体上限的派生公式（单一事实源）：contentBase64 相比原始字节膨胀约 4/3，**再加上信封里
+ * 同时携带的 text**，最后留 JSON 字段与头部开销余量。
+ * 过去只算 base64 膨胀，导致带提取正文的 docx 有效上限掉到约 8.55MB（名义 10MB）。
+ *
+ * @param {number} fileBytes 单文件「解码后」上限（MAX_FILE_BYTES）
+ * @param {number} textBytes 提取正文上限（MAX_TEXT_BYTES）
+ * @returns {number}
+ */
+function deriveMaxBodyBytes(fileBytes, textBytes) {
+  return Math.ceil((fileBytes * 4) / 3) + textBytes + 128 * 1024
+}
 
-// 单个房间的配额上限。默认取全局的 1/8 —— 免凭据的发送方只能填满「自己那个房间」，
-// 而不是把全站配额吃光导致所有班级都上传失败。
+/**
+ * 单个房间配额上限的派生公式（单一事实源）。默认取全局的 1/8 —— 免凭据的发送方只能填满
+ * 「自己那个房间」，而不是把全站配额吃光导致所有班级都上传失败；但保留 8MB 下限，避免全局
+ * 配额被调得很小时房间几乎不可用。
+ *
+ * @param {number} totalBytes 整个上传目录的全局配额上限（MAX_TOTAL_UPLOAD_BYTES）
+ * @returns {number}
+ */
+function deriveRoomQuotaBytes(totalBytes) {
+  return Math.max(Math.floor(totalBytes / 8), 8 * 1024 * 1024)
+}
+
+const MAX_BODY_BYTES = pickDerived('MAX_BODY_BYTES')
+  ?? deriveMaxBodyBytes(MAX_FILE_BYTES, MAX_TEXT_BYTES)
+
 const MAX_ROOM_UPLOAD_BYTES = pickDerived('MAX_ROOM_UPLOAD_BYTES')
-  ?? Math.max(Math.floor(MAX_TOTAL_UPLOAD_BYTES / 8), 8 * 1024 * 1024)
+  ?? deriveRoomQuotaBytes(MAX_TOTAL_UPLOAD_BYTES)
 
 const MAX_QUEUE_EVENTS = pick('MAX_QUEUE_EVENTS')
 const MAX_ROOM_UPLOADS = pick('MAX_ROOM_UPLOADS')

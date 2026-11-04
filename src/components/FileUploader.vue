@@ -130,6 +130,7 @@ import type { FileInfo } from '../stores/file'
 import { useCollectionStore } from '../stores/collection'
 import { toast } from '../composables/useToast'
 import { formatFileSize } from '../utils/format'
+import { SIZE_WARN_RATIO } from '../utils/limits'
 
 const fileStore = useFileStore()
 const collectionStore = useCollectionStore()
@@ -138,7 +139,7 @@ const collectionInput = ref<HTMLInputElement>()
 const filenamePatternInput = ref(String(fileStore.filenamePattern))
 
 /** 体积接近上限时把数字标黄，让「再传就装不下」在拒绝之前就可见 */
-const totalSizeNearLimit = computed(() => fileStore.usedBytes >= MAX_TOTAL_SIZE * 0.9)
+const totalSizeNearLimit = computed(() => fileStore.usedBytes >= MAX_TOTAL_SIZE * SIZE_WARN_RATIO)
 
 const formatExtractedInfo = (file: FileInfo) => {
   const studentId = file.metadata.studentId ? `学号: ${file.metadata.studentId}` : '学号: 未识别'
@@ -192,7 +193,6 @@ const handleCollectionSelect = async (event: Event) => {
       fileStore.files.forEach(fileInfo => {
         markCollectionItemCollected(fileInfo.name)
       })
-      console.log('收集名单加载成功')
     } catch (error) {
       console.error('收集名单加载失败:', error)
       toast('收集名单加载失败，请检查文件格式', 'error')
